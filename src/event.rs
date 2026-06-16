@@ -10,12 +10,27 @@ use tokio::time::interval;
 
 use crate::app::App;
 
-/// Keep the terminal cursor hidden after every frame — the TUI draws its
-/// own styled block cursor.  (No IME position logic; we are in the alternate
-/// screen buffer where TSF-based IMEs cannot follow the cursor anyway.)
-fn hide_cursor() {
+/// Position the hardware cursor for IME support.
+///
+/// Uses absolute CUP (Cursor Position) followed by Hide cursor.
+/// We render in the main screen buffer (no alternate screen) so the
+/// TSF text store is properly associated with the displayed content.
+///
+/// The function panel cursor (e.g. picker search input) takes priority
+/// over the main input cursor.
+fn position_ime_cursor(app: &mut App) {
+    let Some((cx, cy)) = app.function_panel_cursor.or(app.input_cursor_screen) else { return };
+
     use std::io::Write;
-    let _ = write!(std::io::stdout(), "\x1B[?25l");
+
+    // Position cursor (so TSF-based IMEs can find it) but hide the
+    // terminal cursor — the TUI draws its own styled block cursor.
+    let _ = write!(
+        std::io::stdout(),
+        "\x1B[{};{}H\x1B[?25l",
+        cy + 1,
+        cx + 1,
+    );
     let _ = std::io::stdout().flush();
 }
 
@@ -77,7 +92,10 @@ where
             let _ = e;
         }
 
-        hide_cursor();
+        // Position the hardware cursor at the input field so TSF-based
+        // IMEs (WeChat Input Method, etc.) draw their candidate window
+        // at the correct location.
+        position_ime_cursor(app);
 
         tokio::select! {
             biased;
@@ -399,14 +417,6 @@ async fn handle_key(k: crossterm::event::KeyEvent, app: &mut App) {
         KeyCode::Home => app.input.move_home(),
         KeyCode::End => app.input.move_end(),
         KeyCode::Up => {
-            // Ctrl+Shift+Up is a terminal viewport-scroll command on
-            // Windows Terminal — intercept it here if it arrives so it
-            // does not also trigger history navigation.
-            if k.modifiers.contains(KeyModifiers::CONTROL)
-                && k.modifiers.contains(KeyModifiers::SHIFT)
-            {
-                return;
-            }
             if completion_is_focused(app) {
                 if let Some(idx) = completion_idx(app) {
                     if let crate::function::SidebarTab::Completion(s) =
@@ -420,11 +430,6 @@ async fn handle_key(k: crossterm::event::KeyEvent, app: &mut App) {
             }
         }
         KeyCode::Down => {
-            if k.modifiers.contains(KeyModifiers::CONTROL)
-                && k.modifiers.contains(KeyModifiers::SHIFT)
-            {
-                return;
-            }
             if completion_is_focused(app) {
                 if let Some(idx) = completion_idx(app) {
                     if let crate::function::SidebarTab::Completion(s) =
