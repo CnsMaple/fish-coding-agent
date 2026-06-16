@@ -190,12 +190,11 @@ fn render_settings(area: Rect, buf: &mut Buffer, cfg: &crate::config::Config, s:
             keys.sort();
             for (i, id) in keys.iter().enumerate() {
                 let is_active = cfg.active.as_deref() == Some(id.as_str());
-                let mut label = crate::config::id_display(id);
-                if let Some(entry) = cfg.entry(id) {
-                    if !entry.model.is_empty() {
-                        label.push_str(&format!(", {}", entry.model));
-                    }
-                }
+                let name = cfg.entry(id).and_then(|e| {
+                    if e.name.trim().is_empty() { None }
+                    else { Some(e.name.clone()) }
+                });
+                let mut label = name.unwrap_or_else(|| crate::config::id_display(id));
                 if is_active {
                     label.push_str("  [active]");
                 }
@@ -205,11 +204,7 @@ fn render_settings(area: Rect, buf: &mut Buffer, cfg: &crate::config::Config, s:
         SettingsLevel::NewProviderKind => {
             let ids = crate::config::Config::all_possible_ids();
             for (i, id) in ids.iter().enumerate() {
-                let exists = cfg.entries.contains_key(id);
-                let mut label = crate::config::id_display(id);
-                if exists {
-                    label.push_str("  [exists]");
-                }
+                let label = crate::config::id_display(id);
                 body_lines.push(list_item(s.cursor == i, &label, None));
             }
         }

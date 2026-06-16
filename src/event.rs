@@ -1292,7 +1292,16 @@ pub(crate) fn handle_ctrl_n(app: &mut App) {
 fn handle_settings_back(app: &mut App, state: &mut crate::function::SettingsState) {
     use crate::function::SettingsLevel;
     match &state.level {
-        SettingsLevel::ConfigForm(_) | SettingsLevel::NewProviderKind | SettingsLevel::ExistingActions(_) => {
+        SettingsLevel::ConfigForm(form) => {
+            if form.is_new {
+                state.level = SettingsLevel::NewProviderKind;
+            } else {
+                state.level = SettingsLevel::ProviderList;
+            }
+            state.cursor = 0;
+            state.clamp_cursor(&app.config);
+        }
+        SettingsLevel::NewProviderKind | SettingsLevel::ExistingActions(_) => {
             state.level = SettingsLevel::ProviderList;
             state.cursor = 0;
             state.clamp_cursor(&app.config);
@@ -1357,22 +1366,10 @@ fn handle_settings_enter(app: &mut App, state: &mut crate::function::SettingsSta
         SettingsLevel::NewProviderKind => {
             let ids = crate::config::Config::all_possible_ids();
             match ids.get(cursor).and_then(|id| parse_id(id).map(|(k, m)| (id, k, m))) {
-                Some((id, kind, mode)) => {
-                    if app.config.entries.contains_key(id) {
-                        use crate::function::notifications::ToastLevel;
-                        app.notify(
-                            ToastLevel::Warn,
-                            format!("{id} already exists; editing instead"),
-                        );
-                        let cfg = app.config.entry(id).cloned().unwrap_or_default();
-                        SettingsLevel::ConfigForm(
-                            crate::function::ConfigFormState::new_for_edit(id.clone(), &cfg, mode),
-                        )
-                    } else {
-                        SettingsLevel::ConfigForm(
-                            crate::function::ConfigFormState::new_for_create(kind, mode),
-                        )
-                    }
+                Some((_id, kind, mode)) => {
+                    SettingsLevel::ConfigForm(
+                        crate::function::ConfigFormState::new_for_create(kind, mode),
+                    )
                 }
                 None => SettingsLevel::NewProviderKind,
             }
