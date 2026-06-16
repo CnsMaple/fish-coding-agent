@@ -149,7 +149,7 @@ fn render_completion(area: Rect, buf: &mut Buffer, s: &crate::function::Completi
             if i == s.cursor {
                 lines.push(Line::from(vec![
                     Span::styled("> ", Theme::bold()),
-                    Span::styled(c.clone(), Theme::reversed()),
+                    Span::raw(c.clone()),
                 ]));
             } else {
                 lines.push(Line::from(Span::raw(format!("  {c}"))));
@@ -324,7 +324,7 @@ fn list_item(focused: bool, label: &str, value: Option<String>) -> Line<'static>
     let mut spans: Vec<Span<'static>> = Vec::new();
     if focused {
         spans.push(Span::styled("> ", Theme::bold()));
-        spans.push(Span::styled(label.to_string(), Theme::reversed()));
+        spans.push(Span::raw(label.to_string()));
     } else {
         spans.push(Span::raw("  "));
         spans.push(Span::raw(label.to_string()));
@@ -332,9 +332,15 @@ fn list_item(focused: bool, label: &str, value: Option<String>) -> Line<'static>
     if let Some(v) = value {
         spans.push(Span::raw(":  "));
         if v.is_empty() {
-            spans.push(Span::styled("<empty>".to_string(), Theme::dim()));
+            if focused {
+                spans.push(Span::styled("<empty>", Theme::dim()));
+                spans.push(Span::styled("|", Theme::cursor_visible()));
+            } else {
+                spans.push(Span::styled("<empty>".to_string(), Theme::dim()));
+            }
         } else if focused {
-            spans.push(Span::styled(v, Theme::reversed()));
+            spans.push(Span::raw(v));
+            spans.push(Span::styled("|", Theme::cursor_visible()));
         } else {
             spans.push(Span::raw(v));
         }
@@ -403,7 +409,7 @@ fn render_picker(
             let line = if is_cursor {
                 Line::from(vec![
                     Span::styled("> ", Theme::bold()),
-                    Span::styled(model.id.clone(), Theme::reversed()),
+                    Span::raw(model.id.clone()),
                 ])
             } else {
                 Line::from(Span::raw(format!("  {}", model.id)))
@@ -471,7 +477,7 @@ fn render_provider_picker(
             let mut spans: Vec<Span<'static>> = Vec::new();
             if is_cursor {
                 spans.push(Span::styled("> ", Theme::bold()));
-                spans.push(Span::styled(entry.display.clone(), Theme::reversed()));
+                spans.push(Span::raw(entry.display.clone()));
             } else {
                 spans.push(Span::raw("  "));
                 spans.push(Span::raw(entry.display.clone()));
@@ -552,7 +558,7 @@ fn render_thinking_picker(
             if pos == s.cursor {
                 list_lines.push(Line::from(vec![
                     Span::styled("> ", Theme::bold()),
-                    Span::styled(level.to_string(), Theme::reversed()),
+                    Span::raw(level.to_string()),
                 ]));
             } else {
                 list_lines.push(Line::from(Span::raw(format!("  {level}"))));
@@ -616,7 +622,7 @@ fn render_timeline_picker(
                 let line = Line::from(vec![
                     Span::styled("> ", Theme::bold()),
                     tag_span,
-                    Span::styled(entry.preview.clone(), Theme::reversed()),
+                    Span::raw(entry.preview.clone()),
                 ]);
                 buf.set_line(list_area.x, y, &line, list_area.width);
             } else {

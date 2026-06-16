@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use anyhow::Result;
+use crossterm::cursor::{RestorePosition, SavePosition};
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
 use crossterm::execute;
 use crossterm::terminal::{
@@ -44,15 +45,6 @@ async fn main() -> Result<()> {
 
     let res = event::run(&mut terminal, &mut app).await;
 
-    disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        Clear(ClearType::All),
-        crossterm::cursor::MoveTo(0, 9999),
-        DisableMouseCapture
-    )?;
-    terminal.show_cursor()?;
-
     if let Err(e) = res {
         eprintln!("error: {e:#}");
     }
@@ -61,8 +53,8 @@ async fn main() -> Result<()> {
 
 /// Install a panic hook so that, instead of flashing a backtrace to stderr
 /// and instantly dropping back to the shell, we:
-///   1. Best-effort leave the alternate screen + disable raw mode so the
-///      terminal is usable after the crash.
+///   1. Best-effort disable raw mode + clear the TUI area so the terminal
+///      is usable after the crash.
 ///   2. Print the panic message and (if `RUST_BACKTRACE=1|full`) the
 ///      backtrace to stderr.
 ///   3. Persist the same info to `fish-coding-agent-panic.log` in the
@@ -139,6 +131,7 @@ fn install_panic_hook() {
 struct TerminalGuard;
 impl TerminalGuard {
     fn enter() -> Result<Self> {
+        execute!(std::io::stdout(), SavePosition)?;
         enable_raw_mode()?;
         execute!(std::io::stdout(), EnableMouseCapture)?;
         Ok(Self)
@@ -146,15 +139,14 @@ impl TerminalGuard {
 }
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
-        let _ = disable_raw_mode();
-        let h = crossterm::terminal::size()
-            .map(|(_, h)| h.saturating_sub(1))
-            .unwrap_or(0);
         let _ = execute!(
             std::io::stdout(),
-            Clear(ClearType::All),
-            crossterm::cursor::MoveTo(0, h),
-            DisableMouseCapture
+            RestorePosition,
+            Clear(ClearType::FromCursorDown),
+            crossterm::cursor::MoveTo(0, 9999),
+            DisableMouseCapture,
+            crossterm::cursor::Show,
         );
+        let _ = disable_raw_mode();
     }
 }

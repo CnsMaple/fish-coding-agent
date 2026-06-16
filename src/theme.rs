@@ -75,4 +75,10 @@ impl Theme {
         // surrounding text foreground.
         Self::base()
     }
+
+    /// Visible cursor indicator for form fields. Uses bold so the cursor
+    /// character stands out without relying on REVERSED background.
+    pub fn cursor_visible() -> Style {
+        Self::bold()
+    }
 }

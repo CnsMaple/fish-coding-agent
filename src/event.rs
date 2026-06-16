@@ -1547,54 +1547,58 @@ fn settings_save_form(app: &mut App, form: crate::function::ConfigFormState) {
     app.status.set_provider_name(&app.config.active_name());
     app.status.set_model(&app.config.active_model_display());
 
-    // Open the model picker and trigger a fetch so the user can pick one
-    // of the remote models right after configuring a provider.
+    // Open the model picker so the user can pick a model. Validate first
+    // so we can set the picker's initial state correctly (fetching vs
+    // idle with an error message).
     if let Some(k) = app.config.active_kind() {
-        let mut state = crate::function::ModelPickerState::new(k);
-        state.fetching = true;
-        app.function.push(crate::function::SidebarTab::ModelPicker(state));
-        app.function_visible = true;
-        app.acknowledge_panel();
-
         let active_id = match app.config.active.clone() {
             Some(id) => id,
             None => return,
         };
-        if let Err(e) = app.config.validate_provider(&active_id) {
-            app.notify(ToastLevel::Fail, e);
-            return;
+
+        let mut state = crate::function::ModelPickerState::new(k);
+        match app.config.validate_provider(&active_id) {
+            Ok(_) => state.fetching = true,
+            Err(e) => state.fetch_error = Some(e),
         }
-        let base = app
-            .config
-            .entry(&active_id)
-            .map(|c| c.base_url.clone())
-            .unwrap_or_default();
-        let key = app.config.effective_api_key(&active_id).unwrap_or_default();
-        let client = app.reqwest.clone();
-        if let Some(tx) = app.msg_tx.clone() {
-            tokio::spawn(async move {
-                match crate::providers::list_models(&client, k, &base, &key).await {
-                    Ok(models) => {
-                        let _ = tx.send(AppMsg::ModelsFetched {
-                            provider: k,
-                            base_url: base,
-                            api_key: key,
-                            models,
-                        });
+        let should_fetch = state.fetching;
+        app.function.push(crate::function::SidebarTab::ModelPicker(state));
+        app.function_visible = true;
+        app.acknowledge_panel();
+
+        if should_fetch {
+            let base = app
+                .config
+                .entry(&active_id)
+                .map(|c| c.base_url.clone())
+                .unwrap_or_default();
+            let key = app.config.effective_api_key(&active_id).unwrap_or_default();
+            let client = app.reqwest.clone();
+            if let Some(tx) = app.msg_tx.clone() {
+                tokio::spawn(async move {
+                    match crate::providers::list_models(&client, k, &base, &key).await {
+                        Ok(models) => {
+                            let _ = tx.send(AppMsg::ModelsFetched {
+                                provider: k,
+                                base_url: base,
+                                api_key: key,
+                                models,
+                            });
+                        }
+                        Err(e) => {
+                            let no_endpoint = matches!(
+                                e.downcast_ref::<crate::providers::ProviderError>(),
+                                Some(crate::providers::ProviderError::NoModelsEndpoint)
+                            );
+                            let _ = tx.send(AppMsg::ModelsFetchFailed {
+                                provider: k,
+                                error: format!("{e}"),
+                                no_endpoint,
+                            });
+                        }
                     }
-                    Err(e) => {
-                        let no_endpoint = matches!(
-                            e.downcast_ref::<crate::providers::ProviderError>(),
-                            Some(crate::providers::ProviderError::NoModelsEndpoint)
-                        );
-                        let _ = tx.send(AppMsg::ModelsFetchFailed {
-                            provider: k,
-                            error: format!("{e}"),
-                            no_endpoint,
-                        });
-                    }
-                }
-            });
+                });
+            }
         }
     }
 }
