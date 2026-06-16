@@ -1,0 +1,945 @@
+use crate::config::{Config, ProviderId, ProviderKind};
+use crate::function::notifications::{HitRate, ModelCache, Notifications};
+use crate::session::{Role, Session};
+use chrono::{DateTime, Utc};
+use std::collections::VecDeque;
+use std::path::PathBuf;
+
+pub mod notifications;
+
+/// Transient command-completion state, shown while the input buffer
+/// looks like a partial slash command.
+#[derive(Debug)]
+pub struct CompletionState {
+    pub candidates: Vec<String>,
+    pub cursor: usize,
+}
+
+impl CompletionState {
+    pub fn new(prefix: &str) -> Self {
+        let candidates = crate::input::completion_candidates_for(prefix);
+        let mut s = Self {
+            candidates,
+            cursor: 0,
+        };
+        s.clamp_cursor();
+        s
+    }
+
+    pub fn clamp_cursor(&mut self) {
+        if self.candidates.is_empty() {
+            self.cursor = 0;
+        } else if self.cursor >= self.candidates.len() {
+            self.cursor = self.candidates.len() - 1;
+        }
+    }
+
+    pub fn move_up(&mut self) {
+        if self.candidates.is_empty() {
+            return;
+        }
+        if self.cursor == 0 {
+            self.cursor = self.candidates.len() - 1;
+        } else {
+            self.cursor -= 1;
+        }
+    }
+
+    pub fn move_down(&mut self) {
+        if self.candidates.is_empty() {
+            return;
+        }
+        self.cursor = (self.cursor + 1) % self.candidates.len();
+    }
+}
+
+/// One sidebar tab entry.
+#[derive(Debug)]
+pub enum SidebarTab {
+    Notifications,
+    Completion(CompletionState),
+    Settings(SettingsState),
+    ModelPicker(ModelPickerState),
+    ProviderPicker(ProviderPickerState),
+    ThinkingPicker(ThinkingPickerState),
+    TimelinePicker(TimelinePickerState),
+    Hotkey,
+}
+
+// =====================================================================
+// Settings: hierarchical navigation (no more double-tab).
+// =====================================================================
+
+/// Configurable field within a [`ConfigFormState`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigField {
+    Name = 0,
+    BaseUrl = 1,
+    KeyOrEnv = 2,
+    Save = 3,
+    Exit = 4,
+}
+
+/// State for the "edit / create provider" form.
+#[derive(Debug, Clone)]
+pub struct ConfigFormState {
+    pub is_new: bool,
+    pub id: String, // target entry id (kind:mode)
+    /// Optional display name. When empty, the kind name (`openai` /
+    /// `anthropic`) is used in the status bar.
+    pub name: String,
+    pub base_url: String,
+    pub key_or_env: String,
+    /// The field the user is currently editing.
+    pub focused: ConfigField,
+    /// Error message to display inline (e.g. base_url is required).
+    pub form_error: Option<String>,
+    /// For edit forms in Key mode: whether the user has touched the api_key
+    /// field. Starts false (the saved key is hidden behind a placeholder);
+    /// flips to true on the first character or backspace, at which point the
+    /// value is cleared and the user can type a new key. On save, if this is
+    /// still false, the original api_key is preserved.
+    pub key_modified: bool,
+}
+
+impl ConfigFormState {
+    pub fn new_for_create(kind: crate::config::ProviderKind, mode: crate::config::ProviderMode) -> Self {
+        let default_url = match kind {
+            crate::config::ProviderKind::Openai => "https://api.openai.com/v1".to_string(),
+            crate::config::ProviderKind::Anthropic => "https://api.anthropic.com".to_string(),
+        };
+        let default_env = match kind {
+            crate::config::ProviderKind::Openai => "OPENAI_API_KEY".to_string(),
+            crate::config::ProviderKind::Anthropic => "ANTHROPIC_API_KEY".to_string(),
+        };
+        let id = crate::config::make_id(kind, mode);
+        let key_or_env = match mode {
+            crate::config::ProviderMode::Key => String::new(),
+            crate::config::ProviderMode::Env => default_env,
+        };
+        Self {
+            is_new: true,
+            id,
+            name: String::new(),
+            base_url: default_url,
+            key_or_env,
+            focused: ConfigField::Name,
+            form_error: None,
+            key_modified: false,
+        }
+    }
+
+    pub fn new_for_edit(id: String, cfg: &crate::config::ProviderConfig, mode: crate::config::ProviderMode) -> Self {
+        let key_or_env = match mode {
+            crate::config::ProviderMode::Key => cfg.api_key.clone(),
+            crate::config::ProviderMode::Env => cfg.api_key_env.clone(),
+        };
+        Self {
+            is_new: false,
+            id,
+            name: cfg.name.clone(),
+            base_url: cfg.base_url.clone(),
+            key_or_env,
+            focused: ConfigField::Name,
+            form_error: None,
+            key_modified: false,
+        }
+    }
+
+    pub fn field_label(&self, f: ConfigField) -> &'static str {
+        match f {
+            ConfigField::Name => "name",
+            ConfigField::BaseUrl => "base url *",
+            ConfigField::KeyOrEnv => {
+                if crate::config::parse_id(&self.id)
+                    .map(|(_, m)| m == crate::config::ProviderMode::Key)
+                    .unwrap_or(false)
+                {
+                    "api key"
+                } else {
+                    "env name"
+                }
+            }
+            ConfigField::Save => "save",
+            ConfigField::Exit => "exit",
+        }
+    }
+}
+
+/// The level currently being shown in the settings tab.
+#[derive(Debug)]
+pub enum SettingsLevel {
+    /// Top: "set provider" and "thinking display".
+    TopLevel,
+    /// Provider list: "new provider" + existing entries.
+    ProviderList,
+    /// Choose (kind, mode) for a new entry.
+    NewProviderKind,
+    /// Action menu for an existing entry: edit / delete.
+    ExistingActions(String),
+    /// Edit / create form.
+    ConfigForm(ConfigFormState),
+    /// Thinking display mode chooser.
+    ThinkingDisplayList,
+    /// Enter/newline behavior chooser.
+    EnterBehaviorList,
+}
+
+impl SettingsLevel {
+    /// Title shown in the settings header (breadcrumb-like).
+    pub fn title(&self) -> String {
+        match self {
+            SettingsLevel::TopLevel => "settings".to_string(),
+            SettingsLevel::ProviderList => "settings / set provider".to_string(),
+            SettingsLevel::NewProviderKind => "settings / set provider / new".to_string(),
+            SettingsLevel::ExistingActions(id) => {
+                format!("settings / set provider / {}", crate::config::id_display(id))
+            }
+            SettingsLevel::ConfigForm(s) => {
+                let stage = if s.is_new { "new" } else { "edit" };
+                format!(
+                    "settings / set provider / {} / {}",
+                    stage,
+                    crate::config::id_display(&s.id)
+                )
+            }
+            SettingsLevel::ThinkingDisplayList => "settings / thinking display".to_string(),
+            SettingsLevel::EnterBehaviorList => "settings / enter behavior".to_string(),
+        }
+    }
+
+    /// Shortcut hint rendered in dim gray at the bottom of the panel.
+    pub fn hint(&self) -> &'static str {
+        match self {
+            SettingsLevel::TopLevel => "Up/Down: nav | Enter: select | Esc: close",
+            SettingsLevel::ProviderList => "Up/Down: nav | Enter: select | Esc: back",
+            SettingsLevel::NewProviderKind => "Up/Down: nav | Enter: select | Esc: back",
+            SettingsLevel::ExistingActions(_) => "Up/Down: nav | Enter: select | Esc: back",
+            SettingsLevel::ConfigForm(_) => {
+                "Up/Down: nav | type: edit | Enter: confirm | Esc: back"
+            }
+            SettingsLevel::ThinkingDisplayList | SettingsLevel::EnterBehaviorList => {
+                "Up/Down: nav | Enter: select | Esc: back"
+            }
+        }
+    }
+}
+
+/// State of the settings sidebar tab.
+#[derive(Debug)]
+pub struct SettingsState {
+    /// Current level in the navigation stack.
+    pub level: SettingsLevel,
+    /// Cursor inside the current list view (or the focused field for ConfigForm).
+    pub cursor: usize,
+    /// Validation error to surface inline in the form (e.g. empty base_url).
+    pub form_error: Option<String>,
+    /// Error reason when config failed to parse, so we can show it.
+    pub load_error: Option<String>,
+}
+
+impl SettingsState {
+    pub fn new(_cfg: &Config) -> Self {
+        Self {
+            level: SettingsLevel::TopLevel,
+            cursor: 0,
+            form_error: None,
+            load_error: None,
+        }
+    }
+
+    /// Number of items in the current list view (used to clamp cursor).
+    pub fn list_len(&self, cfg: &Config) -> usize {
+        match &self.level {
+            SettingsLevel::TopLevel => 3,                         // set provider, thinking display, enter behavior
+            SettingsLevel::ProviderList => 1 + cfg.entries.len(), // new + existing
+            SettingsLevel::NewProviderKind => crate::config::Config::all_possible_ids().len(),
+            SettingsLevel::ExistingActions(_) => 2,               // edit, delete
+            SettingsLevel::ConfigForm(_) => 5,                    // name, base url, key/env, save, exit
+            SettingsLevel::ThinkingDisplayList => 3,               // show, hide, while streaming
+            SettingsLevel::EnterBehaviorList => 2,                  // enter sends, enter newline
+        }
+    }
+
+    pub fn clamp_cursor(&mut self, cfg: &Config) {
+        let len = self.list_len(cfg);
+        if len == 0 {
+            self.cursor = 0;
+        } else if self.cursor >= len {
+            self.cursor = len - 1;
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PickerFocus {
+    Search,
+    List,
+}
+
+#[derive(Debug)]
+pub struct ModelPickerState {
+    pub provider: ProviderKind,
+    pub query: String,
+    pub models: Vec<ModelInfo>,
+    pub filtered: Vec<usize>,
+    pub cursor: usize,
+    pub focus: PickerFocus,
+    pub fetching: bool,
+    pub fetch_error: Option<String>,
+    pub no_endpoint: bool,
+    /// Scroll offset (top visible row in the list) so the focused row is
+    /// always in view.
+    pub scroll: usize,
+}
+
+use crate::function::notifications::ModelInfo;
+
+impl ModelPickerState {
+    pub fn new(provider: ProviderKind) -> Self {
+        Self {
+            provider,
+            query: String::new(),
+            models: vec![],
+            filtered: vec![],
+            cursor: 0,
+            focus: PickerFocus::Search,
+            fetching: false,
+            fetch_error: None,
+            no_endpoint: false,
+            scroll: 0,
+        }
+    }
+
+    pub fn rebuild_filter(&mut self) {
+        let q = self.query.to_lowercase();
+        self.filtered = self
+            .models
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| {
+                q.is_empty()
+                    || m.id.to_lowercase().contains(&q)
+                    || m.display.to_lowercase().contains(&q)
+            })
+            .map(|(i, _)| i)
+            .collect();
+        if self.cursor >= self.filtered.len() {
+            self.cursor = self.filtered.len().saturating_sub(1);
+        }
+        // Keep cursor visible after the filter shrinks.
+        self.adjust_scroll();
+    }
+
+    /// Move `scroll` so that `cursor` is inside the visible window of
+    /// `visible_rows` rows. Call this from the renderer once the list height
+    /// is known.
+    pub fn ensure_cursor_visible(&mut self, visible_rows: usize) {
+        if visible_rows == 0 {
+            return;
+        }
+        if self.cursor < self.scroll {
+            self.scroll = self.cursor;
+        } else if self.cursor >= self.scroll + visible_rows {
+            self.scroll = self.cursor + 1 - visible_rows;
+        }
+    }
+
+    fn adjust_scroll(&mut self) {
+        // Without a known viewport, keep scroll near cursor (best effort).
+        if self.cursor < self.scroll {
+            self.scroll = self.cursor;
+        }
+    }
+}
+
+/// One row in the provider picker. The user picks a specific configured
+/// entry, not just a `ProviderKind` — the same kind can be configured
+/// twice (once per mode) and the user typically gave each a distinct
+/// `name` (or the default "Kind (mode)" label).
+#[derive(Debug, Clone)]
+pub struct ProviderPickerEntry {
+    /// Provider entry id, e.g. `openai:key`.
+    pub id: ProviderId,
+    /// User-facing label: the entry's `name` when set, otherwise the
+    /// `Kind (mode)` fallback.
+    pub display: String,
+}
+
+/// First step of the `/model` flow: pick a configured provider entry.
+/// On confirmation, the active tab is replaced with a `ModelPickerState`
+/// for the selected entry's kind. Lists one row per configured entry
+/// (not per kind) so the user can disambiguate, e.g., "prod-openai" vs
+/// "dev-openai" when both are configured.
+#[derive(Debug)]
+pub struct ProviderPickerState {
+    /// All configured entries, sorted by display name.
+    pub entries: Vec<ProviderPickerEntry>,
+    /// Indices into `entries` after applying the search filter.
+    pub filtered: Vec<usize>,
+    /// User's search/filter query.
+    pub query: String,
+    /// Cursor within the filtered list.
+    pub cursor: usize,
+    /// Scroll offset (top visible row in the list).
+    pub scroll: usize,
+    /// Where keyboard input is going: the search box or the list.
+    pub focus: PickerFocus,
+    /// The currently-active entry id, used for the `[active]` marker.
+    pub active: Option<ProviderId>,
+}
+
+impl ProviderPickerState {
+    pub fn new(cfg: &Config) -> Self {
+        let mut entries: Vec<ProviderPickerEntry> = cfg
+            .entries
+            .iter()
+            .map(|(id, entry)| {
+                let display = if entry.name.trim().is_empty() {
+                    crate::config::id_display(id)
+                } else {
+                    entry.name.clone()
+                };
+                ProviderPickerEntry {
+                    id: id.clone(),
+                    display,
+                }
+            })
+            .collect();
+        entries.sort_by(|a, b| a.display.to_lowercase().cmp(&b.display.to_lowercase()));
+        let mut s = Self {
+            entries,
+            filtered: Vec::new(),
+            query: String::new(),
+            cursor: 0,
+            scroll: 0,
+            focus: PickerFocus::Search,
+            active: cfg.active.clone(),
+        };
+        s.rebuild_filter();
+        s
+    }
+
+    pub fn rebuild_filter(&mut self) {
+        let q = self.query.to_lowercase();
+        self.filtered = self
+            .entries
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| {
+                q.is_empty()
+                    || e.display.to_lowercase().contains(&q)
+                    || e.id.to_lowercase().contains(&q)
+            })
+            .map(|(i, _)| i)
+            .collect();
+        if self.cursor >= self.filtered.len() {
+            self.cursor = self.filtered.len().saturating_sub(1);
+        }
+        if self.scroll > self.cursor {
+            self.scroll = self.cursor;
+        }
+    }
+
+    /// Adjust `scroll` so `cursor` stays inside the visible window.
+    pub fn ensure_cursor_visible(&mut self, visible_rows: usize) {
+        if visible_rows == 0 {
+            return;
+        }
+        if self.cursor < self.scroll {
+            self.scroll = self.cursor;
+        } else if self.cursor >= self.scroll + visible_rows {
+            self.scroll = self.cursor + 1 - visible_rows;
+        }
+    }
+
+    /// Returns the id of the focused entry, if any.
+    pub fn selected_id(&self) -> Option<ProviderId> {
+        self.filtered
+            .get(self.cursor)
+            .map(|&i| self.entries[i].id.clone())
+    }
+}
+
+/// List picker for the four thinking levels, with a small search / filter
+/// input like the model picker. Even with only four items the user wants
+/// the same interaction pattern — type to filter, Arrow-key to navigate,
+/// Enter to select, Esc to cancel.
+#[derive(Debug)]
+pub struct ThinkingPickerState {
+    pub cursor: usize,
+    pub query: String,
+    pub filtered: Vec<usize>,
+}
+
+impl ThinkingPickerState {
+    pub fn new() -> Self {
+        let mut s = Self {
+            cursor: 0,
+            query: String::new(),
+            filtered: Vec::new(),
+        };
+        s.rebuild_filter();
+        s
+    }
+
+    pub const LEVELS: &'static [&'static str] = &["off", "low", "med", "high", "adaptive"];
+
+    pub fn selected(&self) -> Option<&'static str> {
+        self.filtered.get(self.cursor).and_then(|&i| Self::LEVELS.get(i)).copied()
+    }
+
+    pub fn rebuild_filter(&mut self) {
+        let q = self.query.to_lowercase();
+        self.filtered = Self::LEVELS
+            .iter()
+            .enumerate()
+            .filter(|(_, level)| q.is_empty() || level.starts_with(&q))
+            .map(|(i, _)| i)
+            .collect();
+        if self.cursor >= self.filtered.len() {
+            self.cursor = self.filtered.len().saturating_sub(1);
+        }
+    }
+}
+
+/// One entry shown in the timeline picker. A snapshot of a session
+/// message at the time the picker was opened; the picker does not
+/// react to new messages streaming in.
+#[derive(Debug, Clone)]
+pub struct TimelineEntry {
+    pub msg_idx: usize,
+    pub role: Role,
+    /// Short single-line preview of the message content.
+    pub preview: String,
+    pub ts: DateTime<Utc>,
+}
+
+/// Sidebar picker that lists session messages (user prompts +
+/// assistant replies) with a search/filter input. Pressing Enter
+/// scrolls the session so the focused message appears at the top
+/// of the viewport.
+#[derive(Debug)]
+pub struct TimelinePickerState {
+    pub query: String,
+    pub entries: Vec<TimelineEntry>,
+    /// Indices into `entries` after filtering.
+    pub filtered: Vec<usize>,
+    pub cursor: usize,
+    pub scroll: usize,
+    pub focus: PickerFocus,
+}
+
+impl TimelinePickerState {
+    pub fn new(session: &Session) -> Self {
+        let entries = snapshot_session(session);
+        let mut s = Self {
+            query: String::new(),
+            entries,
+            filtered: Vec::new(),
+            cursor: 0,
+            scroll: 0,
+            focus: PickerFocus::Search,
+        };
+        s.rebuild_filter();
+        s
+    }
+
+    pub fn rebuild_filter(&mut self) {
+        let q = self.query.to_lowercase();
+        self.filtered = self
+            .entries
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| {
+                q.is_empty() || e.preview.to_lowercase().contains(&q)
+            })
+            .map(|(i, _)| i)
+            .collect();
+        if self.cursor >= self.filtered.len() {
+            self.cursor = self.filtered.len().saturating_sub(1);
+        }
+        if self.scroll > self.cursor {
+            self.scroll = self.cursor;
+        }
+    }
+
+    /// Move `scroll` so that `cursor` is inside the visible window.
+    pub fn ensure_cursor_visible(&mut self, visible_rows: usize) {
+        if visible_rows == 0 {
+            return;
+        }
+        if self.cursor < self.scroll {
+            self.scroll = self.cursor;
+        } else if self.cursor >= self.scroll + visible_rows {
+            self.scroll = self.cursor + 1 - visible_rows;
+        }
+    }
+
+    /// Returns the `session.messages` index of the currently focused
+    /// entry, if any.
+    pub fn selected_msg_idx(&self) -> Option<usize> {
+        self.filtered
+            .get(self.cursor)
+            .map(|&i| self.entries[i].msg_idx)
+    }
+}
+
+fn snapshot_session(session: &Session) -> Vec<TimelineEntry> {
+    let mut out = Vec::new();
+    for (i, m) in session.messages.iter().enumerate() {
+        // Hide empty assistant placeholders (the in-flight streaming
+        // message before the first delta arrives).
+        if matches!(m.role, Role::Assistant) && m.content.trim().is_empty() {
+            continue;
+        }
+        let first_line = m.content.lines().next().unwrap_or("").trim();
+        let preview = if first_line.chars().count() > 60 {
+            let mut s: String = first_line.chars().take(60).collect();
+            s.push('\u{2026}');
+            s
+        } else if first_line.is_empty() {
+            "(no content)".to_string()
+        } else {
+            first_line.to_string()
+        };
+        out.push(TimelineEntry {
+            msg_idx: i,
+            role: m.role,
+            preview,
+            ts: m.ts,
+        });
+    }
+    out
+}
+
+/// Top-level state for the function panel.
+#[derive(Debug)]
+pub struct FunctionPanel {
+    pub tabs: Vec<SidebarTab>,
+    pub active: usize,
+}
+
+impl FunctionPanel {
+    pub fn new() -> Self {
+        Self {
+            tabs: vec![],
+            active: 0,
+        }
+    }
+
+    pub fn active_kind_name(&self) -> &'static str {
+        match self.tabs.get(self.active) {
+            Some(SidebarTab::Notifications) => "notifications",
+            Some(SidebarTab::Completion(_)) => "completion",
+            Some(SidebarTab::Settings(_)) => "settings",
+            Some(SidebarTab::ModelPicker(_)) => "model picker",
+            Some(SidebarTab::ProviderPicker(_)) => "provider",
+            Some(SidebarTab::ThinkingPicker(_)) => "thinking",
+            Some(SidebarTab::TimelinePicker(_)) => "timeline",
+            Some(SidebarTab::Hotkey) => "hotkey",
+            None => "?",
+        }
+    }
+
+    pub fn push(&mut self, tab: SidebarTab) {
+        self.tabs.push(tab);
+        self.active = self.tabs.len() - 1;
+    }
+
+    /// Remove the active tab and return true. If the list is already
+    /// empty, return false so the caller can fall back to clearing the
+    /// input buffer instead.
+    pub fn close_active(&mut self) -> bool {
+        if self.tabs.is_empty() {
+            return false;
+        }
+        if self.active < self.tabs.len() {
+            self.tabs.remove(self.active);
+            if self.active >= self.tabs.len() {
+                self.active = self.tabs.len().saturating_sub(1);
+            }
+        }
+        true
+    }
+
+    /// True if any tab exists at all. Used by `maybe_hide_panel` to
+    /// decide whether to hide the function panel after a tab is removed.
+    pub fn has_any_tab(&self) -> bool {
+        !self.tabs.is_empty()
+    }
+}
+
+/// Top-level app state.
+pub struct App {
+    pub config: Config,
+    pub config_path: PathBuf,
+    pub session: Session,
+    pub function: FunctionPanel,
+    pub input: crate::input::InputState,
+    pub status: crate::input::status::StatusBar,
+
+    pub function_visible: bool,
+    pub pending_events: u8,
+    pub notifications: Notifications,
+    pub model_cache: ModelCache,
+    pub hit_rate: HitRate,
+
+    pub reqwest: reqwest::Client,
+    pub inflight: Option<InflightHandle>,
+
+    pub cwd: PathBuf,
+    pub should_quit: bool,
+    pub msg_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::event::AppMsg>>,
+
+    /// Cached screen rect of the input prompt line, updated on each render.
+    pub input_prompt_area: Option<ratatui::layout::Rect>,
+
+    /// Full-screen text selection driven by the mouse. `Some` while the
+    /// user is dragging or has a finished selection. `None` when no
+    /// selection is active.
+    pub tui_selection: Option<Selection>,
+    /// Text extracted from the most recent render of the current
+    /// `tui_selection`. Refreshed every frame so that Ctrl+C can copy it
+    /// without having to re-walk the buffer.
+    pub selected_text: Option<String>,
+    /// Where a drag started, if any. Set on Mouse Down, consumed on the
+    /// first Drag to create `tui_selection`, and cleared on Mouse Up.
+    /// Lets us avoid creating a single-cell "selection" for an
+    /// ordinary click with no drag movement.
+    pub tui_drag_start: Option<(u16, u16)>,
+    /// Path to the persisted model-cache JSON file. Computed from
+    /// `config_path` during construction.
+    pub model_cache_path: std::path::PathBuf,
+    /// Screen y-positions of thinking toggle lines, each paired with the
+    /// index of the corresponding message. Populated after each render.
+    pub thinking_toggle_rows: Vec<(u16, usize)>,
+    /// The screen rect of the session area, updated on each render. Used
+    /// by the mouse handler to detect click-in-session for scroll.
+    pub session_area: Option<ratatui::layout::Rect>,
+
+    /// Screen coordinates of the input cursor, set during rendering.
+    /// Used to position the terminal cursor for IME support.
+    pub input_cursor_screen: Option<(u16, u16)>,
+
+    /// Screen coordinates of the function panel's focused text cursor
+    /// (e.g., picker search input). Takes priority over `input_cursor_screen`
+    /// when set, so IME composition windows appear at the right location
+    /// when the user is typing in a picker search field.
+    pub function_panel_cursor: Option<(u16, u16)>,
+}
+
+/// Mouse-driven text selection spanning the full TUI. Coordinates are
+/// 0-based (column, row) screen cells.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Selection {
+    pub start: (u16, u16),
+    pub end: (u16, u16),
+    pub active: bool,
+}
+
+impl Selection {
+    pub fn new(start: (u16, u16)) -> Self {
+        Self {
+            start,
+            end: start,
+            active: true,
+        }
+    }
+
+    /// Normalized bounding box: top-left to bottom-right (inclusive).
+    /// The selection rectangle always covers the full bounding box even
+    /// when the drag went diagonally — we treat any cell inside the box
+    /// as highlighted, which matches how GUI text selection is usually
+    /// drawn.
+    pub fn rect(&self) -> ((u16, u16), (u16, u16)) {
+        let x_min = self.start.0.min(self.end.0);
+        let y_min = self.start.1.min(self.end.1);
+        let x_max = self.start.0.max(self.end.0);
+        let y_max = self.start.1.max(self.end.1);
+        ((x_min, y_min), (x_max, y_max))
+    }
+
+    pub fn clear(&mut self) {
+        self.start = (0, 0);
+        self.end = (0, 0);
+        self.active = false;
+    }
+}
+
+#[derive(Debug)]
+pub struct InflightHandle {
+    pub cancel: tokio::sync::watch::Sender<bool>,
+    pub label: String,
+}
+
+impl App {
+    pub fn new(config: Config, config_path: PathBuf, cwd: PathBuf) -> Self {
+        let mut status = crate::input::status::StatusBar::new();
+        status.set_provider_name(&config.active_name());
+        status.set_model(&config.active_model_display());
+        status.set_thinking(config.thinking);
+        status.set_cwd(&cwd);
+        let cache_file = config_path
+            .parent()
+            .unwrap_or(&config_path)
+            .join("model-cache.json");
+        let model_cache = ModelCache::load(&cache_file);
+        let cache_file = cache_file; // keep alive for the field below
+        Self {
+            config,
+            config_path,
+            session: Session::default(),
+            function: FunctionPanel::new(),
+            input: crate::input::InputState::new(),
+            status,
+            function_visible: false,
+            pending_events: 0,
+            notifications: Notifications::default(),
+            model_cache,
+            model_cache_path: cache_file,
+            thinking_toggle_rows: Vec::new(),
+            session_area: None,
+            hit_rate: HitRate::new(50),
+            reqwest: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(30))
+                .connect_timeout(std::time::Duration::from_secs(10))
+                .build()
+                .expect("reqwest client"),
+            inflight: None,
+            cwd,
+            should_quit: false,
+            msg_tx: None,
+            input_prompt_area: None,
+            tui_selection: None,
+            selected_text: None,
+            tui_drag_start: None,
+            input_cursor_screen: None,
+            function_panel_cursor: None,
+        }
+    }
+
+    /// Push a toast; if level is important and panel is hidden, force-show
+    /// and bump pending_events. The Notifications tab is created on-demand
+    /// — it no longer sits permanently at index 0.
+    pub fn notify(
+        &mut self,
+        level: crate::function::notifications::ToastLevel,
+        text: impl Into<String>,
+    ) {
+        let text = text.into();
+        if level.is_important() {
+            let notif_exists = self
+                .function
+                .tabs
+                .iter()
+                .any(|t| matches!(t, SidebarTab::Notifications));
+            if notif_exists {
+                for (i, t) in self.function.tabs.iter().enumerate() {
+                    if matches!(t, SidebarTab::Notifications) {
+                        self.function.active = i;
+                        break;
+                    }
+                }
+            } else {
+                self.function.push(SidebarTab::Notifications);
+            }
+            if !self.function_visible {
+                self.function_visible = true;
+                self.pending_events = self.pending_events.saturating_add(1);
+            }
+        }
+        self.notifications.push(level, text);
+    }
+
+    pub fn save_config(&mut self) {
+        if let Err(e) = self.config.save(&self.config_path) {
+            self.notify(crate::function::notifications::ToastLevel::Fail, format!("save config: {e}"));
+        } else {
+            self.notify(
+                crate::function::notifications::ToastLevel::Ok,
+                format!("config saved to {}", self.config_path.display()),
+            );
+        }
+    }
+
+    /// Mark that the panel was shown by user (Ctrl+N) so we clear pending marker.
+    pub fn acknowledge_panel(&mut self) {
+        self.pending_events = 0;
+    }
+
+    /// Ensure the Completion sidebar tab reflects the current input buffer.
+    /// - If the buffer is a partial `/` command, populate (or create) the tab
+    ///   with matching candidates and reset its cursor.
+    /// - Otherwise, remove the tab if it is present. If that leaves the
+    ///   function panel with no function tabs, hide the panel so the user
+    ///   returns to the default hidden state.
+    pub fn sync_completion(&mut self) {
+        let buffer = self.input.buffer.clone();
+        let cursor = self.input.cursor;
+        let prefix = if buffer.starts_with('/') && !buffer[..cursor].contains(' ')
+            && !buffer[..cursor].contains('\n')
+        {
+            buffer[..cursor].to_string()
+        } else {
+            String::new()
+        };
+
+        let pos = self
+            .function
+            .tabs
+            .iter()
+            .position(|t| matches!(t, SidebarTab::Completion(_)));
+
+        if prefix.is_empty() {
+            if let Some(idx) = pos {
+                self.function.tabs.remove(idx);
+                if self.function.active >= self.function.tabs.len() {
+                    self.function.active = self.function.tabs.len().saturating_sub(1);
+                }
+                self.maybe_hide_panel();
+            }
+            return;
+        }
+
+        let candidates = crate::input::completion_candidates_for(&prefix);
+        match pos {
+            Some(idx) => {
+                if let SidebarTab::Completion(s) = &mut self.function.tabs[idx] {
+                    s.candidates = candidates;
+                    s.clamp_cursor();
+                }
+            }
+            None => {
+                self.function
+                    .push(SidebarTab::Completion(CompletionState {
+                        candidates,
+                        cursor: 0,
+                    }));
+                // Typing `/` is a "function trigger" — the user must see
+                // the candidate list, so auto-show the panel and focus
+                // the new Completion tab.
+                self.function.active = self.function.tabs.len() - 1;
+                self.function_visible = true;
+                self.acknowledge_panel();
+            }
+        }
+    }
+
+    /// Hide the function panel when the last tab is removed. Called
+    /// after any tab removal so the panel returns to the default hidden
+    /// state when nothing is open.
+    pub fn maybe_hide_panel(&mut self) {
+        if !self.function.has_any_tab() {
+            self.function_visible = false;
+        }
+    }
+}
+
+pub fn active_provider_string(_kind: ProviderKind) -> &'static str {
+    "ok"
+}
+
+pub fn _ignore_unused() -> VecDeque<()> {
+    VecDeque::new()
+}

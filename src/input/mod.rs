@@ -1,0 +1,596 @@
+pub mod status;
+
+use crate::function::notifications::ToastLevel;
+use crate::function::SidebarTab;
+use crate::theme::Theme;
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Borders, BorderType, Paragraph, Wrap};
+use ratatui::widgets::Widget;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
+#[derive(Debug)]
+pub struct InputState {
+    pub buffer: String,
+    pub cursor: usize, // byte index
+    pub history: Vec<String>,
+    pub history_idx: Option<usize>,
+    /// Whether we are actively editing a model id in /model picker.
+    pub busy_hint: Option<String>,
+    /// Active text selection within the buffer (byte indices, end exclusive).
+    /// None means no selection; the tuple is always stored as (start, end) with start <= end.
+    pub selection: Option<(usize, usize)>,
+}
+
+impl InputState {
+    pub fn new() -> Self {
+        Self {
+            buffer: String::new(),
+            cursor: 0,
+            history: Vec::new(),
+            history_idx: None,
+            busy_hint: None,
+            selection: None,
+        }
+    }
+
+    pub fn has_selection(&self) -> bool {
+        self.selection.map(|(s, e)| e > s).unwrap_or(false)
+    }
+
+    pub fn clear_selection(&mut self) {
+        self.selection = None;
+    }
+
+    pub fn selected_text(&self) -> Option<String> {
+        self.selection.and_then(|(s, e)| {
+            if e > s && e <= self.buffer.len() && self.buffer.is_char_boundary(s) && self.buffer.is_char_boundary(e) {
+                Some(self.buffer[s..e].to_string())
+            } else {
+                None
+            }
+        })
+    }
+
+    pub fn set_selection(&mut self, start: usize, end: usize) {
+        let len = self.buffer.len();
+        let s = start.min(len);
+        let e = end.min(len);
+        if s == e {
+            self.selection = None;
+        } else {
+            self.selection = Some((s.min(e), s.max(e)));
+        }
+    }
+
+    pub fn is_command(&self) -> bool {
+        self.buffer.starts_with('/')
+    }
+
+    pub fn command_name(&self) -> Option<&str> {
+        if self.is_command() {
+            let stripped = self.buffer.trim_end();
+            let after = stripped.trim_start_matches('/');
+            if after.contains(' ') {
+                None
+            } else {
+                Some(after)
+            }
+        } else {
+            None
+        }
+    }
+
+    pub fn take(&mut self) -> String {
+        let v = std::mem::take(&mut self.buffer);
+        self.cursor = 0;
+        self.history_idx = None;
+        if !v.trim().is_empty() {
+            self.history.push(v.clone());
+            if self.history.len() > 200 {
+                self.history.remove(0);
+            }
+        }
+        v
+    }
+
+    pub fn insert_char(&mut self, c: char) {
+        let idx = self.cursor;
+        self.buffer.insert(idx, c);
+        self.cursor = idx + c.len_utf8();
+    }
+
+    pub fn insert_newline(&mut self) {
+        self.insert_char('\n');
+    }
+
+    pub fn backspace(&mut self) {
+        if self.cursor == 0 {
+            return;
+        }
+        // find prev char boundary
+        let mut start = self.cursor - 1;
+        while start > 0 && !self.buffer.is_char_boundary(start) {
+            start -= 1;
+        }
+        self.buffer.replace_range(start..self.cursor, "");
+        self.cursor = start;
+    }
+
+    pub fn delete_word_back(&mut self) {
+        if self.cursor == 0 {
+            return;
+        }
+        let mut i = self.cursor;
+        let prev_char = |pos: usize| -> Option<(usize, char)> {
+            if pos == 0 {
+                return None;
+            }
+            let mut start = pos - 1;
+            while start > 0 && !self.buffer.is_char_boundary(start) {
+                start -= 1;
+            }
+            self.buffer[start..pos].chars().next().map(|c| (start, c))
+        };
+        // skip trailing spaces
+        while let Some((prev, c)) = prev_char(i) {
+            if !c.is_whitespace() {
+                break;
+            }
+            i = prev;
+        }
+        // skip word
+        while let Some((prev, c)) = prev_char(i) {
+            if c.is_whitespace() {
+                break;
+            }
+            i = prev;
+        }
+        self.buffer.replace_range(i..self.cursor, "");
+        self.cursor = i;
+    }
+
+    pub fn move_left(&mut self) {
+        let mut i = self.cursor;
+        if i == 0 { return; }
+        i -= 1;
+        while i > 0 && !self.buffer.is_char_boundary(i) {
+            i -= 1;
+        }
+        self.cursor = i;
+    }
+
+    pub fn move_right(&mut self) {
+        let mut i = self.cursor;
+        if i >= self.buffer.len() { return; }
+        i += 1;
+        while i < self.buffer.len() && !self.buffer.is_char_boundary(i) {
+            i += 1;
+        }
+        self.cursor = i;
+    }
+
+    pub fn move_home(&mut self) {
+        self.cursor = 0;
+    }
+
+    pub fn move_end(&mut self) {
+        self.cursor = self.buffer.len();
+    }
+
+    pub fn move_up_line(&mut self) -> bool {
+        let (line_start, col) = self.current_line_start_and_col();
+        if line_start == 0 {
+            return false;
+        }
+        let prev_end = line_start.saturating_sub(1);
+        let prev_start = self.buffer[..prev_end].rfind('\n').map(|i| i + 1).unwrap_or(0);
+        self.cursor = byte_at_display_col(&self.buffer[prev_start..prev_end], col) + prev_start;
+        true
+    }
+
+    pub fn move_down_line(&mut self) -> bool {
+        let (line_start, col) = self.current_line_start_and_col();
+        let line_end = self.buffer[line_start..]
+            .find('\n')
+            .map(|i| line_start + i)
+            .unwrap_or(self.buffer.len());
+        if line_end >= self.buffer.len() {
+            return false;
+        }
+        let next_start = line_end + 1;
+        let next_end = self.buffer[next_start..]
+            .find('\n')
+            .map(|i| next_start + i)
+            .unwrap_or(self.buffer.len());
+        self.cursor = byte_at_display_col(&self.buffer[next_start..next_end], col) + next_start;
+        true
+    }
+
+    fn current_line_start_and_col(&self) -> (usize, usize) {
+        let cursor = self.cursor.min(self.buffer.len());
+        let line_start = self.buffer[..cursor].rfind('\n').map(|i| i + 1).unwrap_or(0);
+        let col = UnicodeWidthStr::width(&self.buffer[line_start..cursor]);
+        (line_start, col)
+    }
+
+    pub fn delete_forward(&mut self) {
+        if self.cursor >= self.buffer.len() {
+            return;
+        }
+        let mut end = self.cursor + 1;
+        while end < self.buffer.len() && !self.buffer.is_char_boundary(end) {
+            end += 1;
+        }
+        self.buffer.replace_range(self.cursor..end, "");
+    }
+
+    /// Returns true if a selection was deleted.
+    pub fn delete_selection(&mut self) -> bool {
+        if let Some((s, e)) = self.selection {
+            let (s, e) = if s <= e { (s, e) } else { (e, s) };
+            if s < e && e <= self.buffer.len()
+                && self.buffer.is_char_boundary(s)
+                && self.buffer.is_char_boundary(e)
+            {
+                self.buffer.replace_range(s..e, "");
+                self.cursor = s;
+                self.selection = None;
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Extend selection to the left by one character (Shift+Left).
+    pub fn extend_selection_left(&mut self) {
+        let anchor = match self.selection {
+            Some((s, e)) => {
+                if self.cursor == e {
+                    s
+                } else {
+                    e
+                }
+            }
+            None => self.cursor,
+        };
+        self.move_left();
+        let new_start = anchor.min(self.cursor);
+        let new_end = anchor.max(self.cursor);
+        if new_start == new_end {
+            self.selection = None;
+        } else {
+            self.selection = Some((new_start, new_end));
+        }
+    }
+
+    /// Extend selection to the right by one character (Shift+Right).
+    pub fn extend_selection_right(&mut self) {
+        let anchor = match self.selection {
+            Some((s, e)) => {
+                if self.cursor == s {
+                    e
+                } else {
+                    s
+                }
+            }
+            None => self.cursor,
+        };
+        self.move_right();
+        let new_start = anchor.min(self.cursor);
+        let new_end = anchor.max(self.cursor);
+        if new_start == new_end {
+            self.selection = None;
+        } else {
+            self.selection = Some((new_start, new_end));
+        }
+    }
+
+    /// Set selection from a screen (col, row) by translating to buffer index
+    /// using the known prompt prefix width.
+    pub fn select_from_screen(&mut self, col: u16, prefix_width: u16) {
+        if col < prefix_width {
+            self.selection = None;
+            return;
+        }
+        let offset = (col - prefix_width) as usize;
+        let mut acc = 0usize;
+        for (i, c) in self.buffer.char_indices() {
+            if acc >= offset {
+                self.cursor = i;
+                self.selection = None;
+                return;
+            }
+            let w = UnicodeWidthChar::width(c).unwrap_or(0);
+            acc += w;
+            if acc >= offset {
+                self.cursor = i + c.len_utf8();
+                self.selection = None;
+                return;
+            }
+        }
+        self.cursor = self.buffer.len();
+        self.selection = None;
+    }
+
+    /// Set selection (start, end) from screen columns (start_col, end_col).
+    /// Uses prompt width to translate columns to byte indices.
+    pub fn set_selection_from_screen(&mut self, start_col: u16, end_col: u16, prefix_width: u16) {
+        let len = self.buffer.len();
+        let start_byte = col_to_byte(&self.buffer, start_col.saturating_sub(prefix_width));
+        let end_byte = col_to_byte(&self.buffer, end_col.saturating_sub(prefix_width));
+        self.cursor = end_byte;
+        if start_byte == end_byte || start_byte >= len && end_byte >= len {
+            self.selection = None;
+        } else {
+            self.selection = Some((start_byte.min(len), end_byte.min(len)));
+        }
+    }
+
+    pub fn history_prev(&mut self) {
+        if self.history.is_empty() {
+            return;
+        }
+        let idx = match self.history_idx {
+            None => self.history.len() - 1,
+            Some(0) => return,
+            Some(i) => i - 1,
+        };
+        self.history_idx = Some(idx);
+        self.buffer = self.history[idx].clone();
+        self.cursor = self.buffer.len();
+    }
+
+    pub fn history_next(&mut self) {
+        let idx = match self.history_idx {
+            None => return,
+            Some(i) if i + 1 >= self.history.len() => {
+                self.history_idx = None;
+                self.buffer.clear();
+                self.cursor = 0;
+                return;
+            }
+            Some(i) => i + 1,
+        };
+        self.history_idx = Some(idx);
+        self.buffer = self.history[idx].clone();
+        self.cursor = self.buffer.len();
+    }
+}
+
+/// Convert a column offset (0-based display columns) to a byte index in `s`.
+fn col_to_byte(s: &str, col: u16) -> usize {
+    byte_at_display_col(s, col as usize)
+}
+
+fn byte_at_display_col(s: &str, col: usize) -> usize {
+    let mut acc = 0usize;
+    for (i, c) in s.char_indices() {
+        let w = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+        if acc + w > col {
+            return i;
+        }
+        acc += w;
+        if acc > col {
+            return i + c.len_utf8();
+        }
+    }
+    s.len()
+}
+
+/// Renders the input area. The status line (model | think | hit) lives
+/// in the input block's title, not inside the box, so the body is just
+/// the prompt row.
+pub fn render(
+    area: Rect,
+    buf: &mut Buffer,
+    app: &mut crate::app::App,
+) {
+    // Pick the title content: the unread-banner wins when the function
+    // panel is hidden but has pending important toasts; otherwise the
+    // regular status line.
+    let show_banner = !app.function_visible && app.pending_events > 0;
+    let mut title: Line = if show_banner {
+        Line::from(vec![
+            Span::styled("[", Theme::dim()),
+            Span::styled(
+                format!(
+                    "{} unread in function panel - press Ctrl+N to view",
+                    app.pending_events
+                ),
+                Theme::status_warn(),
+            ),
+            Span::styled("]", Theme::dim()),
+        ])
+    } else {
+        app.status.render_line()
+    };
+    // One space of padding on each side so the title text does not touch
+    // the left/right border lines.
+    title.spans.insert(0, Span::raw(" "));
+    title.spans.push(Span::raw(" "));
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Plain)
+        .border_style(Theme::unfocused_border())
+        .title(title);
+    let inner = block.inner(area);
+    block.render(area, buf);
+    if inner.height < 1 {
+        return;
+    }
+
+    let prompt = if app.inflight.is_some() { spinner_prompt() } else { " > ".to_string() };
+    let prompt_width = UnicodeWidthStr::width(prompt.as_str());
+    let buffer = &app.input.buffer;
+    let cursor = app.input.cursor.min(buffer.len());
+    let cursor_line_idx = buffer[..cursor].chars().filter(|&c| c == '\n').count();
+    let all_lines: Vec<&str> = buffer.split('\n').collect();
+    let visible_count = (all_lines.len() as u16).min(inner.height).min(3) as usize;
+    let start_line = if cursor_line_idx + 1 > visible_count {
+        cursor_line_idx + 1 - visible_count
+    } else {
+        0
+    };
+    let end_line = (start_line + visible_count).min(all_lines.len().max(1));
+
+    let mut rendered: Vec<Line<'static>> = Vec::new();
+    let mut byte_pos = 0usize;
+    for (idx, text) in all_lines.iter().enumerate() {
+        let line_start = byte_pos;
+        let line_end = line_start + text.len();
+        byte_pos = line_end + 1;
+        if idx < start_line || idx >= end_line {
+            continue;
+        }
+
+        let mut spans: Vec<Span<'static>> = vec![Span::styled(
+            if idx == start_line { prompt.clone() } else { " ".repeat(prompt_width) },
+            Theme::bold(),
+        )];
+        if let Some((s, e)) = app.input.selection {
+            let (s, e) = if s <= e { (s, e) } else { (e, s) };
+            let sel_start = s.max(line_start).min(line_end);
+            let sel_end = e.max(line_start).min(line_end);
+            if sel_start > line_start {
+                spans.push(Span::raw(text[..sel_start - line_start].to_string()));
+            }
+            if sel_start < sel_end {
+                spans.push(Span::styled(
+                    text[sel_start - line_start..sel_end - line_start].to_string(),
+                    Theme::reversed(),
+                ));
+            }
+            if sel_end < line_end {
+                spans.push(Span::raw(text[sel_end - line_start..].to_string()));
+            }
+        } else if app.inflight.is_none() && cursor >= line_start && cursor <= line_end {
+            let local = cursor - line_start;
+            if local > 0 {
+                spans.push(Span::raw(text[..local].to_string()));
+            }
+            spans.push(Span::styled("\u{2588}", Theme::cursor()));
+            if local < text.len() {
+                spans.push(Span::raw(text[local..].to_string()));
+            }
+        } else {
+            spans.push(Span::raw((*text).to_string()));
+        }
+        rendered.push(Line::from(spans));
+    }
+
+    let p = Paragraph::new(rendered).wrap(Wrap { trim: false });
+    p.render(inner, buf);
+    app.input_prompt_area = Some(inner);
+
+    if app.inflight.is_none() && cursor_line_idx >= start_line && cursor_line_idx < end_line {
+        let cursor_line_start = buffer[..cursor].rfind('\n').map(|i| i + 1).unwrap_or(0);
+        let text_before_cursor = UnicodeWidthStr::width(&buffer[cursor_line_start..cursor]) as u16;
+        let cy = inner.y + (cursor_line_idx - start_line) as u16;
+        let cx = inner.x + prompt_width as u16 + text_before_cursor;
+        if cx < inner.x + inner.width && cy < inner.y + inner.height {
+            if let Some(c) = buf.cell_mut((cx, cy)) {
+                c.set_style(Theme::cursor());
+            }
+            app.input_cursor_screen = Some((cx, cy));
+        } else {
+            app.input_cursor_screen = None;
+        }
+    } else {
+        app.input_cursor_screen = None;
+    }
+}
+
+fn spinner_prompt() -> String {
+    const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+    let idx = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| (d.as_millis() / 80) as usize)
+        .unwrap_or(0)
+        % FRAMES.len();
+    format!(" {} ", FRAMES[idx])
+}
+
+/// Heuristic for whether a "completion" sidebar should be visible based on input.
+pub fn should_show_completion(input: &InputState) -> bool {
+    if !input.is_command() {
+        return false;
+    }
+    // show only while typing the first token (no space yet)
+    !input.buffer.contains(' ')
+}
+
+/// List of slash commands offered by completion.
+pub const COMMAND_LIST: &[&str] = &[
+    "/settings",
+    "/model",
+    "/hotkey",
+    "/clear",
+    "/provider",
+    "/think",
+    "/timeline",
+    "/quit",
+    "/exit",
+    "/help",
+];
+
+/// Returns the list of completion candidates that match the given prefix
+/// (the buffer text, starting with `/`). Returns owned `String`s so the
+/// state can live in `CompletionState` independently of the buffer.
+pub fn completion_candidates_for(input: &str) -> Vec<String> {
+    let trimmed = input.trim_start_matches('/').to_lowercase();
+    if let Some((cmd, rest)) = trimmed.split_once(' ') {
+        // Show sub-argument completions for known commands.
+        let rest = rest.trim().to_lowercase();
+        return match cmd {
+            "think" | "thinking" => vec!["off", "low", "med", "high", "adaptive"]
+                .into_iter()
+                .filter(|c| c.starts_with(&rest) || rest.is_empty())
+                .map(|s| format!("/think {s}"))
+                .collect(),
+            _ => vec![],
+        };
+    }
+    COMMAND_LIST
+        .iter()
+        .copied()
+        .filter(|c| c[1..].starts_with(trimmed.as_str()) || trimmed.is_empty())
+        .map(|s| s.to_string())
+        .collect()
+}
+
+/// Backwards-compatible shim for places that still want borrowed candidates.
+pub fn completion_candidates(input: &str) -> Vec<&'static str> {
+    let owned = completion_candidates_for(input);
+    // Map owned strings back to the static set where possible; if anything
+    // unmatched is present we just return an empty vec.
+    let _ = owned;
+    let after = input.trim_start_matches('/').to_lowercase();
+    if after.contains(' ') {
+        return vec![];
+    }
+    COMMAND_LIST
+        .iter()
+        .copied()
+        .filter(|c| c[1..].starts_with(after.as_str()) || after.is_empty())
+        .collect()
+}
+
+pub fn toast_level_label(l: ToastLevel) -> &'static str {
+    l.tag()
+}
+
+pub fn sidebar_tab_name(t: &SidebarTab) -> &'static str {
+    match t {
+        SidebarTab::Notifications => "notifications",
+        SidebarTab::Completion(_) => "completion",
+        SidebarTab::Settings(_) => "settings",
+        SidebarTab::ModelPicker(_) => "model picker",
+        SidebarTab::ProviderPicker(_) => "provider",
+        SidebarTab::ThinkingPicker(_) => "thinking",
+        SidebarTab::TimelinePicker(_) => "timeline",
+        SidebarTab::Hotkey => "hotkey",
+    }
+}

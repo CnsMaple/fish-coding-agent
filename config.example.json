@@ -1,0 +1,17 @@
+{
+  "active_provider": "openai",
+  "active_model": "gpt-4o-mini",
+  "thinking": "off",
+  "providers": {
+    "openai": {
+      "api_key": "",
+      "api_key_env": "OPENAI_API_KEY",
+      "base_url": "https://api.openai.com/v1"
+    },
+    "anthropic": {
+      "api_key": "",
+      "api_key_env": "ANTHROPIC_API_KEY",
+      "base_url": "https://api.anthropic.com"
+    }
+  }
+}
