@@ -4,7 +4,7 @@ use anyhow::Result;
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
 use crossterm::execute;
 use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, Clear, ClearType,
+    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use fish_coding_agent::app::App;
 use fish_coding_agent::{config, event};
@@ -44,13 +44,12 @@ async fn main() -> Result<()> {
 
     let res = event::run(&mut terminal, &mut app).await;
 
-    disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
-        Clear(ClearType::All),
-        crossterm::cursor::MoveTo(0, 9999),
+        LeaveAlternateScreen,
         DisableMouseCapture
     )?;
+    disable_raw_mode()?;
     terminal.show_cursor()?;
 
     if let Err(e) = res {
@@ -75,8 +74,8 @@ fn install_panic_hook() {
         let _ = crossterm::terminal::disable_raw_mode();
         let _ = execute!(
             std::io::stdout(),
-            crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
-            DisableMouseCapture
+            LeaveAlternateScreen,
+            DisableMouseCapture,
         );
 
         let payload = if let Some(s) = info.payload().downcast_ref::<&str>() {
@@ -140,21 +139,21 @@ struct TerminalGuard;
 impl TerminalGuard {
     fn enter() -> Result<Self> {
         enable_raw_mode()?;
-        execute!(std::io::stdout(), EnableMouseCapture)?;
+        execute!(
+            std::io::stdout(),
+            EnterAlternateScreen,
+            EnableMouseCapture,
+        )?;
         Ok(Self)
     }
 }
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
-        let _ = disable_raw_mode();
-        let h = crossterm::terminal::size()
-            .map(|(_, h)| h.saturating_sub(1))
-            .unwrap_or(0);
         let _ = execute!(
             std::io::stdout(),
-            Clear(ClearType::All),
-            crossterm::cursor::MoveTo(0, h),
-            DisableMouseCapture
+            LeaveAlternateScreen,
+            DisableMouseCapture,
         );
+        let _ = disable_raw_mode();
     }
 }
