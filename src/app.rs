@@ -39,8 +39,7 @@ impl App {
                 )
             }
         } else {
-            "no provider configured; open /settings to set up openai or anthropic"
-                .to_string()
+            "no provider configured; open /settings to set up openai or anthropic".to_string()
         };
         self.notify(ToastLevel::Fail, msg);
         false

@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use crossterm::event::{Event, EventStream, KeyEventKind, MouseButton, MouseEvent, MouseEventKind};
@@ -19,18 +19,15 @@ use crate::app::App;
 /// The function panel cursor (e.g. picker search input) takes priority
 /// over the main input cursor.
 fn position_ime_cursor(app: &mut App) {
-    let Some((cx, cy)) = app.function_panel_cursor.or(app.input_cursor_screen) else { return };
+    let Some((cx, cy)) = app.function_panel_cursor.or(app.input_cursor_screen) else {
+        return;
+    };
 
     use std::io::Write;
 
     // Position cursor (so TSF-based IMEs can find it) but hide the
     // terminal cursor — the TUI draws its own styled block cursor.
-    let _ = write!(
-        std::io::stdout(),
-        "\x1B[{};{}H\x1B[?25l",
-        cy + 1,
-        cx + 1,
-    );
+    let _ = write!(std::io::stdout(), "\x1B[{};{}H\x1B[?25l", cy + 1, cx + 1,);
     let _ = std::io::stdout().flush();
 }
 
@@ -40,6 +37,20 @@ pub enum AppMsg {
     ChatDelta(String),
     /// A piece of thinking delta (Anthropic "thinking_delta") arrived.
     ChatThinkingDelta(String),
+    /// Provider-level debug event, shown only in notifications.
+    ChatDebug(String),
+    /// A structured tool result arrived, to be rendered as a collapsible block.
+    ChatToolResult {
+        name: String,
+        title: String,
+        content: String,
+    },
+    LocalToolResult {
+        name: String,
+        title: String,
+        content: String,
+        context: Option<String>,
+    },
     /// Final usage arrived for a completed stream.
     ChatUsage(crate::providers::Usage),
     /// Stream finished successfully.
@@ -59,6 +70,11 @@ pub enum AppMsg {
         error: String,
         no_endpoint: bool,
     },
+    CursorAuthSucceeded {
+        access_token: String,
+        refresh_token: String,
+    },
+    CursorAuthFailed(String),
 }
 
 pub struct EventChannels {
@@ -140,24 +156,184 @@ where
     Ok(())
 }
 
+fn note_model_output(app: &mut App, chunk: &str) {
+    if chunk.is_empty() {
+        return;
+    }
+    if app.response_started_at.is_none() {
+        app.response_started_at = Some(Instant::now());
+        app.response_output_chars = 0;
+        app.response_output_tokens = None;
+    }
+    app.response_output_chars += chunk.chars().count();
+}
+
+fn finish_model_output_rate(app: &mut App) {
+    let Some(started_at) = app.response_started_at.take() else {
+        app.response_output_chars = 0;
+        app.response_output_tokens = None;
+        return;
+    };
+    let elapsed = started_at.elapsed().as_secs_f64();
+    if elapsed <= 0.0 {
+        app.response_output_chars = 0;
+        app.response_output_tokens = None;
+        return;
+    }
+
+    let tokens = app
+        .response_output_tokens
+        .take()
+        .unwrap_or_else(|| estimate_output_tokens(app.response_output_chars));
+    app.response_output_chars = 0;
+    if tokens == 0 {
+        return;
+    }
+
+    app.token_rate.record(tokens as f64 / elapsed);
+    app.status.update_token_rate(&app.token_rate);
+}
+
+fn estimate_output_tokens(chars: usize) -> u64 {
+    // Coarse fallback for providers that do not stream final usage.
+    // CJK-heavy output is closer to one token per character, Latin text
+    // closer to one per four characters; two chars is a conservative middle.
+    ((chars as f64) / 2.0).ceil() as u64
+}
+
+fn open_tool_function_panel(app: &mut App, name: &str, content: &str) {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(content) else {
+        return;
+    };
+    match value.get("kind").and_then(|v| v.as_str()).unwrap_or(name) {
+        "ask" => {
+            let question = value
+                .get("question")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let options = value
+                .get("options")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            if !question.trim().is_empty() {
+                app.open_ask(question, options);
+            }
+        }
+        "todo" => {
+            let items = value
+                .get("items")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|item| {
+                            let content = item.get("content").and_then(|v| v.as_str())?.to_string();
+                            let status = item
+                                .get("status")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("pending")
+                                .to_string();
+                            Some(crate::function::TodoItem { content, status })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            app.open_todo(items);
+        }
+        "plan" => {
+            let title = value
+                .get("title")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Plan")
+                .to_string();
+            let content = value
+                .get("content")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            if !content.trim().is_empty() {
+                app.open_plan(title, content);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn handle_msg(msg: AppMsg, app: &mut App) {
     match msg {
-        AppMsg::ChatDelta(s) => app.session.append_to_last(&s),
-        AppMsg::ChatThinkingDelta(s) => app.session.append_thinking_to_last(&s),
+        AppMsg::ChatDelta(s) => {
+            note_model_output(app, &s);
+            app.session.append_to_last(&s);
+        }
+        AppMsg::ChatThinkingDelta(s) => {
+            note_model_output(app, &s);
+            app.session.append_thinking_to_last(&s);
+        }
+        AppMsg::ChatDebug(s) => {
+            app.notify(crate::function::notifications::ToastLevel::Info, s);
+        }
+        AppMsg::ChatToolResult {
+            name,
+            title,
+            content,
+        } => {
+            open_tool_function_panel(app, &name, &content);
+            app.session.append_tool_to_last(name, title, content);
+        }
+        AppMsg::LocalToolResult {
+            name,
+            title,
+            content,
+            context,
+        } => {
+            open_tool_function_panel(app, &name, &content);
+            app.session.push_tool_result_message(name, title, content);
+            if let Some(context) = context {
+                app.session.push(crate::session::Message::new(
+                    crate::session::Role::User,
+                    context,
+                ));
+            }
+            app.save_current_session();
+        }
         AppMsg::ChatUsage(u) => {
             let denom = u.input_tokens + u.cache_read_tokens;
-            let rate = if denom == 0 { 0.0 } else { u.cache_read_tokens as f64 / denom as f64 };
+            let rate = if denom == 0 {
+                0.0
+            } else {
+                u.cache_read_tokens as f64 / denom as f64
+            };
             app.hit_rate.record(rate);
             app.status.update_hit(&app.hit_rate);
+            if let Some(context_window_tokens) = u.context_window_tokens {
+                app.status.set_context_window_tokens(context_window_tokens);
+            }
+            let total_tokens =
+                u.input_tokens + u.output_tokens + u.cache_read_tokens + u.cache_creation_tokens;
+            if total_tokens > 0 {
+                app.status.update_token_usage(total_tokens);
+            }
+            if u.output_tokens > 0 {
+                app.response_output_tokens = Some(u.output_tokens);
+            }
         }
         AppMsg::ChatDone => {
+            finish_model_output_rate(app);
             app.session.finish_streaming();
+            app.save_current_session();
             app.inflight = None;
             use crate::function::notifications::ToastLevel;
             app.notify(ToastLevel::Ok, "response complete");
         }
         AppMsg::ChatError(e) => {
+            finish_model_output_rate(app);
             app.session.finish_streaming();
+            app.save_current_session();
             app.inflight = None;
             use crate::function::notifications::ToastLevel;
             app.notify(ToastLevel::Fail, e.clone());
@@ -166,7 +342,12 @@ fn handle_msg(msg: AppMsg, app: &mut App) {
                 format!("[request failed: {e}]"),
             ));
         }
-        AppMsg::ModelsFetched { provider, base_url, api_key, models } => {
+        AppMsg::ModelsFetched {
+            provider,
+            base_url,
+            api_key,
+            models,
+        } => {
             // Update any open picker
             if let Some(crate::function::SidebarTab::ModelPicker(s)) = app
                 .function
@@ -180,12 +361,43 @@ fn handle_msg(msg: AppMsg, app: &mut App) {
                 s.models = models.clone();
                 s.rebuild_filter();
             }
-            app.model_cache.put(provider, base_url, api_key, models.clone());
+            app.model_cache
+                .put(provider, base_url, api_key, models.clone());
+            if app.config.active_kind() == Some(provider) {
+                let active_model = app.config.active_model().to_string();
+                let selected_model = models.iter().find(|m| {
+                    m.id == active_model || m.request_id.as_deref() == Some(active_model.as_str())
+                });
+                if let Some(model) = selected_model {
+                    if let Some(active_id) = app.config.active.clone() {
+                        if let Some(entry) = app.config.entry_mut(&active_id) {
+                            if entry.model == model.id {
+                                entry.model =
+                                    model.request_id.clone().unwrap_or_else(|| model.id.clone());
+                            }
+                            entry.model_display = model.display.clone();
+                        }
+                    }
+                    app.status.set_model(&app.config.active_model_display());
+                    app.refresh_status_model_context();
+                    if let Some(tokens) = model.context_window_tokens {
+                        app.status.set_context_window_tokens(tokens);
+                    }
+                    app.save_config();
+                }
+            }
             app.model_cache.save(&app.model_cache_path);
             use crate::function::notifications::ToastLevel;
-            app.notify(ToastLevel::Ok, format!("fetched {} models for {}", models.len(), provider.as_str()));
+            app.notify(
+                ToastLevel::Ok,
+                format!("fetched {} models for {}", models.len(), provider.as_str()),
+            );
         }
-        AppMsg::ModelsFetchFailed { provider, error, no_endpoint } => {
+        AppMsg::ModelsFetchFailed {
+            provider,
+            error,
+            no_endpoint,
+        } => {
             if let Some(crate::function::SidebarTab::ModelPicker(s)) = app
                 .function
                 .tabs
@@ -201,11 +413,40 @@ fn handle_msg(msg: AppMsg, app: &mut App) {
                 s.no_endpoint = no_endpoint;
             }
             use crate::function::notifications::ToastLevel;
-            app.notify(ToastLevel::Fail, if no_endpoint {
-                "base_url has no /v1/models; use Manual id".to_string()
-            } else {
-                format!("fetch models for {}: {}", provider.as_str(), error)
-            });
+            app.notify(
+                ToastLevel::Fail,
+                if no_endpoint {
+                    "base_url has no /v1/models; use Manual id".to_string()
+                } else {
+                    format!("fetch models for {}: {}", provider.as_str(), error)
+                },
+            );
+        }
+        AppMsg::CursorAuthSucceeded {
+            access_token,
+            refresh_token,
+        } => {
+            use crate::config::{make_id, ProviderKind, ProviderMode};
+            use crate::function::notifications::ToastLevel;
+            let id = make_id(ProviderKind::Cursor, ProviderMode::Oauth);
+            if let Some(entry) = app.config.entry_mut(&id) {
+                entry.api_key = access_token;
+                entry.api_key_env = refresh_token;
+                if entry.model.trim().eq_ignore_ascii_case("auto") {
+                    entry.model.clear();
+                }
+            }
+            app.config.active = Some(id);
+            app.save_config();
+            app.status.set_provider_name(&app.config.active_name());
+            app.status.set_model(&app.config.active_model_display());
+            app.refresh_status_model_context();
+            app.notify(ToastLevel::Ok, "Cursor OAuth authorized");
+            crate::commands::open_model_picker_for_kind(app, ProviderKind::Cursor);
+        }
+        AppMsg::CursorAuthFailed(e) => {
+            use crate::function::notifications::ToastLevel;
+            app.notify(ToastLevel::Fail, format!("Cursor OAuth: {e}"));
         }
     }
 }
@@ -233,7 +474,10 @@ async fn handle_key(k: crossterm::event::KeyEvent, app: &mut App) {
                 if let Ok(mut cb) = arboard::Clipboard::new() {
                     let _ = cb.set_text(text.clone());
                     use crate::function::notifications::ToastLevel;
-                    app.notify(ToastLevel::Ok, format!("copied {} chars to clipboard", text.chars().count()));
+                    app.notify(
+                        ToastLevel::Ok,
+                        format!("copied {} chars to clipboard", text.chars().count()),
+                    );
                 }
             }
             app.tui_selection = None;
@@ -259,18 +503,26 @@ async fn handle_key(k: crossterm::event::KeyEvent, app: &mut App) {
 
     // Ctrl+I: focus input. Closes any active sidebar tab (returns to chat).
     if ctrl && matches!(k.code, KeyCode::Char('i') | KeyCode::Char('I')) {
-        app.function.tabs.retain(|t| matches!(t, crate::function::SidebarTab::Notifications));
+        app.function
+            .tabs
+            .retain(|t| matches!(t, crate::function::SidebarTab::Notifications));
         app.function.active = 0;
         return;
     }
 
     // Ctrl+L clears session
     if ctrl && matches!(k.code, KeyCode::Char('l') | KeyCode::Char('L')) {
-        app.session.clear();
+        app.start_new_session();
         use crate::function::notifications::ToastLevel;
         app.notify(ToastLevel::Info, "session cleared");
         return;
     }
+    // Ctrl+O toggles all collapsible tool output blocks at once.
+    if ctrl && matches!(k.code, KeyCode::Char('o') | KeyCode::Char('O')) {
+        app.session.toggle_all_tool_results();
+        return;
+    }
+
     // Ctrl+N: dedicated shortcut for the Notifications tab.
     //   - panel hidden  -> show it and focus Notifications
     //   - panel showing and Notifications is active -> hide
@@ -306,6 +558,9 @@ async fn handle_key(k: crossterm::event::KeyEvent, app: &mut App) {
             }
         }
         KeyCode::Tab => {
+            if complete_focused_candidate(app) {
+                return;
+            }
             // Tab cycles sidebar tabs forward. The Settings form and
             // ModelPicker each consume Tab themselves (for field-navigation
             // and search/list toggle), so they never reach here.
@@ -318,17 +573,7 @@ async fn handle_key(k: crossterm::event::KeyEvent, app: &mut App) {
             // If the completion tab is showing for a partial command, complete
             // the buffer with the focused candidate, then submit.
             if completion_is_focused(app) {
-                if let Some(idx) = completion_idx(app) {
-                    if let crate::function::SidebarTab::Completion(s) =
-                        &app.function.tabs[idx]
-                    {
-                        if let Some(cand) = s.candidates.get(s.cursor).cloned() {
-                            app.input.buffer = cand;
-                            app.input.cursor = app.input.buffer.len();
-                            app.input.clear_selection();
-                        }
-                    }
-                }
+                complete_focused_candidate(app);
                 submit_input(app);
                 return;
             }
@@ -419,8 +664,7 @@ async fn handle_key(k: crossterm::event::KeyEvent, app: &mut App) {
         KeyCode::Up => {
             if completion_is_focused(app) {
                 if let Some(idx) = completion_idx(app) {
-                    if let crate::function::SidebarTab::Completion(s) =
-                        &mut app.function.tabs[idx]
+                    if let crate::function::SidebarTab::Completion(s) = &mut app.function.tabs[idx]
                     {
                         s.move_up();
                     }
@@ -432,8 +676,7 @@ async fn handle_key(k: crossterm::event::KeyEvent, app: &mut App) {
         KeyCode::Down => {
             if completion_is_focused(app) {
                 if let Some(idx) = completion_idx(app) {
-                    if let crate::function::SidebarTab::Completion(s) =
-                        &mut app.function.tabs[idx]
+                    if let crate::function::SidebarTab::Completion(s) = &mut app.function.tabs[idx]
                     {
                         s.move_down();
                     }
@@ -450,7 +693,8 @@ fn cycle_sidebar_tab_back(app: &mut App) {
     if app.function.tabs.is_empty() {
         return;
     }
-    app.function.active = (app.function.active + app.function.tabs.len() - 1) % app.function.tabs.len();
+    app.function.active =
+        (app.function.active + app.function.tabs.len() - 1) % app.function.tabs.len();
     if app.function_visible {
         app.acknowledge_panel();
     }
@@ -464,17 +708,34 @@ fn completion_idx(app: &App) -> Option<usize> {
         .position(|t| matches!(t, crate::function::SidebarTab::Completion(_)))
 }
 
-/// True if the Completion tab is present and the input buffer is a partial
-/// command (still accepting more characters). In this state Up/Down navigate
-/// candidates and Enter completes the focused one.
+fn complete_focused_candidate(app: &mut App) -> bool {
+    let Some(idx) = completion_idx(app) else {
+        return false;
+    };
+    let Some(cand) = (match &app.function.tabs[idx] {
+        crate::function::SidebarTab::Completion(s) => s.candidates.get(s.cursor).cloned(),
+        _ => None,
+    }) else {
+        return false;
+    };
+    app.input.buffer = cand;
+    app.input.cursor = app.input.buffer.len();
+    app.input.clear_selection();
+    app.sync_completion();
+    true
+}
+
+/// True if the Completion tab is present and has at least one candidate.
+/// In this state Up/Down navigate candidates, Tab completes, and Enter
+/// executes the focused candidate.
 fn completion_is_focused(app: &App) -> bool {
-    if !app.input.is_command() {
+    let Some(idx) = completion_idx(app) else {
         return false;
-    }
-    if app.input.buffer.contains(' ') {
-        return false;
-    }
-    completion_idx(app).is_some()
+    };
+    matches!(
+        &app.function.tabs[idx],
+        crate::function::SidebarTab::Completion(s) if !s.candidates.is_empty()
+    )
 }
 
 /// Compute the byte index in the input buffer corresponding to a screen column,
@@ -646,6 +907,10 @@ fn submit_input(app: &mut App) {
     if raw.is_empty() {
         return;
     }
+    if submit_direct_tool_input(app, &raw) {
+        app.sync_completion();
+        return;
+    }
     if let Some(rest) = raw.strip_prefix('/') {
         let mut parts = rest.splitn(2, char::is_whitespace);
         let cmd: String = parts.next().unwrap_or("").to_lowercase();
@@ -656,6 +921,129 @@ fn submit_input(app: &mut App) {
     }
     // The buffer is now empty, so the completion tab (if any) should close.
     app.sync_completion();
+}
+
+fn submit_direct_tool_input(app: &mut App, raw: &str) -> bool {
+    let (name, title, args, include_context) = if let Some(code) = raw.strip_prefix("!!") {
+        let command = code.trim_start().to_string();
+        if command.trim().is_empty() {
+            app.notify(
+                crate::function::notifications::ToastLevel::Fail,
+                "shell command is empty",
+            );
+            return true;
+        }
+        (
+            "shell_command".to_string(),
+            format!("$ {}", command.trim()),
+            serde_json::json!({ "command": command }).to_string(),
+            true,
+        )
+    } else if let Some(code) = raw.strip_prefix('!') {
+        let command = code.trim_start().to_string();
+        if command.trim().is_empty() {
+            app.notify(
+                crate::function::notifications::ToastLevel::Fail,
+                "shell command is empty",
+            );
+            return true;
+        }
+        (
+            "shell_command".to_string(),
+            format!("$ {}", command.trim()),
+            serde_json::json!({ "command": command }).to_string(),
+            false,
+        )
+    } else if let Some(code) = raw.strip_prefix("$$") {
+        let code = code.trim_start().to_string();
+        if code.trim().is_empty() {
+            app.notify(
+                crate::function::notifications::ToastLevel::Fail,
+                "python code is empty",
+            );
+            return true;
+        }
+        (
+            "python_command".to_string(),
+            "python".to_string(),
+            serde_json::json!({ "code": code }).to_string(),
+            true,
+        )
+    } else if let Some(code) = raw.strip_prefix('$') {
+        let code = code.trim_start().to_string();
+        if code.trim().is_empty() {
+            app.notify(
+                crate::function::notifications::ToastLevel::Fail,
+                "python code is empty",
+            );
+            return true;
+        }
+        (
+            "python_command".to_string(),
+            "python".to_string(),
+            serde_json::json!({ "code": code }).to_string(),
+            false,
+        )
+    } else {
+        return false;
+    };
+
+    app.maybe_title_from_first_prompt(raw);
+    app.session.push(crate::session::Message::new(
+        crate::session::Role::User,
+        raw.to_string(),
+    ));
+    if let Some(tx) = app.msg_tx.clone() {
+        let cwd = app.cwd.clone();
+        tokio::spawn(async move {
+            let result = crate::tools::execute_tool(&name, &args, &cwd).await;
+            let content = tool_result_display(&result);
+            let context = if include_context {
+                Some(local_tool_context(&name, &title, &content))
+            } else {
+                None
+            };
+            let _ = tx.send(AppMsg::LocalToolResult {
+                name,
+                title,
+                content,
+                context,
+            });
+        });
+    } else {
+        app.notify(
+            crate::function::notifications::ToastLevel::Fail,
+            "event channel is not available",
+        );
+    }
+    true
+}
+
+fn tool_result_display(result: &str) -> String {
+    if let Ok(val) = serde_json::from_str::<serde_json::Value>(result) {
+        if val.get("ok").and_then(|v| v.as_bool()) == Some(true) {
+            val.get("result")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string()
+        } else {
+            val.get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or(result)
+                .to_string()
+        }
+    } else {
+        result.to_string()
+    }
+}
+
+fn local_tool_context(name: &str, title: &str, content: &str) -> String {
+    format!(
+        "Context from {name}:
+{title}
+
+{content}"
+    )
 }
 
 /// What pressing Enter (or Shift+Enter) should do, given the configured
@@ -675,12 +1063,20 @@ fn enter_action(behavior: crate::config::EnterBehavior, shift: bool) -> EnterAct
         // "Enter sends / Shift+Enter newline":
         //   plain Enter (no shift) submits, Shift+Enter inserts a newline.
         EnterBehavior::EnterSends => {
-            if shift { EnterAction::Newline } else { EnterAction::Send }
+            if shift {
+                EnterAction::Newline
+            } else {
+                EnterAction::Send
+            }
         }
         // "Enter newline / Shift+Enter sends":
         //   plain Enter inserts a newline, Shift+Enter submits.
         EnterBehavior::EnterNewline => {
-            if shift { EnterAction::Send } else { EnterAction::Newline }
+            if shift {
+                EnterAction::Send
+            } else {
+                EnterAction::Newline
+            }
         }
     }
 }
@@ -713,11 +1109,23 @@ fn dispatch_to_active_tab(k: crossterm::event::KeyEvent, app: &mut App) -> bool 
         crate::function::SidebarTab::Notifications,
     );
     let consumed = match &mut tab {
+        crate::function::SidebarTab::Notifications => handle_notifications_key(k, app),
         crate::function::SidebarTab::ModelPicker(state) => handle_picker_key(k, app, state),
-        crate::function::SidebarTab::ProviderPicker(state) => handle_provider_picker_key(k, app, state),
+        crate::function::SidebarTab::ProviderPicker(state) => {
+            handle_provider_picker_key(k, app, state)
+        }
         crate::function::SidebarTab::Settings(state) => handle_settings_key(k, app, state),
         crate::function::SidebarTab::ThinkingPicker(state) => handle_thinking_key(k, app, state),
         crate::function::SidebarTab::TimelinePicker(state) => handle_timeline_key(k, app, state),
+        crate::function::SidebarTab::SessionPicker(state) => {
+            handle_session_picker_key(k, app, state)
+        }
+        crate::function::SidebarTab::SessionRename(state) => {
+            handle_session_rename_key(k, app, state)
+        }
+        crate::function::SidebarTab::Ask(state) => handle_ask_key(k, app, state),
+        crate::function::SidebarTab::Todo(state) => handle_todo_key(k, app, state),
+        crate::function::SidebarTab::Plan(state) => handle_plan_key(k, app, state),
         _ => false,
     };
     if active < app.function.tabs.len()
@@ -729,6 +1137,285 @@ fn dispatch_to_active_tab(k: crossterm::event::KeyEvent, app: &mut App) -> bool 
         app.function.tabs[active] = tab;
     }
     consumed
+}
+
+fn close_active_function_tab(app: &mut App) {
+    let active = app.function.active;
+    if active < app.function.tabs.len() {
+        app.function.tabs.remove(active);
+        if app.function.active >= app.function.tabs.len() {
+            app.function.active = app.function.tabs.len().saturating_sub(1);
+        }
+    }
+    app.maybe_hide_panel();
+}
+
+fn handle_notifications_key(k: crossterm::event::KeyEvent, app: &mut App) -> bool {
+    use crossterm::event::KeyCode;
+    match k.code {
+        KeyCode::Up => {
+            app.notifications.move_up();
+            true
+        }
+        KeyCode::Down => {
+            app.notifications.move_down();
+            let visible = 8usize;
+            if app.notifications.cursor >= app.notifications.scroll + visible {
+                app.notifications.scroll = app.notifications.cursor + 1 - visible;
+            }
+            true
+        }
+        KeyCode::Backspace => app.notifications.backspace_query(),
+        KeyCode::Esc => {
+            if !app.notifications.query.is_empty() {
+                app.notifications.query.clear();
+                app.notifications.cursor = 0;
+                app.notifications.scroll = 0;
+                true
+            } else {
+                close_active_function_tab(app);
+                true
+            }
+        }
+        KeyCode::Char(c) => {
+            if k.modifiers.is_empty() || k.modifiers == crossterm::event::KeyModifiers::SHIFT {
+                app.notifications.insert_query_char(c);
+                true
+            } else {
+                false
+            }
+        }
+        _ => false,
+    }
+}
+
+fn handle_ask_key(
+    k: crossterm::event::KeyEvent,
+    app: &mut App,
+    state: &mut crate::function::AskState,
+) -> bool {
+    use crossterm::event::KeyCode;
+    match k.code {
+        KeyCode::Up => {
+            state.cursor = state.cursor.saturating_sub(1);
+            true
+        }
+        KeyCode::Down => {
+            if !state.options.is_empty() {
+                state.cursor = (state.cursor + 1).min(state.options.len().saturating_sub(1));
+            }
+            true
+        }
+        KeyCode::Enter => {
+            if let Some(answer) = state.options.get(state.cursor).cloned() {
+                state.answered = Some(answer.clone());
+                app.session.push(crate::session::Message::new(
+                    crate::session::Role::User,
+                    format!("Answer: {answer}"),
+                ));
+                app.notify(
+                    crate::function::notifications::ToastLevel::Ok,
+                    "answer recorded",
+                );
+            }
+            true
+        }
+        KeyCode::Esc => {
+            close_active_function_tab(app);
+            true
+        }
+        _ => false,
+    }
+}
+
+fn handle_todo_key(
+    k: crossterm::event::KeyEvent,
+    _app: &mut App,
+    state: &mut crate::function::TodoState,
+) -> bool {
+    use crossterm::event::KeyCode;
+    match k.code {
+        KeyCode::Up => {
+            state.cursor = state.cursor.saturating_sub(1);
+            true
+        }
+        KeyCode::Down => {
+            if !state.items.is_empty() {
+                state.cursor = (state.cursor + 1).min(state.items.len().saturating_sub(1));
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
+fn handle_plan_key(
+    k: crossterm::event::KeyEvent,
+    app: &mut App,
+    state: &mut crate::function::PlanState,
+) -> bool {
+    use crossterm::event::KeyCode;
+    match k.code {
+        KeyCode::Enter => {
+            state.approved = Some(true);
+            app.session.push(crate::session::Message::new(
+                crate::session::Role::User,
+                "Plan approved.",
+            ));
+            app.notify(
+                crate::function::notifications::ToastLevel::Ok,
+                "plan approved",
+            );
+            true
+        }
+        KeyCode::Char('r') | KeyCode::Char('R') => {
+            state.approved = Some(false);
+            app.session.push(crate::session::Message::new(
+                crate::session::Role::User,
+                "Plan rejected.",
+            ));
+            app.notify(
+                crate::function::notifications::ToastLevel::Warn,
+                "plan rejected",
+            );
+            true
+        }
+        KeyCode::Esc => {
+            close_active_function_tab(app);
+            true
+        }
+        _ => false,
+    }
+}
+
+fn handle_session_picker_key(
+    k: crossterm::event::KeyEvent,
+    app: &mut App,
+    state: &mut crate::function::SessionPickerState,
+) -> bool {
+    use crossterm::event::KeyCode;
+    match k.code {
+        KeyCode::Tab => {
+            state.toggle_scope(&app.cwd);
+            true
+        }
+        KeyCode::Esc => {
+            close_active_function_tab(app);
+            true
+        }
+        KeyCode::Up => {
+            if state.cursor > 0 {
+                state.cursor -= 1;
+            }
+            true
+        }
+        KeyCode::Down => {
+            if state.cursor + 1 < state.filtered.len() {
+                state.cursor += 1;
+            }
+            true
+        }
+        KeyCode::Backspace => {
+            state.query.pop();
+            state.rebuild_filter();
+            true
+        }
+        KeyCode::Enter => {
+            if let Some(id) = state.selected_id() {
+                app.resume_session(&id);
+                close_active_function_tab(app);
+            }
+            true
+        }
+        KeyCode::Char(c) => {
+            match c {
+                'r' | 'R' if state.mode == crate::function::SessionPickerMode::Manage => {
+                    if let (Some(id), Some(title)) = (state.selected_id(), state.selected_title()) {
+                        crate::commands::open_session_rename(app, Some(id), title);
+                    }
+                }
+                'd' | 'D' if state.mode == crate::function::SessionPickerMode::Manage => {
+                    if let Some(id) = state.selected_id() {
+                        match crate::session::store::delete(&id) {
+                            Ok(()) => {
+                                app.notify(
+                                    crate::function::notifications::ToastLevel::Ok,
+                                    "session deleted",
+                                );
+                                state.reload(&app.cwd);
+                            }
+                            Err(e) => app.notify(
+                                crate::function::notifications::ToastLevel::Fail,
+                                format!("delete session: {e}"),
+                            ),
+                        }
+                    }
+                }
+                'f' | 'F' if state.mode == crate::function::SessionPickerMode::Manage => {
+                    if let Some(id) = state.selected_id() {
+                        app.fork_session(Some(id));
+                        state.reload(&app.cwd);
+                    }
+                }
+                _ => {
+                    state.query.push(c);
+                    state.rebuild_filter();
+                }
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
+fn handle_session_rename_key(
+    k: crossterm::event::KeyEvent,
+    app: &mut App,
+    state: &mut crate::function::SessionRenameState,
+) -> bool {
+    use crossterm::event::KeyCode;
+    match k.code {
+        KeyCode::Esc => {
+            close_active_function_tab(app);
+            true
+        }
+        KeyCode::Enter => {
+            app.rename_session(state.target_id.clone(), state.title.clone());
+            close_active_function_tab(app);
+            true
+        }
+        KeyCode::Left => {
+            if state.cursor > 0 {
+                state.cursor -= 1;
+            }
+            true
+        }
+        KeyCode::Right => {
+            if state.cursor < state.title.len() {
+                state.cursor += 1;
+            }
+            true
+        }
+        KeyCode::Backspace => {
+            if state.cursor > 0 {
+                state.cursor -= 1;
+                state.title.remove(state.cursor);
+            }
+            true
+        }
+        KeyCode::Delete => {
+            if state.cursor < state.title.len() {
+                state.title.remove(state.cursor);
+            }
+            true
+        }
+        KeyCode::Char(c) => {
+            state.title.insert(state.cursor, c);
+            state.cursor += c.len_utf8();
+            true
+        }
+        _ => false,
+    }
 }
 
 /// First step of the `/model` flow: pick a provider. On Enter, a
@@ -745,17 +1432,18 @@ fn handle_provider_picker_key(
     state: &mut crate::function::ProviderPickerState,
 ) -> bool {
     use crossterm::event::KeyCode;
-    let open_model_picker_for_selected = |app: &mut App, state: &crate::function::ProviderPickerState| {
-        if let Some(id) = state.selected_id() {
-            if let Some((kind, _)) = crate::config::parse_id(&id) {
-                // Push the model picker for the chosen kind. Do NOT
-                // remove the ProviderPicker — keeping it in the tab
-                // stack means the user can Esc back to provider
-                // selection.
-                crate::commands::open_model_picker_for_kind(app, kind);
+    let open_model_picker_for_selected =
+        |app: &mut App, state: &crate::function::ProviderPickerState| {
+            if let Some(id) = state.selected_id() {
+                if let Some((kind, _)) = crate::config::parse_id(&id) {
+                    // Push the model picker for the chosen kind. Do NOT
+                    // remove the ProviderPicker — keeping it in the tab
+                    // stack means the user can Esc back to provider
+                    // selection.
+                    crate::commands::open_model_picker_for_kind(app, kind);
+                }
             }
-        }
-    };
+        };
     match state.focus {
         crate::function::PickerFocus::Search => match k.code {
             KeyCode::Esc => {
@@ -790,9 +1478,6 @@ fn handle_provider_picker_key(
             KeyCode::Up => {
                 if state.cursor > 0 {
                     state.cursor -= 1;
-                } else {
-                    // At the top: jump back to the search box.
-                    state.focus = crate::function::PickerFocus::Search;
                 }
                 true
             }
@@ -888,13 +1573,7 @@ fn handle_picker_key(
                 true
             }
             KeyCode::Enter => {
-                // When the filter yields exactly one model, select it
-                // directly — the user probably just typed enough of the
-                // name to narrow the list and wants that hit. Otherwise
-                // fall through to the manual-commit path (e.g. entering
-                // a model id that does not match any cached entry).
-                if state.filtered.len() == 1 {
-                    let idx = state.filtered[0];
+                if let Some(&idx) = state.filtered.get(state.cursor) {
                     let id = state.models[idx].id.clone();
                     commit_model(_app, state.provider, id, false);
                 } else {
@@ -911,10 +1590,6 @@ fn handle_picker_key(
             KeyCode::Up => {
                 if state.cursor > 0 {
                     state.cursor -= 1;
-                } else {
-                    // At the top of the list: go back to Search so the
-                    // user can continue typing a filter.
-                    state.focus = crate::function::PickerFocus::Search;
                 }
                 true
             }
@@ -1069,9 +1744,6 @@ fn handle_timeline_key(
             KeyCode::Up => {
                 if state.cursor > 0 {
                     state.cursor -= 1;
-                } else {
-                    // At the top: jump back to the search box.
-                    state.focus = crate::function::PickerFocus::Search;
                 }
                 true
             }
@@ -1124,7 +1796,10 @@ fn commit_timeline_jump(app: &mut App, state: &crate::function::TimelinePickerSt
         }
     }
     app.maybe_hide_panel();
-    app.notify(ToastLevel::Info, format!("jumped to message #{}", msg_idx + 1));
+    app.notify(
+        ToastLevel::Info,
+        format!("jumped to message #{}", msg_idx + 1),
+    );
 }
 
 fn trigger_picker_fetch(app: &mut App, state: &mut crate::function::ModelPickerState) {
@@ -1133,7 +1808,10 @@ fn trigger_picker_fetch(app: &mut App, state: &mut crate::function::ModelPickerS
         Some(id) => id.clone(),
         None => {
             use crate::function::notifications::ToastLevel;
-            app.notify(ToastLevel::Fail, "no active provider; configure one in /settings");
+            app.notify(
+                ToastLevel::Fail,
+                "no active provider; configure one in /settings",
+            );
             return;
         }
     };
@@ -1189,6 +1867,13 @@ fn handle_settings_key(
 ) -> bool {
     use crossterm::event::{KeyCode, KeyModifiers};
     let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+    if matches!(state.level, crate::function::SettingsLevel::NewProviderKind) {
+        if matches!(k.code, KeyCode::Enter) {
+            handle_settings_enter(app, state);
+            return true;
+        }
+        return handle_new_provider_key(k, state);
+    }
     // Navigation keys are level-agnostic.
     match k.code {
         KeyCode::Up => {
@@ -1221,9 +1906,7 @@ fn handle_settings_key(
     let level = std::mem::replace(&mut state.level, crate::function::SettingsLevel::TopLevel);
     let mut taken = level;
     let handled = match &mut taken {
-        crate::function::SettingsLevel::ConfigForm(form) => {
-            handle_form_text(k, ctrl, form)
-        }
+        crate::function::SettingsLevel::ConfigForm(form) => handle_form_text(k, ctrl, form),
         _ => false,
     };
     state.level = taken;
@@ -1269,7 +1952,8 @@ pub(crate) fn handle_ctrl_n(app: &mut App) {
         if let Some(i) = notif_idx {
             app.function.active = i;
         } else {
-            app.function.push(crate::function::SidebarTab::Notifications);
+            app.function
+                .push(crate::function::SidebarTab::Notifications);
         }
         app.function_visible = true;
         app.acknowledge_panel();
@@ -1306,7 +1990,9 @@ fn handle_settings_back(app: &mut App, state: &mut crate::function::SettingsStat
             state.cursor = 0;
             state.clamp_cursor(&app.config);
         }
-        SettingsLevel::ThinkingDisplayList | SettingsLevel::EnterBehaviorList => {
+        SettingsLevel::ThinkingDisplayList
+        | SettingsLevel::ToolResultDisplayList
+        | SettingsLevel::EnterBehaviorList => {
             state.level = SettingsLevel::TopLevel;
             state.cursor = 0;
             state.clamp_cursor(&app.config);
@@ -1349,14 +2035,14 @@ fn handle_settings_enter(app: &mut App, state: &mut crate::function::SettingsSta
         SettingsLevel::TopLevel => match cursor {
             0 => SettingsLevel::ProviderList,
             1 => SettingsLevel::ThinkingDisplayList,
+            2 => SettingsLevel::ToolResultDisplayList,
             _ => SettingsLevel::EnterBehaviorList,
         },
         SettingsLevel::ProviderList => {
             if cursor == 0 {
                 SettingsLevel::NewProviderKind
             } else {
-                let mut keys: Vec<String> = app.config.entries.keys().cloned().collect();
-                keys.sort();
+                let keys = app.config.configured_provider_ids();
                 match keys.get(cursor - 1) {
                     Some(id) => SettingsLevel::ExistingActions(id.clone()),
                     None => SettingsLevel::ProviderList,
@@ -1364,13 +2050,14 @@ fn handle_settings_enter(app: &mut App, state: &mut crate::function::SettingsSta
             }
         }
         SettingsLevel::NewProviderKind => {
-            let ids = crate::config::Config::all_possible_ids();
-            match ids.get(cursor).and_then(|id| parse_id(id).map(|(k, m)| (id, k, m))) {
-                Some((_id, kind, mode)) => {
-                    SettingsLevel::ConfigForm(
-                        crate::function::ConfigFormState::new_for_create(kind, mode),
-                    )
-                }
+            match state
+                .new_provider
+                .selected_id()
+                .and_then(|id| parse_id(&id).map(|(k, m)| (id, k, m)))
+            {
+                Some((_id, kind, mode)) => SettingsLevel::ConfigForm(
+                    crate::function::ConfigFormState::new_for_create(kind, mode),
+                ),
                 None => SettingsLevel::NewProviderKind,
             }
         }
@@ -1379,9 +2066,9 @@ fn handle_settings_enter(app: &mut App, state: &mut crate::function::SettingsSta
                 // edit
                 if let Some((_kind, mode)) = parse_id(&id) {
                     let cfg = app.config.entry(&id).cloned().unwrap_or_default();
-                    SettingsLevel::ConfigForm(
-                        crate::function::ConfigFormState::new_for_edit(id, &cfg, mode),
-                    )
+                    SettingsLevel::ConfigForm(crate::function::ConfigFormState::new_for_edit(
+                        id, &cfg, mode,
+                    ))
                 } else {
                     SettingsLevel::ProviderList
                 }
@@ -1390,7 +2077,7 @@ fn handle_settings_enter(app: &mut App, state: &mut crate::function::SettingsSta
                 if let Some(cfg) = app.config.entry(&id).cloned() {
                     app.config.entries.remove(&id);
                     if app.config.active.as_deref() == Some(id.as_str()) {
-                        app.config.active = app.config.entries.keys().next().cloned();
+                        app.config.active = app.config.configured_provider_ids().into_iter().next();
                     }
                     if let Err(e) = app.config.save(&app.config_path) {
                         use crate::function::notifications::ToastLevel;
@@ -1406,6 +2093,7 @@ fn handle_settings_enter(app: &mut App, state: &mut crate::function::SettingsSta
                         // entry.
                         app.status.set_provider_name(&app.config.active_name());
                         app.status.set_model(&app.config.active_model_display());
+                        app.refresh_status_model_context();
                     }
                 }
                 SettingsLevel::ProviderList
@@ -1414,11 +2102,33 @@ fn handle_settings_enter(app: &mut App, state: &mut crate::function::SettingsSta
         SettingsLevel::ThinkingDisplayList => {
             use crate::config::ThinkingDisplay;
             use crate::function::notifications::ToastLevel;
-            let modes = [ThinkingDisplay::Show, ThinkingDisplay::Hide, ThinkingDisplay::ShowWhileStreaming];
+            let modes = [
+                ThinkingDisplay::Show,
+                ThinkingDisplay::Hide,
+                ThinkingDisplay::ShowWhileStreaming,
+            ];
             if let Some(&mode) = modes.get(cursor) {
                 app.config.thinking_display = mode;
                 app.save_config();
-                app.notify(ToastLevel::Ok, format!("thinking display: {}", mode.as_str()));
+                app.notify(
+                    ToastLevel::Ok,
+                    format!("thinking display: {}", mode.as_str()),
+                );
+            }
+            SettingsLevel::TopLevel
+        }
+        SettingsLevel::ToolResultDisplayList => {
+            use crate::config::ToolResultDisplay;
+            use crate::function::notifications::ToastLevel;
+            let modes = [
+                ToolResultDisplay::Show,
+                ToolResultDisplay::Hide,
+                ToolResultDisplay::ShowWhileStreaming,
+            ];
+            if let Some(&mode) = modes.get(cursor) {
+                app.config.tool_display = mode;
+                app.save_config();
+                app.notify(ToastLevel::Ok, format!("tool display: {}", mode.as_str()));
             }
             SettingsLevel::TopLevel
         }
@@ -1471,7 +2181,7 @@ fn settings_save_form(app: &mut App, form: crate::function::ConfigFormState) {
     use crate::function::notifications::ToastLevel;
 
     let id = form.id.clone();
-    let (kind, mode) = parse_id(&id).unwrap_or((ProviderKind::Openai, ProviderMode::Key));
+    let (_kind, mode) = parse_id(&id).unwrap_or((ProviderKind::Openai, ProviderMode::Key));
     let base_url = form.base_url.trim().to_string();
     let key_or_env = form.key_or_env.clone();
     let was_new = form.is_new;
@@ -1480,21 +2190,14 @@ fn settings_save_form(app: &mut App, form: crate::function::ConfigFormState) {
     // the user did not touch the corresponding field. We always pull the
     // current entry from config, then overwrite with form values.
     let existing = app.config.entry(&id).cloned();
-    let model = if let Some(c) = existing.as_ref() {
-        if c.model.is_empty() {
-            match kind {
-                ProviderKind::Openai => "gpt-4o-mini".to_string(),
-                ProviderKind::Anthropic => "claude-3-5-sonnet-latest".to_string(),
-            }
-        } else {
-            c.model.clone()
-        }
-    } else {
-        match kind {
-            ProviderKind::Openai => "gpt-4o-mini".to_string(),
-            ProviderKind::Anthropic => "claude-3-5-sonnet-latest".to_string(),
-        }
-    };
+    let model = existing
+        .as_ref()
+        .map(|c| c.model.clone())
+        .unwrap_or_default();
+    let model_display = existing
+        .as_ref()
+        .map(|c| c.model_display.clone())
+        .unwrap_or_default();
 
     let mut new_cfg = crate::config::ProviderConfig {
         api_key: existing
@@ -1507,6 +2210,7 @@ fn settings_save_form(app: &mut App, form: crate::function::ConfigFormState) {
             .unwrap_or_default(),
         base_url,
         model,
+        model_display,
         name: String::new(),
     };
     // For new entries, use the form's name directly.
@@ -1516,18 +2220,19 @@ fn settings_save_form(app: &mut App, form: crate::function::ConfigFormState) {
     // For edit entries, use the form's value only if the user actually
     // modified it (otherwise the masked placeholder would clobber the
     // real key on save).
-    let apply_form_value = was_new
-        || (mode == ProviderMode::Key && form.key_modified)
-        || mode == ProviderMode::Env;
+    let apply_form_value =
+        was_new || (mode == ProviderMode::Key && form.key_modified) || mode == ProviderMode::Env;
     if apply_form_value {
         match mode {
             ProviderMode::Key => new_cfg.api_key = key_or_env,
             ProviderMode::Env => new_cfg.api_key_env = key_or_env,
+            ProviderMode::Oauth => {}
         }
     }
 
     app.config.entries.insert(id.clone(), new_cfg);
     app.config.active = Some(id.clone());
+    app.config.sanitize_entries();
 
     if let Err(e) = app.config.save(&app.config_path) {
         app.notify(ToastLevel::Fail, format!("save: {e}"));
@@ -1543,11 +2248,16 @@ fn settings_save_form(app: &mut App, form: crate::function::ConfigFormState) {
     // refresh status bar
     app.status.set_provider_name(&app.config.active_name());
     app.status.set_model(&app.config.active_model_display());
+    app.refresh_status_model_context();
 
     // Open the model picker so the user can pick a model. Validate first
     // so we can set the picker's initial state correctly (fetching vs
     // idle with an error message).
     if let Some(k) = app.config.active_kind() {
+        if k == ProviderKind::Cursor {
+            start_cursor_oauth(app);
+            return;
+        }
         let active_id = match app.config.active.clone() {
             Some(id) => id,
             None => return,
@@ -1559,7 +2269,8 @@ fn settings_save_form(app: &mut App, form: crate::function::ConfigFormState) {
             Err(e) => state.fetch_error = Some(e),
         }
         let should_fetch = state.fetching;
-        app.function.push(crate::function::SidebarTab::ModelPicker(state));
+        app.function
+            .push(crate::function::SidebarTab::ModelPicker(state));
         app.function_visible = true;
         app.acknowledge_panel();
 
@@ -1597,6 +2308,83 @@ fn settings_save_form(app: &mut App, form: crate::function::ConfigFormState) {
                 });
             }
         }
+    }
+}
+
+fn start_cursor_oauth(app: &mut App) {
+    use crate::function::notifications::ToastLevel;
+    let params = crate::providers::cursor::generate_auth_params();
+    let login_url = params.login_url.clone();
+    match crate::providers::cursor::open_browser(&login_url) {
+        Ok(_) => app.notify(ToastLevel::Info, "opened Cursor OAuth login in browser"),
+        Err(e) => app.notify(
+            ToastLevel::Warn,
+            format!("open browser failed: {e}; visit {login_url}"),
+        ),
+    }
+    let client = app.reqwest.clone();
+    if let Some(tx) = app.msg_tx.clone() {
+        tokio::spawn(async move {
+            match crate::providers::cursor::poll_auth(&client, &params.uuid, &params.verifier).await
+            {
+                Ok(tokens) => {
+                    let _ = tx.send(AppMsg::CursorAuthSucceeded {
+                        access_token: tokens.access_token,
+                        refresh_token: tokens.refresh_token,
+                    });
+                }
+                Err(e) => {
+                    let _ = tx.send(AppMsg::CursorAuthFailed(format!("{e}")));
+                }
+            }
+        });
+    }
+}
+
+fn handle_new_provider_key(
+    k: crossterm::event::KeyEvent,
+    state: &mut crate::function::SettingsState,
+) -> bool {
+    use crossterm::event::KeyCode;
+    let picker = &mut state.new_provider;
+    match k.code {
+        KeyCode::Esc => {
+            if picker.query.is_empty() {
+                state.level = crate::function::SettingsLevel::ProviderList;
+                state.cursor = 0;
+            } else {
+                picker.query.clear();
+                picker.rebuild_filter();
+                picker.focus = crate::function::PickerFocus::List;
+            }
+            true
+        }
+        KeyCode::Enter => false,
+        KeyCode::Up => {
+            picker.focus = crate::function::PickerFocus::List;
+            picker.cursor = picker.cursor.saturating_sub(1);
+            true
+        }
+        KeyCode::Down => {
+            picker.focus = crate::function::PickerFocus::List;
+            if picker.cursor + 1 < picker.filtered.len() {
+                picker.cursor += 1;
+            }
+            true
+        }
+        KeyCode::Backspace => {
+            picker.query.pop();
+            picker.focus = crate::function::PickerFocus::Search;
+            picker.rebuild_filter();
+            true
+        }
+        KeyCode::Char(c) => {
+            picker.query.push(c);
+            picker.focus = crate::function::PickerFocus::Search;
+            picker.rebuild_filter();
+            true
+        }
+        _ => false,
     }
 }
 
@@ -1645,6 +2433,12 @@ fn handle_form_text(
             _ => false,
         },
         ConfigField::KeyOrEnv => {
+            if crate::config::parse_id(&form.id)
+                .map(|(_, m)| m == crate::config::ProviderMode::Oauth)
+                .unwrap_or(false)
+            {
+                return false;
+            }
             // First edit on the api_key field clears the saved (masked)
             // value so the user can type a new key. If they don't touch
             // the field, the original is preserved on save.
@@ -1682,7 +2476,9 @@ pub fn commit_model(
     //    - Otherwise, find any existing entry with the same kind.
     //    - Otherwise, leave the target unset (no entry to attach the model to).
     let target_id: Option<String> = match app.config.active.as_deref() {
-        Some(id) if parse_id(id).map(|(k, _)| k == provider).unwrap_or(false) => Some(id.to_string()),
+        Some(id) if parse_id(id).map(|(k, _)| k == provider).unwrap_or(false) => {
+            Some(id.to_string())
+        }
         Some(_) | None => app
             .config
             .entries
@@ -1691,17 +2487,40 @@ pub fn commit_model(
             .cloned(),
     };
 
-    // 2. Update the target entry's model and make it active.
+    let selected_model =
+        app.model_cache
+            .get(provider)
+            .and_then(|cache| {
+                cache.models.iter().find(|m| {
+                    m.id == model_id || m.request_id.as_deref() == Some(model_id.as_str())
+                })
+            })
+            .cloned();
+    let request_model_id = selected_model
+        .as_ref()
+        .and_then(|m| m.request_id.clone())
+        .unwrap_or_else(|| model_id.clone());
+    let display_model = selected_model
+        .as_ref()
+        .map(|m| m.display.clone())
+        .unwrap_or_else(|| model_id.clone());
+
+    // 2. Update the target entry's request model id and make it active.
     if let Some(id) = target_id {
         app.config.active = Some(id.clone());
         if let Some(entry) = app.config.entry_mut(&id) {
-            entry.model = model_id.clone();
+            entry.model = request_model_id.clone();
+            entry.model_display = display_model.clone();
         }
     }
 
     // 3. Refresh the status bar and persist to disk.
     app.status.set_provider_name(&app.config.active_name());
     app.status.set_model(&app.config.active_model_display());
+    app.refresh_status_model_context();
+    if let Some(tokens) = selected_model.and_then(|m| m.context_window_tokens) {
+        app.status.set_context_window_tokens(tokens);
+    }
     app.save_config();
 
     // 4. Close the picker tab.
@@ -1742,10 +2561,10 @@ pub fn commit_model(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Config, ProviderConfig, ProviderId, ProviderKind, ProviderMode, make_id};
-    use crate::function::{FunctionPanel, ModelPickerState};
+    use crate::config::{make_id, Config, ProviderConfig, ProviderId, ProviderKind, ProviderMode};
     use crate::function::notifications::Notifications;
     use crate::function::SidebarTab;
+    use crate::function::{FunctionPanel, ModelPickerState};
 
     fn make_app() -> App {
         let cfg = Config::default();
@@ -1755,14 +2574,16 @@ mod tests {
         use std::sync::atomic::{AtomicUsize, Ordering};
         static COUNTER: AtomicUsize = AtomicUsize::new(0);
         let id = COUNTER.fetch_add(1, Ordering::SeqCst);
-        let tmp = std::env::temp_dir()
-            .join(format!("fish-coding-agent-test-{id}.json"));
+        let tmp = std::env::temp_dir().join(format!("fish-coding-agent-test-{id}.json"));
         let _ = std::fs::remove_file(&tmp);
         let cache_file = tmp.parent().unwrap_or(&tmp).join("model-cache.json");
         App {
             config: cfg,
             config_path: tmp,
             session: crate::session::Session::default(),
+            session_id: crate::session::store::new_session_id(),
+            session_title: "test".to_string(),
+            mode: crate::function::AppMode::Yolo,
             function: FunctionPanel::new(),
             input: crate::input::InputState::new(),
             status: crate::input::status::StatusBar::new(),
@@ -1771,6 +2592,10 @@ mod tests {
             notifications: Notifications::default(),
             model_cache: crate::function::notifications::ModelCache::default(),
             hit_rate: crate::function::notifications::HitRate::new(50),
+            token_rate: crate::function::notifications::TokenRate::new(50),
+            response_started_at: None,
+            response_output_chars: 0,
+            response_output_tokens: None,
             reqwest: reqwest::Client::new(),
             inflight: None,
             cwd: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
@@ -1782,6 +2607,7 @@ mod tests {
             tui_drag_start: None,
             model_cache_path: cache_file,
             thinking_toggle_rows: Vec::new(),
+            tool_toggle_rows: Vec::new(),
             session_area: None,
             input_cursor_screen: None,
             function_panel_cursor: None,
@@ -1802,7 +2628,7 @@ mod tests {
         assert_eq!(app.config.active.as_deref(), Some(id.as_str()));
         let entry = app.config.entry(&id).unwrap();
         assert_eq!(entry.base_url, "https://api.openai.com/v1");
-        assert_eq!(entry.model, "gpt-4o-mini");
+        assert_eq!(entry.model, "");
     }
 
     #[test]
@@ -1817,6 +2643,7 @@ mod tests {
                 api_key_env: "ANTHROPIC_API_KEY".to_string(),
                 base_url: "https://api.anthropic.com".to_string(),
                 model: "claude-3-5-sonnet-latest".to_string(),
+                model_display: String::new(),
                 name: String::new(),
             },
         );
@@ -1852,7 +2679,12 @@ mod tests {
         let mut app = make_app();
         // active is Openai:key but user picks for Anthropic
         app.config.active = Some(make_id(ProviderKind::Openai, ProviderMode::Key));
-        commit_model(&mut app, ProviderKind::Anthropic, "claude-3-5-sonnet-latest".to_string(), false);
+        commit_model(
+            &mut app,
+            ProviderKind::Anthropic,
+            "claude-3-5-sonnet-latest".to_string(),
+            false,
+        );
         // active should now be the Anthropic entry
         let id = make_id(ProviderKind::Anthropic, ProviderMode::Key);
         assert_eq!(app.config.active.as_deref(), Some(id.as_str()));
@@ -1899,7 +2731,11 @@ mod tests {
         // Should still be in the form, on the same field.
         match &state.level {
             SettingsLevel::ConfigForm(f) => {
-                assert_eq!(f.focused, ConfigField::BaseUrl, "Enter on BaseUrl must not auto-advance");
+                assert_eq!(
+                    f.focused,
+                    ConfigField::BaseUrl,
+                    "Enter on BaseUrl must not auto-advance"
+                );
                 assert!(f.form_error.is_none());
             }
             other => panic!("expected to stay in ConfigForm, got {other:?}"),
@@ -1922,12 +2758,20 @@ mod tests {
         app.function.active = picker_idx;
 
         // Verify pre-state.
-        assert!(app.function.tabs.iter().any(|t| matches!(t, SidebarTab::ModelPicker(_))));
+        assert!(app
+            .function
+            .tabs
+            .iter()
+            .any(|t| matches!(t, SidebarTab::ModelPicker(_))));
 
         commit_model(&mut app, ProviderKind::Openai, "gpt-4o".to_string(), false);
 
         // Picker tab should be gone.
-        assert!(!app.function.tabs.iter().any(|t| matches!(t, SidebarTab::ModelPicker(_))));
+        assert!(!app
+            .function
+            .tabs
+            .iter()
+            .any(|t| matches!(t, SidebarTab::ModelPicker(_))));
         // Active entry's model updated.
         let entry = app.config.entry(&id).unwrap();
         assert_eq!(entry.model, "gpt-4o");
@@ -2062,20 +2906,23 @@ mod tests {
         app.config.active = Some(provider_id.clone());
 
         // Commit a model directly.
-        commit_model(&mut app, ProviderKind::Anthropic, "claude-3-5".to_string(), false);
+        commit_model(
+            &mut app,
+            ProviderKind::Anthropic,
+            "claude-3-5".to_string(),
+            false,
+        );
 
         // Both tabs are gone — the flow ended cleanly.
         assert!(
-            !app
-                .function
+            !app.function
                 .tabs
                 .iter()
                 .any(|t| matches!(t, SidebarTab::ProviderPicker(_))),
             "ProviderPicker must close after commit (the flow ended)"
         );
         assert!(
-            !app
-                .function
+            !app.function
                 .tabs
                 .iter()
                 .any(|t| matches!(t, SidebarTab::ModelPicker(_))),
@@ -2089,8 +2936,8 @@ mod tests {
         // at TopLevel removed the Settings tab, but the dispatcher put
         // it back when there were other tabs after it. Fixing the
         // dispatcher's restore logic also fixes this.
-        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         use crate::function::{SettingsLevel, SettingsState};
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
         let mut app = make_app();
         // Add a Notifications tab AFTER the Settings tab so the bug
@@ -2112,8 +2959,7 @@ mod tests {
 
         // After Esc: Settings tab is gone; Notifications tab remains.
         assert!(
-            !app
-                .function
+            !app.function
                 .tabs
                 .iter()
                 .any(|t| matches!(t, SidebarTab::Settings(_))),
@@ -2133,6 +2979,8 @@ mod tests {
             s.models.push(crate::function::notifications::ModelInfo {
                 id: format!("m{i}"),
                 display: format!("model {i}"),
+                request_id: None,
+                context_window_tokens: None,
             });
         }
         s.rebuild_filter();
@@ -2167,17 +3015,26 @@ mod tests {
         ));
         let mut picker = crate::function::ModelPickerState::new(ProviderKind::Openai);
         picker.focus = crate::function::PickerFocus::List;
-        picker.models.push(crate::function::notifications::ModelInfo {
-            id: "gpt-4o".to_string(),
-            display: "gpt-4o".to_string(),
-        });
-        picker.models.push(crate::function::notifications::ModelInfo {
-            id: "gpt-4o-mini".to_string(),
-            display: "gpt-4o-mini".to_string(),
-        });
+        picker
+            .models
+            .push(crate::function::notifications::ModelInfo {
+                id: "gpt-4o".to_string(),
+                display: "gpt-4o".to_string(),
+                request_id: None,
+                context_window_tokens: None,
+            });
+        picker
+            .models
+            .push(crate::function::notifications::ModelInfo {
+                id: "gpt-4o-mini".to_string(),
+                display: "gpt-4o-mini".to_string(),
+                request_id: None,
+                context_window_tokens: None,
+            });
         picker.rebuild_filter();
         picker.cursor = 1;
-        app.function.push(crate::function::SidebarTab::ModelPicker(picker));
+        app.function
+            .push(crate::function::SidebarTab::ModelPicker(picker));
         let picker_idx = app.function.tabs.len() - 1;
         app.function.active = picker_idx;
 
@@ -2193,7 +3050,11 @@ mod tests {
         commit_model(&mut app, ProviderKind::Openai, model_to_pick.clone(), false);
 
         // Verify post-state.
-        assert!(!app.function.tabs.iter().any(|t| matches!(t, SidebarTab::ModelPicker(_))));
+        assert!(!app
+            .function
+            .tabs
+            .iter()
+            .any(|t| matches!(t, SidebarTab::ModelPicker(_))));
         let entry = app.config.entry(&id).unwrap();
         assert_eq!(entry.model, model_to_pick);
         let _ = AppMsg::ChatError(String::new()); // suppress unused
@@ -2272,9 +3133,10 @@ mod tests {
         // must show it and focus the Notifications tab.
         let mut app = make_app();
         // Push a settings tab so the active tab is non-Notification.
-        app.function.push(SidebarTab::Settings(
-            crate::function::SettingsState::new(&app.config),
-        ));
+        app.function
+            .push(SidebarTab::Settings(crate::function::SettingsState::new(
+                &app.config,
+            )));
         app.function.active = app.function.tabs.len() - 1;
         assert!(!app.function_visible);
         // No Notifications tab yet.
@@ -2322,9 +3184,10 @@ mod tests {
         // must switch focus to Notifications (not hide).
         let mut app = make_app();
         app.function_visible = true;
-        app.function.push(SidebarTab::Settings(
-            crate::function::SettingsState::new(&app.config),
-        ));
+        app.function
+            .push(SidebarTab::Settings(crate::function::SettingsState::new(
+                &app.config,
+            )));
         app.function.active = app.function.tabs.len() - 1;
         assert!(matches!(
             app.function.tabs[app.function.active],
@@ -2366,13 +3229,17 @@ mod tests {
                 api_key_env: String::new(),
                 base_url: String::new(), // triggers "base_url is required"
                 model: "gpt-4o-mini".to_string(),
+                model_display: String::new(),
                 name: String::new(),
             },
         );
         app.config.active = Some(id.clone());
 
         let result = app.check_config();
-        assert!(!result, "check_config must return false when there are errors");
+        assert!(
+            !result,
+            "check_config must return false when there are errors"
+        );
         // Tabs must still be only Notifications. No Settings tab.
         assert_eq!(app.function.tabs.len(), 1);
         assert!(matches!(app.function.tabs[0], SidebarTab::Notifications));
@@ -2423,6 +3290,7 @@ mod tests {
                 api_key_env: "OPENAI_API_KEY".to_string(),
                 base_url: "https://api.openai.com/v1".to_string(),
                 model: "gpt-4o-mini".to_string(),
+                model_display: String::new(),
                 name: String::new(),
             },
         );
@@ -2458,7 +3326,10 @@ mod tests {
         handle_ctrl_n(&mut app);
 
         assert!(!app.function_visible);
-        assert!(app.notifications.items.is_empty(), "notifications must be cleared on close");
+        assert!(
+            app.notifications.items.is_empty(),
+            "notifications must be cleared on close"
+        );
         assert_eq!(app.pending_events, 0);
     }
 
@@ -2470,9 +3341,10 @@ mod tests {
 
         let mut app = make_app();
         app.function_visible = true;
-        app.function.push(SidebarTab::Settings(
-            crate::function::SettingsState::new(&app.config),
-        ));
+        app.function
+            .push(SidebarTab::Settings(crate::function::SettingsState::new(
+                &app.config,
+            )));
         app.function.active = app.function.tabs.len() - 1;
         // Use Info level so notify() does not auto-switch the active tab.
         app.notify(ToastLevel::Info, "heads up");
@@ -2513,16 +3385,28 @@ mod tests {
         // Pins down the contract documented in the EnterBehavior settings
         // labels. If any of these four cases flip, the on-screen behavior
         // no longer matches what the user reads in /settings.
+        use super::{enter_action, EnterAction};
         use crate::config::EnterBehavior;
-        use super::{EnterAction, enter_action};
 
         // EnterSends: "Enter sends | Shift+Enter newline"
-        assert_eq!(enter_action(EnterBehavior::EnterSends, false), EnterAction::Send);
-        assert_eq!(enter_action(EnterBehavior::EnterSends, true), EnterAction::Newline);
+        assert_eq!(
+            enter_action(EnterBehavior::EnterSends, false),
+            EnterAction::Send
+        );
+        assert_eq!(
+            enter_action(EnterBehavior::EnterSends, true),
+            EnterAction::Newline
+        );
 
         // EnterNewline: "Enter newline | Shift+Enter sends"
-        assert_eq!(enter_action(EnterBehavior::EnterNewline, false), EnterAction::Newline);
-        assert_eq!(enter_action(EnterBehavior::EnterNewline, true), EnterAction::Send);
+        assert_eq!(
+            enter_action(EnterBehavior::EnterNewline, false),
+            EnterAction::Newline
+        );
+        assert_eq!(
+            enter_action(EnterBehavior::EnterNewline, true),
+            EnterAction::Send
+        );
     }
 
     #[test]
@@ -2545,8 +3429,7 @@ mod tests {
         submit_input(&mut app);
 
         assert!(
-            !app
-                .function
+            !app.function
                 .tabs
                 .iter()
                 .any(|t| matches!(t, SidebarTab::Completion(_))),
@@ -2580,6 +3463,40 @@ mod tests {
     }
 
     #[test]
+    fn sync_completion_shows_plan_subcommand_after_space() {
+        use crate::function::SidebarTab;
+
+        let mut app = make_app();
+        app.input.buffer = "/plan ".to_string();
+        app.input.cursor = app.input.buffer.len();
+        app.sync_completion();
+
+        let completion = app
+            .function
+            .tabs
+            .iter()
+            .find_map(|t| match t {
+                SidebarTab::Completion(s) => Some(s),
+                _ => None,
+            })
+            .expect("completion tab should be visible for /plan subcommands");
+        assert_eq!(completion.candidates, vec!["/plan exit".to_string()]);
+    }
+
+    #[test]
+    fn completion_tab_completes_without_submitting() {
+        let mut app = make_app();
+        app.input.buffer = "/pl".to_string();
+        app.input.cursor = app.input.buffer.len();
+        app.sync_completion();
+
+        assert!(complete_focused_candidate(&mut app));
+        assert_eq!(app.input.buffer, "/plan");
+        assert_eq!(app.mode, crate::function::AppMode::Yolo);
+        assert!(app.session.messages.is_empty());
+    }
+
+    #[test]
     fn sync_completion_hides_panel_when_completion_removed() {
         // When the user types `/` then deletes it, the Completion tab is
         // removed. The panel must also hide so the user is back to the
@@ -2602,13 +3519,11 @@ mod tests {
         app.input.cursor = 0;
         app.sync_completion();
 
-        assert!(
-            !app
-                .function
-                .tabs
-                .iter()
-                .any(|t| matches!(t, SidebarTab::Completion(_)))
-        );
+        assert!(!app
+            .function
+            .tabs
+            .iter()
+            .any(|t| matches!(t, SidebarTab::Completion(_))));
         assert!(
             !app.function_visible,
             "panel must hide when only Notifications remains"
@@ -2622,9 +3537,10 @@ mod tests {
         use crate::function::SidebarTab;
 
         let mut app = make_app();
-        app.function.push(SidebarTab::Settings(
-            crate::function::SettingsState::new(&app.config),
-        ));
+        app.function
+            .push(SidebarTab::Settings(crate::function::SettingsState::new(
+                &app.config,
+            )));
         app.function.active = app.function.tabs.len() - 1;
         app.function_visible = true;
         assert!(app.function.has_any_tab());
@@ -2715,6 +3631,7 @@ mod tests {
                 api_key_env: String::new(),
                 base_url: "https://api.openai.com/v1".to_string(),
                 model: "gpt-4o-mini".to_string(),
+                model_display: String::new(),
                 name: String::new(),
             },
         );
@@ -2740,8 +3657,14 @@ mod tests {
         handle_settings_key(key, &mut app, &mut state);
 
         if let SettingsLevel::ConfigForm(f) = &state.level {
-            assert!(f.key_modified, "key_modified must flip to true on first edit");
-            assert_eq!(f.key_or_env, "x", "saved key must be cleared before the new char");
+            assert!(
+                f.key_modified,
+                "key_modified must flip to true on first edit"
+            );
+            assert_eq!(
+                f.key_or_env, "x",
+                "saved key must be cleared before the new char"
+            );
         } else {
             panic!("expected ConfigForm level");
         }
@@ -2763,6 +3686,7 @@ mod tests {
                 api_key_env: String::new(),
                 base_url: "https://api.openai.com/v1".to_string(),
                 model: "gpt-4o-mini".to_string(),
+                model_display: String::new(),
                 name: String::new(),
             },
         );
@@ -2797,6 +3721,7 @@ mod tests {
                 api_key_env: String::new(),
                 base_url: "https://api.openai.com/v1".to_string(),
                 model: "gpt-4o-mini".to_string(),
+                model_display: String::new(),
                 name: String::new(),
             },
         );
@@ -2903,7 +3828,9 @@ mod tests {
         let mut app = make_app();
         // Default config has both openai and anthropic; collapse to just
         // anthropic by removing openai.
-        app.config.entries.retain(|id, _| id.starts_with("anthropic:"));
+        app.config
+            .entries
+            .retain(|id, _| id.starts_with("anthropic:"));
         app.config.active = None;
         let tabs_before = app.function.tabs.len();
 
@@ -3041,10 +3968,7 @@ mod tests {
         state.query = "staging".into();
         state.rebuild_filter();
         assert_eq!(state.filtered.len(), 1);
-        assert_eq!(
-            state.selected_id().as_deref(),
-            Some("openai:key")
-        );
+        assert_eq!(state.selected_id().as_deref(), Some("openai:key"));
 
         state.query = String::new();
         state.rebuild_filter();
@@ -3062,7 +3986,11 @@ mod tests {
         let mut cfg = crate::config::Config::default();
         cfg.entries.clear();
         for i in 0..20 {
-            let mode = if i % 2 == 0 { ProviderMode::Key } else { ProviderMode::Env };
+            let mode = if i % 2 == 0 {
+                ProviderMode::Key
+            } else {
+                ProviderMode::Env
+            };
             cfg.entries.insert(
                 make_id(ProviderKind::Openai, mode),
                 ProviderConfig {
@@ -3082,8 +4010,7 @@ mod tests {
         state.ensure_cursor_visible(5);
         // scroll must have advanced so cursor 10 is inside [scroll, scroll+5).
         assert!(
-            state.cursor >= state.scroll
-                && state.cursor < state.scroll + 5,
+            state.cursor >= state.scroll && state.cursor < state.scroll + 5,
             "cursor {} not inside scroll window [{}, {})",
             state.cursor,
             state.scroll,
@@ -3116,6 +4043,7 @@ mod tests {
                 api_key_env: String::new(),
                 base_url: "https://api.openai.com/v1".to_string(),
                 model: "gpt-4o-mini".to_string(),
+                model_display: String::new(),
                 name: String::new(),
             },
         );
@@ -3158,7 +4086,11 @@ mod tests {
             s.set_cwd(&project);
             // Cross-platform: the abbrev uses `~` for the home prefix
             // and whatever path separator the host OS uses for the rest.
-            assert!(s.cwd.starts_with("~/"), "cwd should start with ~/, got {:?}", s.cwd);
+            assert!(
+                s.cwd.starts_with("~/"),
+                "cwd should start with ~/, got {:?}",
+                s.cwd
+            );
             // Each path component must appear, in order, with whatever
             // separator the host uses between them.
             for part in ["Code", "rust", "fish_coding_agent"] {
@@ -3188,10 +4120,10 @@ mod tests {
     fn extract_selection_text_skips_trailing_padding() {
         // Single-row selection across a padded cell line should not
         // produce a wall of trailing spaces.
-        use ratatui::buffer::Buffer;
-        use ratatui::layout::Rect;
         use crate::function::Selection;
         use crate::ui::extract_selection_text_for_test;
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
 
         let area = Rect::new(0, 0, 20, 1);
         let mut buf = Buffer::empty(area);
@@ -3209,6 +4141,50 @@ mod tests {
     }
 
     #[test]
+    fn extract_selection_text_compacts_cjk_render_spacing() {
+        use crate::function::Selection;
+        use crate::ui::extract_selection_text_for_test;
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+
+        let rendered = "使 用 command分 别 执 行 3 次 ls， 需 要 整 个 tree";
+        let area = Rect::new(0, 0, rendered.chars().count() as u16, 1);
+        let mut buf = Buffer::empty(area);
+        for (i, c) in rendered.chars().enumerate() {
+            buf[(i as u16, 0)].set_symbol(&c.to_string());
+        }
+        let s = Selection {
+            start: (0, 0),
+            end: (area.width - 1, 0),
+            active: false,
+        };
+        let text = extract_selection_text_for_test(&buf, &s);
+        assert_eq!(text, "使用 command分别执行 3次 ls，需要整个 tree");
+    }
+
+    #[test]
+    fn extract_selection_text_compacts_short_ascii_before_cjk() {
+        use crate::function::Selection;
+        use crate::ui::extract_selection_text_for_test;
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+
+        let rendered = "给 我 一 个 md的 代 码 块 示 例 和 表 格 示 例";
+        let area = Rect::new(0, 0, rendered.chars().count() as u16, 1);
+        let mut buf = Buffer::empty(area);
+        for (i, c) in rendered.chars().enumerate() {
+            buf[(i as u16, 0)].set_symbol(&c.to_string());
+        }
+        let s = Selection {
+            start: (0, 0),
+            end: (area.width - 1, 0),
+            active: false,
+        };
+        let text = extract_selection_text_for_test(&buf, &s);
+        assert_eq!(text, "给我一个md的代码块示例和表格示例");
+    }
+
+    #[test]
     fn active_name_uses_user_set_value() {
         use crate::config::{make_id, ProviderConfig, ProviderKind, ProviderMode};
 
@@ -3221,6 +4197,7 @@ mod tests {
                 api_key_env: String::new(),
                 base_url: "https://api.anthropic.com".to_string(),
                 model: "claude-3-5-sonnet-latest".to_string(),
+                model_display: String::new(),
                 name: "mybot".to_string(),
             },
         );
@@ -3241,6 +4218,7 @@ mod tests {
                 api_key_env: String::new(),
                 base_url: "https://api.openai.com/v1".to_string(),
                 model: String::new(),
+                model_display: String::new(),
                 name: "mybot".to_string(),
             },
         );
@@ -3310,10 +4288,16 @@ mod tests {
         };
         handle_mouse(down, &mut app);
         // Down should only record the drag start, not commit a selection.
-        assert!(app.tui_selection.is_none(), "Down must not create a selection");
+        assert!(
+            app.tui_selection.is_none(),
+            "Down must not create a selection"
+        );
         handle_mouse(up, &mut app);
         // Up with no prior Drag must still leave no selection behind.
-        assert!(app.tui_selection.is_none(), "click with no drag must leave no selection");
+        assert!(
+            app.tui_selection.is_none(),
+            "click with no drag must leave no selection"
+        );
         assert!(app.tui_drag_start.is_none());
     }
 
@@ -3354,5 +4338,3 @@ mod tests {
         assert_eq!(sel.end, (10, 2));
     }
 }
-
-

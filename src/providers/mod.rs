@@ -1,4 +1,5 @@
 pub mod anthropic;
+pub mod cursor;
 pub mod openai;
 
 use crate::config::ProviderKind;
@@ -14,11 +15,18 @@ pub struct Usage {
     pub output_tokens: u64,
     pub cache_read_tokens: u64,
     pub cache_creation_tokens: u64,
+    pub context_window_tokens: Option<u64>,
 }
 
 pub enum ChatEvent {
     Delta(String),
     ThinkingDelta(String),
+    Debug(String),
+    ToolResult {
+        name: String,
+        title: String,
+        content: String,
+    },
     ToolCalls(Vec<ToolCall>),
     Usage(Usage),
     Done,
@@ -31,6 +39,16 @@ impl ChatEvent {
         match self {
             ChatEvent::Delta(s) => crate::event::AppMsg::ChatDelta(s),
             ChatEvent::ThinkingDelta(s) => crate::event::AppMsg::ChatThinkingDelta(s),
+            ChatEvent::Debug(s) => crate::event::AppMsg::ChatDebug(s),
+            ChatEvent::ToolResult {
+                name,
+                title,
+                content,
+            } => crate::event::AppMsg::ChatToolResult {
+                name,
+                title,
+                content,
+            },
             ChatEvent::ToolCalls(_) => crate::event::AppMsg::ChatDone,
             ChatEvent::Usage(u) => crate::event::AppMsg::ChatUsage(u),
             ChatEvent::Done => crate::event::AppMsg::ChatDone,
@@ -64,7 +82,12 @@ pub struct ToolCall {
 #[async_trait]
 pub trait Provider: Send + Sync {
     fn kind(&self) -> ProviderKind;
-    async fn list_models(&self, client: &reqwest::Client, base_url: &str, api_key: &str) -> Result<Vec<ModelInfo>>;
+    async fn list_models(
+        &self,
+        client: &reqwest::Client,
+        base_url: &str,
+        api_key: &str,
+    ) -> Result<Vec<ModelInfo>>;
     async fn chat_stream(
         &self,
         client: &reqwest::Client,
@@ -102,6 +125,7 @@ pub async fn list_models(
     let p: Box<dyn Provider> = match kind {
         ProviderKind::Openai => Box::new(openai::OpenAiProvider),
         ProviderKind::Anthropic => Box::new(anthropic::AnthropicProvider),
+        ProviderKind::Cursor => Box::new(cursor::CursorProvider),
     };
     p.list_models(client, base_url, api_key).await
 }
@@ -110,5 +134,6 @@ pub fn provider(kind: ProviderKind) -> Box<dyn Provider> {
     match kind {
         ProviderKind::Openai => Box::new(openai::OpenAiProvider),
         ProviderKind::Anthropic => Box::new(anthropic::AnthropicProvider),
+        ProviderKind::Cursor => Box::new(cursor::CursorProvider),
     }
 }

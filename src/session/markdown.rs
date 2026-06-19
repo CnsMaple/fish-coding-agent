@@ -50,11 +50,14 @@ pub fn render_with_width(text: &str, width: usize) -> Vec<Line<'static>> {
     // 2. Strip zero-width / invisible chars that can break table detection.
     cleaned = cleaned
         .chars()
-        .filter(|&c| !matches!(c,
-            '\u{200B}' | '\u{200C}' | '\u{200D}' | '\u{FEFF}' |  // ZWJ, ZWNJ, BOM
+        .filter(|&c| {
+            !matches!(
+                c,
+                '\u{200B}' | '\u{200C}' | '\u{200D}' | '\u{FEFF}' |  // ZWJ, ZWNJ, BOM
             '\u{00AD}' | '\u{2060}' | '\u{2061}' | '\u{2062}' |
             '\u{2063}' | '\u{2064}'
-        ))
+            )
+        })
         .collect();
     // 3. Pre-process table-like blocks so even concatenated single-line
     //    tables or oddly-formatted LLM output gets proper line breaks.
@@ -161,7 +164,10 @@ impl MdRenderer {
         // spaces (which previously came from the literal backticks in
         // the format string) give the inline code a bit of visual
         // breathing room against adjacent text.
-        let span = Span::styled(format!(" {t} "), Theme::dim().add_modifier(Modifier::REVERSED));
+        let span = Span::styled(
+            format!(" {t} "),
+            Theme::dim().add_modifier(Modifier::REVERSED),
+        );
         if self.in_table_cell && self.table.is_some() {
             if let Some(table) = self.table.as_mut() {
                 table.current_cell.push(span);
@@ -187,7 +193,11 @@ impl MdRenderer {
 
     fn push_code_block(&mut self, code: CodeBlockState) {
         let mut raw_lines: Vec<&str> = code.text.lines().collect();
-        while raw_lines.last().map(|line| line.is_empty()).unwrap_or(false) {
+        while raw_lines
+            .last()
+            .map(|line| line.is_empty())
+            .unwrap_or(false)
+        {
             raw_lines.pop();
         }
 
@@ -196,7 +206,12 @@ impl MdRenderer {
             .map(|line| UnicodeWidthStr::width(*line))
             .max()
             .unwrap_or(0)
-            .max(code.lang.as_deref().map(UnicodeWidthStr::width).unwrap_or(0))
+            .max(
+                code.lang
+                    .as_deref()
+                    .map(UnicodeWidthStr::width)
+                    .unwrap_or(0),
+            )
             .max(16);
         let max_content_width = self.max_width.saturating_sub(4).max(16);
         let width = content_width.min(max_content_width);
@@ -204,9 +219,9 @@ impl MdRenderer {
         let title = code.lang.as_deref().unwrap_or("code");
         let title_width = UnicodeWidthStr::width(title);
         let top = if title_width <= width {
-            format!("┌ {title} {}┐", "─".repeat(width - title_width))
+            label_border(title, width)
         } else {
-            table_border('┌', '─', '┐', &[width])
+            table_border('+', '+', '+', &[width])
         };
         self.out.push(Line::from(Span::styled(top, Theme::dim())));
 
@@ -221,7 +236,7 @@ impl MdRenderer {
         }
 
         self.out.push(Line::from(Span::styled(
-            table_border('└', '─', '┘', &[width]),
+            table_border('+', '+', '+', &[width]),
             Theme::dim(),
         )));
     }
@@ -229,7 +244,8 @@ impl MdRenderer {
     fn push_list_marker(&mut self) {
         self.flush_line();
         let depth = self.list_stack.len().saturating_sub(1);
-        self.spans.push(Span::raw(format!("{}", "  ".repeat(depth))));
+        self.spans
+            .push(Span::raw(format!("{}", "  ".repeat(depth))));
         if let Some(list) = self.list_stack.last_mut() {
             if list.ordered {
                 let n = list.next;
@@ -262,20 +278,21 @@ impl MdRenderer {
         fit_table_width(&mut widths, self.max_width);
 
         self.out.push(Line::from(Span::styled(
-            table_border('┌', '┬', '┐', &widths),
+            table_border('+', '+', '+', &widths),
             Theme::dim(),
         )));
         for (idx, row) in table.rows.iter().enumerate() {
-            self.out.extend(table_row_lines(row, &widths, &table.alignments));
+            self.out
+                .extend(table_row_lines(row, &widths, &table.alignments));
             if table.header_rows > 0 && idx + 1 == table.header_rows && idx + 1 < table.rows.len() {
                 self.out.push(Line::from(Span::styled(
-                    table_border('├', '┼', '┤', &widths),
+                    table_border('+', '+', '+', &widths),
                     Theme::dim(),
                 )));
             }
         }
         self.out.push(Line::from(Span::styled(
-            table_border('└', '┴', '┘', &widths),
+            table_border('+', '+', '+', &widths),
             Theme::dim(),
         )));
     }
@@ -294,26 +311,30 @@ impl MdRenderer {
                 Event::Text(t) => self.push_text(t.as_ref()),
                 Event::Code(t) => self.push_code(t.as_ref()),
                 Event::Html(t) => self.push_text(t.as_ref()),
-                Event::Rule => self.out.push(Line::from(Span::styled("─".repeat(self.max_width.min(80).max(8)), Theme::dim()))),
+                Event::Rule => self.out.push(Line::from(Span::styled(
+                    "─".repeat(self.max_width.min(80).max(8)),
+                    Theme::dim(),
+                ))),
                 Event::TaskListMarker(checked) => {
                     self.push_text(if checked { "[x] " } else { "[ ] " });
                 }
                 Event::SoftBreak | Event::HardBreak => self.push_table_break(),
                 Event::Start(tag) => match tag {
                     Tag::Heading { .. } => {
-                        self.style_stack.push(Box::new(|s| {
-                            Span::styled(s.to_string(), Theme::bold())
-                        }));
+                        self.style_stack
+                            .push(Box::new(|s| Span::styled(s.to_string(), Theme::bold())));
                     }
                     Tag::Emphasis => {
                         self.style_stack.push(Box::new(|s| {
-                            Span::styled(s.to_string(), Theme::dim().add_modifier(ratatui::style::Modifier::ITALIC))
+                            Span::styled(
+                                s.to_string(),
+                                Theme::dim().add_modifier(ratatui::style::Modifier::ITALIC),
+                            )
                         }));
                     }
                     Tag::Strong => {
-                        self.style_stack.push(Box::new(|s| {
-                            Span::styled(s.to_string(), Theme::bold())
-                        }));
+                        self.style_stack
+                            .push(Box::new(|s| Span::styled(s.to_string(), Theme::bold())));
                     }
                     Tag::Link { .. } => {
                         self.style_stack.push(Box::new(|s| {
@@ -374,7 +395,10 @@ impl MdRenderer {
                     }
                     Tag::Strikethrough => {
                         self.style_stack.push(Box::new(|s| {
-                            Span::styled(s.to_string(), Theme::dim().add_modifier(Modifier::CROSSED_OUT))
+                            Span::styled(
+                                s.to_string(),
+                                Theme::dim().add_modifier(Modifier::CROSSED_OUT),
+                            )
                         }));
                     }
                     _ => {}
@@ -419,7 +443,9 @@ impl MdRenderer {
                     }
                     TagEnd::TableCell => {
                         if let Some(table) = self.table.as_mut() {
-                            table.current_row.push(trim_cell(std::mem::take(&mut table.current_cell)));
+                            table
+                                .current_row
+                                .push(trim_cell(std::mem::take(&mut table.current_cell)));
                         }
                         self.in_table_cell = false;
                     }
@@ -438,21 +464,17 @@ impl MdRenderer {
         self.flush_line();
         std::mem::take(&mut self.out)
     }
-
 }
 
 fn code_line(content: TableCell, width: usize) -> Line<'static> {
     let content_width = cell_width(&content);
-    let mut spans = vec![
-        Span::styled("│", Theme::dim()),
-        Span::raw(" "),
-    ];
+    let mut spans = vec![Span::styled("|", Theme::dim()), Span::raw(" ")];
     spans.extend(content);
     if width > content_width {
         spans.push(Span::raw(" ".repeat(width - content_width)));
     }
     spans.push(Span::raw(" "));
-    spans.push(Span::styled("│", Theme::dim()));
+    spans.push(Span::styled("|", Theme::dim()));
     Line::from(spans)
 }
 
@@ -462,10 +484,12 @@ fn highlight_code_lines(lines: &[&str], lang: Option<&str>) -> Vec<TableCell> {
     };
 
     let ps = syntax_set();
-    let syntax = ps
+    let Some(syntax) = ps
         .find_syntax_by_token(lang)
         .or_else(|| find_syntax(ps, lang))
-        .unwrap_or_else(|| ps.find_syntax_plain_text());
+    else {
+        return plain_code_lines(lines);
+    };
     let Some(theme) = theme_set().themes.get("base16-ocean.dark") else {
         return plain_code_lines(lines);
     };
@@ -491,7 +515,7 @@ fn plain_code_lines(lines: &[&str]) -> Vec<TableCell> {
 }
 
 fn plain_code_span(text: &str) -> Span<'static> {
-    Span::styled(text.to_string(), Theme::dim().add_modifier(Modifier::REVERSED))
+    Span::raw(text.to_string())
 }
 
 fn syntax_set() -> &'static SyntaxSet {
@@ -524,7 +548,11 @@ fn find_syntax<'a>(ps: &'a SyntaxSet, lang: &str) -> Option<&'a syntect::parsing
 
 fn syntect_style(style: SyntectStyle) -> Style {
     let mut out = Style::default()
-        .fg(system_color(style.foreground.r, style.foreground.g, style.foreground.b))
+        .fg(system_color(
+            style.foreground.r,
+            style.foreground.g,
+            style.foreground.b,
+        ))
         .bg(Color::Reset);
     if style.font_style.contains(FontStyle::BOLD) {
         out = out.add_modifier(Modifier::BOLD);
@@ -539,27 +567,42 @@ fn syntect_style(style: SyntectStyle) -> Style {
 }
 
 fn system_color(r: u8, g: u8, b: u8) -> Color {
-    let max = r.max(g).max(b);
-    let min = r.min(g).min(b);
-    if max.saturating_sub(min) < 24 {
-        return if max < 96 { Color::DarkGray } else { Color::Gray };
-    }
+    const ANSI_COLORS: &[(Color, u8, u8, u8)] = &[
+        (Color::DarkGray, 85, 85, 85),
+        (Color::Red, 170, 0, 0),
+        (Color::Green, 0, 170, 0),
+        (Color::Yellow, 170, 170, 0),
+        (Color::Blue, 0, 0, 170),
+        (Color::Magenta, 170, 0, 170),
+        (Color::Cyan, 0, 170, 170),
+        (Color::Gray, 170, 170, 170),
+        (Color::LightRed, 255, 85, 85),
+        (Color::LightGreen, 85, 255, 85),
+        (Color::LightYellow, 255, 255, 85),
+        (Color::LightBlue, 85, 85, 255),
+        (Color::LightMagenta, 255, 85, 255),
+        (Color::LightCyan, 85, 255, 255),
+        (Color::White, 255, 255, 255),
+    ];
 
-    if r >= g && g >= b {
-        Color::Yellow
-    } else if g >= r && r >= b {
-        Color::Green
-    } else if g >= b && b >= r {
-        Color::Cyan
-    } else if b >= g && g >= r {
-        Color::Blue
-    } else if b >= r && r >= g {
-        Color::Magenta
-    } else {
-        Color::Red
+    let mut best = Color::Gray;
+    let mut best_distance = u32::MAX;
+    for &(color, cr, cg, cb) in ANSI_COLORS {
+        let distance = color_distance(r, g, b, cr, cg, cb);
+        if distance < best_distance {
+            best = color;
+            best_distance = distance;
+        }
     }
+    best
 }
 
+fn color_distance(r: u8, g: u8, b: u8, cr: u8, cg: u8, cb: u8) -> u32 {
+    let dr = r as i32 - cr as i32;
+    let dg = g as i32 - cg as i32;
+    let db = b as i32 - cb as i32;
+    (30 * dr * dr + 59 * dg * dg + 11 * db * db) as u32
+}
 fn table_border(left: char, sep: char, right: char, widths: &[usize]) -> String {
     let mut out = String::new();
     out.push(left);
@@ -567,10 +610,26 @@ fn table_border(left: char, sep: char, right: char, widths: &[usize]) -> String 
         if idx > 0 {
             out.push(sep);
         }
-        out.push_str(&"─".repeat(width + 2));
+        out.push_str(&"-".repeat(width + 2));
     }
     out.push(right);
     out
+}
+
+fn label_border(label: &str, width: usize) -> String {
+    let label_width = UnicodeWidthStr::width(label);
+    let total_inner = width + 2;
+    let left = 3.min(total_inner);
+    let used = left + label_width + 2;
+    if used >= total_inner {
+        return table_border('+', '+', '+', &[width]);
+    }
+    format!(
+        "+{} {} {}+",
+        "-".repeat(left),
+        label,
+        "-".repeat(total_inner - used)
+    )
 }
 
 fn fit_table_width(widths: &mut [usize], max_width: usize) {
@@ -594,7 +653,11 @@ fn fit_table_width(widths: &mut [usize], max_width: usize) {
     }
 }
 
-fn table_row_lines(row: &TableRow, widths: &[usize], alignments: &[Alignment]) -> Vec<Line<'static>> {
+fn table_row_lines(
+    row: &TableRow,
+    widths: &[usize],
+    alignments: &[Alignment],
+) -> Vec<Line<'static>> {
     let cells: Vec<Vec<TableCell>> = widths
         .iter()
         .enumerate()
@@ -603,7 +666,7 @@ fn table_row_lines(row: &TableRow, widths: &[usize], alignments: &[Alignment]) -
     let height = cells.iter().map(Vec::len).max().unwrap_or(1);
     (0..height)
         .map(|line_idx| {
-            let mut spans = vec![Span::styled("│", Theme::dim())];
+            let mut spans = vec![Span::styled("|", Theme::dim())];
             for (idx, width) in widths.iter().enumerate() {
                 let cell = cells[idx].get(line_idx).map(Vec::as_slice).unwrap_or(&[]);
                 let cell_width = cell_width(cell);
@@ -623,7 +686,7 @@ fn table_row_lines(row: &TableRow, widths: &[usize], alignments: &[Alignment]) -
                     spans.push(Span::raw(" ".repeat(right_pad)));
                 }
                 spans.push(Span::raw(" "));
-                spans.push(Span::styled("│", Theme::dim()));
+                spans.push(Span::styled("|", Theme::dim()));
             }
             Line::from(spans)
         })
@@ -733,11 +796,45 @@ mod tests {
         assert!(text.contains("fn main()"), "code missing:\n{text}");
         assert!(text.contains("println!"), "code missing:\n{text}");
         assert!(
-            lines.iter().flat_map(|l| l.spans.iter()).any(|span| span.style.fg.is_some()),
+            lines
+                .iter()
+                .flat_map(|l| l.spans.iter())
+                .any(|span| span.style.fg.is_some()),
             "syntax highlight style missing"
         );
-        assert!(text.contains("┌"), "border missing:\n{text}");
-        assert!(text.contains("└"), "border missing:\n{text}");
+        assert!(text.contains("+"), "border missing:\n{text}");
+        assert!(text.contains("-"), "border missing:\n{text}");
+    }
+
+    #[test]
+    fn unknown_code_language_renders_plain_text() {
+        let lines = render(
+            "```code
+let x = 1;
+```",
+        );
+        let text = join_lines(&lines);
+        assert!(
+            text.contains("code"),
+            "language label missing:
+{text}"
+        );
+        assert!(
+            text.contains("let x = 1;"),
+            "code content missing:
+{text}"
+        );
+
+        let code_span = lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .find(|span| span.content.contains("let x = 1;"))
+            .expect("code content span missing");
+        assert!(
+            code_span.style.fg.is_none()
+                && !code_span.style.add_modifier.contains(Modifier::REVERSED),
+            "unknown language code should be plain text"
+        );
     }
 
     #[test]
@@ -748,9 +845,8 @@ mod tests {
         let text = join_lines(&lines);
         assert!(text.contains("列 1"), "header '列 1' not found:\n{text}");
         assert!(text.contains("内 容"), "cell not found:\n{text}");
-        assert!(text.contains("┌"), "border not rendered:\n{text}");
-        assert!(text.contains("└"), "border not rendered:\n{text}");
-        assert!(text.contains("├"), "header separator not rendered:\n{text}");
+        assert!(text.contains("+"), "border not rendered:\n{text}");
+        assert!(text.contains("-"), "border not rendered:\n{text}");
         assert!(!text.contains("||"), "raw pipes leaked:\n{text}");
     }
 
@@ -760,10 +856,16 @@ mod tests {
         let lines = render(md);
         let text = join_lines(&lines);
         assert!(text.contains("文字"), "bold text missing:\n{text}");
-        assert!(text.contains("旧需求"), "strikethrough text missing:\n{text}");
+        assert!(
+            text.contains("旧需求"),
+            "strikethrough text missing:\n{text}"
+        );
         assert!(text.contains("重点任务"), "code text missing:\n{text}");
         assert!(!text.contains("**文字**"), "bold marker leaked:\n{text}");
-        assert!(!text.contains("~~旧需求~~"), "strikethrough marker leaked:\n{text}");
+        assert!(
+            !text.contains("~~旧需求~~"),
+            "strikethrough marker leaked:\n{text}"
+        );
         assert!(!text.contains("`重点任务`"), "code marker leaked:\n{text}");
     }
 
@@ -781,7 +883,10 @@ mod tests {
         assert!(text.contains("姓 名"), "header '姓 名' not found:\n{text}");
         assert!(text.contains("张 三"), "cell '张 三' not found:\n{text}");
         // No raw pipes should leak.
-        assert!(!text.contains("||"), "table not rendered (raw pipes):\n{text}");
+        assert!(
+            !text.contains("||"),
+            "table not rendered (raw pipes):\n{text}"
+        );
     }
 
     #[test]
@@ -794,7 +899,10 @@ mod tests {
         let text = join_lines(&lines);
         assert!(text.contains("姓 名"), "header not found:\n{text}");
         assert!(text.contains("张 三"), "data not found:\n{text}");
-        assert!(!text.contains("||"), "raw pipes leaked (CRLF issue):\n{text}");
+        assert!(
+            !text.contains("||"),
+            "raw pipes leaked (CRLF issue):\n{text}"
+        );
     }
 
     #[test]
@@ -812,7 +920,10 @@ mod tests {
         let lines = render(md);
         let text = join_lines(&lines);
         // The properly formatted multiline table must not have raw pipes.
-        assert!(!text.contains("||"), "multiline table still shows raw pipes:\n{text}");
+        assert!(
+            !text.contains("||"),
+            "multiline table still shows raw pipes:\n{text}"
+        );
         assert!(text.contains("姓 名"), "table header missing:\n{text}");
         assert!(text.contains("张 三"), "table data missing:\n{text}");
     }

@@ -1,9 +1,21 @@
 pub mod markdown;
 pub mod render;
+pub mod store;
 
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolResultBlock {
+    pub name: String,
+    pub title: String,
+    pub content: String,
+    pub content_offset: usize,
+    pub visible: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Role {
     User,
     Assistant,
@@ -20,7 +32,7 @@ impl Role {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     pub role: Role,
     pub content: String,
@@ -29,6 +41,9 @@ pub struct Message {
     pub thinking: String,
     /// Whether the thinking block is currently expanded.
     pub thinking_visible: bool,
+    /// Tool result blocks, each with its own visibility,
+    /// rendered as collapsible code sections.
+    pub tool_results: Vec<ToolResultBlock>,
     pub ts: DateTime<Utc>,
     /// true while a streaming response is still in flight
     pub streaming: bool,
@@ -47,6 +62,7 @@ impl Message {
             content,
             thinking: String::new(),
             thinking_visible: false,
+            tool_results: Vec::new(),
             ts: Utc::now(),
             streaming: false,
             display_cursor: len, // non-streaming → fully visible
@@ -63,15 +79,20 @@ impl Message {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct Session {
     pub messages: Vec<Message>,
     /// scroll offset from bottom; 0 = follow tail
     pub scroll: u16,
     /// id of the message currently being edited/streamed
+    #[serde(skip)]
     pub streaming_id: Option<usize>,
     /// Thinking display mode, set from App config on each render.
+    #[serde(skip)]
     pub display: crate::config::ThinkingDisplay,
+    /// Tool result display mode, set from App config on each render.
+    #[serde(skip)]
+    pub tool_display: crate::config::ToolResultDisplay,
 }
 
 impl Session {
@@ -88,8 +109,60 @@ impl Session {
         if let Some(id) = self.streaming_id {
             if let Some(m) = self.messages.get_mut(id) {
                 m.content.push_str(chunk);
-                // display_cursor stays behind – the main loop advances it
-                // by a few bytes each frame so the text appears smoothly.
+                // Reveal streamed content immediately; providers already
+                // deliver deltas in small chunks, so no artificial delay.
+                m.display_cursor = m.content.len();
+            }
+        }
+    }
+
+    pub fn append_tool_to_last(&mut self, name: String, title: String, content: String) {
+        if let Some(id) = self.streaming_id {
+            if let Some(m) = self.messages.get_mut(id) {
+                let content_offset = m.content.len();
+                let visible = name != "write_file" && !is_long_tool_content(&content);
+                m.tool_results.push(ToolResultBlock {
+                    name,
+                    title,
+                    content,
+                    content_offset,
+                    visible,
+                });
+            }
+        }
+    }
+
+    pub fn push_tool_result_message(&mut self, name: String, title: String, content: String) {
+        let visible = name != "write_file" && !is_long_tool_content(&content);
+        let msg = Message {
+            role: Role::Assistant,
+            content: String::new(),
+            thinking: String::new(),
+            thinking_visible: false,
+            tool_results: vec![ToolResultBlock {
+                name,
+                title,
+                content,
+                content_offset: 0,
+                visible,
+            }],
+            ts: Utc::now(),
+            streaming: false,
+            display_cursor: 0,
+        };
+        self.push(msg);
+    }
+
+    pub fn toggle_all_tool_results(&mut self) {
+        let should_expand = self
+            .messages
+            .iter()
+            .flat_map(|m| m.tool_results.iter())
+            .any(|tool| !tool.visible);
+
+        for msg in &mut self.messages {
+            for tool in &mut msg.tool_results {
+                tool.visible = should_expand;
             }
         }
     }
@@ -106,12 +179,28 @@ impl Session {
         if let Some(id) = self.streaming_id {
             if let Some(m) = self.messages.get_mut(id) {
                 m.streaming = false;
+                // Strip text-based tool call JSON fallback lines from
+                // content so they don't appear in the rendered chat.
+                m.content = strip_text_tool_calls(&m.content);
                 // Reveal all remaining content immediately.
                 m.display_cursor = m.content.len();
                 // Auto-fold thinking when streaming finishes and mode
                 // is ShowWhileStreaming.
-                if matches!(self.display, crate::config::ThinkingDisplay::ShowWhileStreaming) {
+                if matches!(
+                    self.display,
+                    crate::config::ThinkingDisplay::ShowWhileStreaming
+                ) {
                     m.thinking_visible = false;
+                }
+                // Auto-fold tool results when streaming finishes and mode
+                // is ShowWhileStreaming.
+                if matches!(
+                    self.tool_display,
+                    crate::config::ToolResultDisplay::ShowWhileStreaming
+                ) {
+                    for t in &mut m.tool_results {
+                        t.visible = false;
+                    }
                 }
             }
         }
@@ -151,14 +240,26 @@ impl Session {
                 && !m.thinking.trim().is_empty()
                 && self.display != crate::config::ThinkingDisplay::Hide;
             if show {
-                n += 1; // toggle (after prefix)
-                let expanded = (self.display == crate::config::ThinkingDisplay::Show && m.thinking_visible)
-                    || (self.display == crate::config::ThinkingDisplay::ShowWhileStreaming && (m.streaming || m.thinking_visible));
-                if expanded {
-                    n += m.thinking.split('\n').count() as u16 + 1;
+                let expanded = (self.display == crate::config::ThinkingDisplay::Show
+                    && m.thinking_visible)
+                    || (self.display == crate::config::ThinkingDisplay::ShowWhileStreaming
+                        && (m.streaming || m.thinking_visible));
+                n += crate::session::render::thinking_block_line_count(&m.thinking, expanded, 120)
+                    as u16;
+            }
+            n += m.content.split('\n').count().max(1) as u16;
+            if self.tool_display != crate::config::ToolResultDisplay::Hide {
+                for t in &m.tool_results {
+                    let t_vis = match self.tool_display {
+                        crate::config::ToolResultDisplay::Show => t.visible,
+                        crate::config::ToolResultDisplay::ShowWhileStreaming => {
+                            m.streaming || t.visible
+                        }
+                        _ => false,
+                    };
+                    n += crate::session::render::tool_block_line_count(t, t_vis, 120) as u16;
                 }
             }
-            n += m.content.split('\n').count() as u16;
             n += 1; // spacer
         }
         if !self.messages.is_empty() {
@@ -171,7 +272,9 @@ impl Session {
     /// of the viewport.  Lines after the message will fill the viewport.
     pub fn timeline(&mut self, viewport_height: u16) {
         let inner_h = viewport_height.saturating_sub(2) as u16;
-        if inner_h == 0 { return; }
+        if inner_h == 0 {
+            return;
+        }
 
         // Find the last user message.
         let last_user = match self.messages.iter().rposition(|m| m.role == Role::User) {
@@ -210,16 +313,101 @@ impl Session {
                 && !m.thinking.trim().is_empty()
                 && self.display != crate::config::ThinkingDisplay::Hide;
             if show {
-                n += 1;
-                let expanded = (self.display == crate::config::ThinkingDisplay::Show && m.thinking_visible)
-                    || (self.display == crate::config::ThinkingDisplay::ShowWhileStreaming && (m.streaming || m.thinking_visible));
-                if expanded {
-                    n += m.thinking.split('\n').count() as u16 + 1;
+                let expanded = (self.display == crate::config::ThinkingDisplay::Show
+                    && m.thinking_visible)
+                    || (self.display == crate::config::ThinkingDisplay::ShowWhileStreaming
+                        && (m.streaming || m.thinking_visible));
+                n += crate::session::render::thinking_block_line_count(&m.thinking, expanded, 120)
+                    as u16;
+            }
+            n += m.content.split('\n').count().max(1) as u16;
+            if self.tool_display != crate::config::ToolResultDisplay::Hide {
+                for t in &m.tool_results {
+                    let t_vis = match self.tool_display {
+                        crate::config::ToolResultDisplay::Show => t.visible,
+                        crate::config::ToolResultDisplay::ShowWhileStreaming => {
+                            m.streaming || t.visible
+                        }
+                        _ => false,
+                    };
+                    n += crate::session::render::tool_block_line_count(t, t_vis, 120) as u16;
                 }
             }
-            n += m.content.split('\n').count() as u16;
             n += 1; // spacer
         }
         n
     }
+}
+
+/// Remove text-based tool call JSON fallback lines from content.
+/// These are lines containing `{"name":"...","arguments":...}` that
+/// the model may output when the API doesn't support structured
+/// tool_calls. Also strips optional `>>>` / `<<<` wrappers, including
+/// Markdown-quoted wrapper fragments.
+pub fn strip_text_tool_calls(s: &str) -> String {
+    let mut out = Vec::new();
+    let mut in_tool_block = false;
+
+    for line in s.lines() {
+        let mut current = line.to_string();
+        let mut kept_prefix: Option<String> = None;
+
+        if let Some(idx) = current.find(">>>") {
+            let prefix = current[..idx].trim_end();
+            if !prefix.is_empty() {
+                kept_prefix = Some(prefix.to_string());
+            }
+            current = current[idx + 3..].to_string();
+            in_tool_block = true;
+        }
+
+        let mut closes_block = false;
+        if let Some(idx) = current.find("<<<") {
+            current.truncate(idx);
+            closes_block = true;
+        }
+
+        let normalized = normalize_tool_call_line(&current);
+        let is_tool_call = is_text_tool_call_normalized(&normalized);
+        let is_empty_quote = normalized.is_empty();
+
+        if let Some(prefix) = kept_prefix {
+            out.push(prefix);
+        } else if !in_tool_block && !is_tool_call {
+            out.push(line.to_string());
+        } else if in_tool_block && !is_tool_call && !is_empty_quote {
+            out.push(current.trim().to_string());
+        }
+
+        if closes_block {
+            in_tool_block = false;
+        }
+    }
+
+    out.join("\n")
+}
+
+fn normalize_tool_call_line(line: &str) -> String {
+    let mut t = line.trim();
+    while let Some(rest) = t.strip_prefix('>') {
+        t = rest.trim_start();
+    }
+    t.trim_matches(|c: char| c.is_whitespace()).to_string()
+}
+
+fn is_text_tool_call_normalized(line: &str) -> bool {
+    let inner = line
+        .strip_prefix(">>>")
+        .unwrap_or(line)
+        .strip_suffix("<<<")
+        .unwrap_or(line)
+        .trim();
+    inner.len() > 10
+        && inner.starts_with('{')
+        && inner.contains("\"name\"")
+        && inner.contains("\"arguments\"")
+}
+
+fn is_long_tool_content(content: &str) -> bool {
+    content.lines().count() > 12 || content.len() > 2_000
 }

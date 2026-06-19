@@ -4,9 +4,7 @@ use anyhow::Result;
 use crossterm::cursor::{RestorePosition, SavePosition};
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
 use crossterm::execute;
-use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, Clear, ClearType,
-};
+use crossterm::terminal::{disable_raw_mode, enable_raw_mode, Clear, ClearType};
 use fish_coding_agent::app::App;
 use fish_coding_agent::{config, event};
 use ratatui::backend::CrosstermBackend;

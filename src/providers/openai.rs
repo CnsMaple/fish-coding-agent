@@ -32,7 +32,9 @@ impl Provider for OpenAiProvider {
         if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
             return Err(ProviderError::AuthFailed(status.as_u16()).into());
         }
-        if status == reqwest::StatusCode::NOT_FOUND || status == reqwest::StatusCode::METHOD_NOT_ALLOWED {
+        if status == reqwest::StatusCode::NOT_FOUND
+            || status == reqwest::StatusCode::METHOD_NOT_ALLOWED
+        {
             return Err(ProviderError::NoModelsEndpoint.into());
         }
         if !status.is_success() {
@@ -45,6 +47,8 @@ impl Provider for OpenAiProvider {
             .map(|m| ModelInfo {
                 id: m.id.clone(),
                 display: m.id,
+                request_id: None,
+                context_window_tokens: None,
             })
             .collect())
     }
@@ -113,7 +117,10 @@ impl Provider for OpenAiProvider {
                                             }
                                         }
                                     }
-                                    if let Some(calls) = v.pointer("/choices/0/delta/tool_calls").and_then(|v| v.as_array()) {
+                                    if let Some(calls) = v
+                                        .pointer("/choices/0/delta/tool_calls")
+                                        .and_then(|v| v.as_array())
+                                    {
                                         merge_tool_call_deltas(&mut tool_calls, calls);
                                     }
                                     if let Some(u) = v.get("usage") {
@@ -169,7 +176,10 @@ fn openai_message(m: &super::ChatMessage) -> serde_json::Value {
 
 fn merge_tool_call_deltas(tool_calls: &mut Vec<ToolCall>, deltas: &[serde_json::Value]) {
     for delta in deltas {
-        let idx = delta.get("index").and_then(|v| v.as_u64()).unwrap_or(tool_calls.len() as u64) as usize;
+        let idx = delta
+            .get("index")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(tool_calls.len() as u64) as usize;
         while tool_calls.len() <= idx {
             tool_calls.push(ToolCall {
                 id: String::new(),
@@ -184,7 +194,10 @@ fn merge_tool_call_deltas(tool_calls: &mut Vec<ToolCall>, deltas: &[serde_json::
         if let Some(name) = delta.pointer("/function/name").and_then(|v| v.as_str()) {
             call.name.push_str(name);
         }
-        if let Some(args) = delta.pointer("/function/arguments").and_then(|v| v.as_str()) {
+        if let Some(args) = delta
+            .pointer("/function/arguments")
+            .and_then(|v| v.as_str())
+        {
             call.arguments.push_str(args);
         }
     }

@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 pub enum ProviderKind {
     Openai,
     Anthropic,
+    Cursor,
 }
 
 impl ProviderKind {
@@ -17,6 +18,7 @@ impl ProviderKind {
         match self {
             ProviderKind::Openai => "openai",
             ProviderKind::Anthropic => "anthropic",
+            ProviderKind::Cursor => "cursor",
         }
     }
 
@@ -24,6 +26,7 @@ impl ProviderKind {
         match self {
             ProviderKind::Openai => "OpenAI",
             ProviderKind::Anthropic => "Anthropic",
+            ProviderKind::Cursor => "Cursor",
         }
     }
 
@@ -31,12 +34,17 @@ impl ProviderKind {
         match s.to_ascii_lowercase().as_str() {
             "openai" => Some(Self::Openai),
             "anthropic" => Some(Self::Anthropic),
+            "cursor" => Some(Self::Cursor),
             _ => None,
         }
     }
 
-    pub fn all() -> [ProviderKind; 2] {
-        [ProviderKind::Openai, ProviderKind::Anthropic]
+    pub fn all() -> [ProviderKind; 3] {
+        [
+            ProviderKind::Openai,
+            ProviderKind::Anthropic,
+            ProviderKind::Cursor,
+        ]
     }
 }
 
@@ -45,6 +53,7 @@ impl ProviderKind {
 pub enum ProviderMode {
     Key,
     Env,
+    Oauth,
 }
 
 impl ProviderMode {
@@ -52,6 +61,7 @@ impl ProviderMode {
         match self {
             ProviderMode::Key => "key",
             ProviderMode::Env => "env",
+            ProviderMode::Oauth => "oauth",
         }
     }
 
@@ -59,12 +69,20 @@ impl ProviderMode {
         match s.to_ascii_lowercase().as_str() {
             "key" => Some(Self::Key),
             "env" => Some(Self::Env),
+            "oauth" | "auth" => Some(Self::Oauth),
             _ => None,
         }
     }
 
-    pub fn all() -> [ProviderMode; 2] {
-        [ProviderMode::Key, ProviderMode::Env]
+    pub fn all() -> [ProviderMode; 3] {
+        [ProviderMode::Key, ProviderMode::Env, ProviderMode::Oauth]
+    }
+
+    pub fn for_kind(kind: ProviderKind) -> &'static [ProviderMode] {
+        match kind {
+            ProviderKind::Cursor => &[ProviderMode::Oauth],
+            _ => &[ProviderMode::Key, ProviderMode::Env],
+        }
     }
 }
 
@@ -77,7 +95,10 @@ pub fn make_id(kind: ProviderKind, mode: ProviderMode) -> ProviderId {
 
 pub fn parse_id(id: &str) -> Option<(ProviderKind, ProviderMode)> {
     let (k, m) = id.split_once(':')?;
-    Some((ProviderKind::from_str_opt(k)?, ProviderMode::from_str_opt(m)?))
+    Some((
+        ProviderKind::from_str_opt(k)?,
+        ProviderMode::from_str_opt(m)?,
+    ))
 }
 
 /// Human-readable label, e.g. "OpenAI (key)".
@@ -164,6 +185,29 @@ impl ThinkingDisplay {
     }
 }
 
+/// How tool results are shown in the session view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ToolResultDisplay {
+    /// Always show tool result blocks, user can click to fold.
+    #[default]
+    Show,
+    /// Never render tool results.
+    Hide,
+    /// Auto-expand while streaming, auto-fold on finish.
+    ShowWhileStreaming,
+}
+
+impl ToolResultDisplay {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ToolResultDisplay::Show => "show",
+            ToolResultDisplay::Hide => "hide",
+            ToolResultDisplay::ShowWhileStreaming => "while streaming",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum EnterBehavior {
@@ -195,11 +239,51 @@ pub struct ProviderConfig {
     pub base_url: String,
     #[serde(default)]
     pub model: String,
+    /// Optional friendly model label. `model` remains the provider request id.
+    #[serde(default)]
+    pub model_display: String,
     /// Optional user-defined name. When set, the status bar shows
     /// `name:model` instead of `kind:model`. Falls back to the kind name
     /// when empty.
     #[serde(default)]
     pub name: String,
+}
+
+impl ProviderConfig {
+    pub fn preset(kind: ProviderKind) -> Self {
+        Self {
+            api_key: String::new(),
+            api_key_env: default_api_key_env(kind).to_string(),
+            base_url: default_base_url(kind).to_string(),
+            model: String::new(),
+            model_display: String::new(),
+            name: String::new(),
+        }
+    }
+}
+
+pub fn default_base_url(kind: ProviderKind) -> &'static str {
+    match kind {
+        ProviderKind::Openai => "https://api.openai.com/v1",
+        ProviderKind::Anthropic => "https://api.anthropic.com",
+        ProviderKind::Cursor => "https://api2.cursor.sh",
+    }
+}
+
+pub fn default_api_key_env(kind: ProviderKind) -> &'static str {
+    match kind {
+        ProviderKind::Openai => "OPENAI_API_KEY",
+        ProviderKind::Anthropic => "ANTHROPIC_API_KEY",
+        ProviderKind::Cursor => "",
+    }
+}
+
+pub fn default_model(kind: ProviderKind) -> &'static str {
+    match kind {
+        ProviderKind::Openai => "gpt-4o-mini",
+        ProviderKind::Anthropic => "claude-3-5-sonnet-latest",
+        ProviderKind::Cursor => "",
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -212,6 +296,8 @@ pub struct Config {
     #[serde(default)]
     pub thinking_display: ThinkingDisplay,
     #[serde(default)]
+    pub tool_display: ToolResultDisplay,
+    #[serde(default)]
     pub enter_behavior: EnterBehavior,
     #[serde(default)]
     pub entries: HashMap<ProviderId, ProviderConfig>,
@@ -223,7 +309,10 @@ impl Config {
             let raw = std::fs::read_to_string(path)
                 .with_context(|| format!("read config {}", path.display()))?;
             // Try the new format first.
-            if let Ok(cfg) = serde_json::from_str::<Self>(&raw) {
+            if let Ok(mut cfg) = serde_json::from_str::<Self>(&raw) {
+                if cfg.sanitize_entries() {
+                    let _ = cfg.save(path);
+                }
                 return Ok(cfg);
             }
             // Migrate from the old (kind-only) format if possible.
@@ -254,6 +343,7 @@ impl Config {
                     api_key_env: p.api_key_env,
                     base_url: p.base_url,
                     model: old.active_model.clone(),
+                    model_display: String::new(),
                     name: String::new(),
                 },
             );
@@ -267,6 +357,7 @@ impl Config {
             active,
             thinking: old.thinking,
             thinking_display: ThinkingDisplay::Show,
+            tool_display: ToolResultDisplay::Show,
             enter_behavior: EnterBehavior::EnterSends,
             entries,
         }
@@ -276,9 +367,48 @@ impl Config {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).ok();
         }
-        let raw = serde_json::to_string_pretty(self)?;
+        let mut cfg = self.clone();
+        cfg.sanitize_entries();
+        let raw = serde_json::to_string_pretty(&cfg)?;
         std::fs::write(path, raw).with_context(|| format!("write config {}", path.display()))?;
         Ok(())
+    }
+
+    pub fn sanitize_entries(&mut self) -> bool {
+        let before = self.entries.len();
+        self.entries.retain(|id, _| parse_id(id).is_some());
+        let mut changed = self.entries.len() != before;
+        for (id, cfg) in self.entries.iter_mut() {
+            if parse_id(id)
+                .map(|(k, _)| k == ProviderKind::Cursor)
+                .unwrap_or(false)
+                && cfg.model.trim().eq_ignore_ascii_case("auto")
+            {
+                cfg.model.clear();
+                changed = true;
+            }
+        }
+        let active_is_valid = self
+            .active
+            .as_ref()
+            .map(|id| self.entries.contains_key(id) && parse_id(id).is_some())
+            .unwrap_or(false);
+        if !active_is_valid {
+            self.active = self.configured_provider_ids().into_iter().next();
+            changed = true;
+        }
+        changed
+    }
+
+    pub fn configured_provider_ids(&self) -> Vec<ProviderId> {
+        let mut ids: Vec<_> = self
+            .entries
+            .keys()
+            .filter(|id| parse_id(id).is_some())
+            .cloned()
+            .collect();
+        ids.sort();
+        ids
     }
 
     pub fn entry(&self, id: &str) -> Option<&ProviderConfig> {
@@ -291,12 +421,15 @@ impl Config {
 
     pub fn active_entry(&self) -> Option<(&ProviderId, &ProviderConfig)> {
         let id = self.active.as_ref()?;
+        parse_id(id)?;
         let cfg = self.entries.get(id)?;
         Some((id, cfg))
     }
 
     pub fn active_kind(&self) -> Option<ProviderKind> {
-        self.active.as_ref().and_then(|id| parse_id(id).map(|(k, _)| k))
+        self.active
+            .as_ref()
+            .and_then(|id| parse_id(id).map(|(k, _)| k))
     }
 
     pub fn active_model(&self) -> &str {
@@ -326,6 +459,9 @@ impl Config {
     /// as `(no model)` so the status bar is unambiguous.
     pub fn active_model_display(&self) -> String {
         if let Some((_, c)) = self.active_entry() {
+            if !c.model_display.trim().is_empty() {
+                return c.model_display.clone();
+            }
             if !c.model.trim().is_empty() {
                 return c.model.clone();
             }
@@ -350,6 +486,15 @@ impl Config {
             .ok_or_else(|| format!("{id}: not configured"))?;
         if p.base_url.trim().is_empty() {
             return Err(format!("{id}: base_url is required (set it in /settings)"));
+        }
+        if parse_id(id)
+            .map(|(_, m)| m == ProviderMode::Oauth)
+            .unwrap_or(false)
+        {
+            return match self.effective_api_key(id) {
+                Some(k) if !k.is_empty() => Ok(()),
+                _ => Err(format!("{id}: Cursor OAuth is not authorized yet")),
+            };
         }
         match self.effective_api_key(id) {
             Some(k) if !k.is_empty() => Ok(()),
@@ -377,7 +522,7 @@ impl Config {
     pub fn all_possible_ids() -> Vec<ProviderId> {
         let mut out = Vec::new();
         for k in ProviderKind::all() {
-            for m in ProviderMode::all() {
+            for &m in ProviderMode::for_kind(k) {
                 out.push(make_id(k, m));
             }
         }
@@ -390,28 +535,17 @@ impl Default for Config {
         let mut entries = HashMap::new();
         entries.insert(
             make_id(ProviderKind::Openai, ProviderMode::Key),
-            ProviderConfig {
-                api_key: String::new(),
-                api_key_env: "OPENAI_API_KEY".to_string(),
-                base_url: "https://api.openai.com/v1".to_string(),
-                model: "gpt-4o-mini".to_string(),
-                name: String::new(),
-            },
+            ProviderConfig::preset(ProviderKind::Openai),
         );
         entries.insert(
             make_id(ProviderKind::Anthropic, ProviderMode::Key),
-            ProviderConfig {
-                api_key: String::new(),
-                api_key_env: "ANTHROPIC_API_KEY".to_string(),
-                base_url: "https://api.anthropic.com".to_string(),
-                model: "claude-3-5-sonnet-latest".to_string(),
-                name: String::new(),
-            },
+            ProviderConfig::preset(ProviderKind::Anthropic),
         );
         Self {
             active: Some(make_id(ProviderKind::Openai, ProviderMode::Key)),
             thinking: ReasoningMode::Off,
             thinking_display: ThinkingDisplay::Show,
+            tool_display: ToolResultDisplay::Show,
             enter_behavior: EnterBehavior::EnterSends,
             entries,
         }

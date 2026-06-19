@@ -35,7 +35,9 @@ impl Provider for AnthropicProvider {
         if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
             return Err(ProviderError::AuthFailed(status.as_u16()).into());
         }
-        if status == reqwest::StatusCode::NOT_FOUND || status == reqwest::StatusCode::METHOD_NOT_ALLOWED {
+        if status == reqwest::StatusCode::NOT_FOUND
+            || status == reqwest::StatusCode::METHOD_NOT_ALLOWED
+        {
             return Err(ProviderError::NoModelsEndpoint.into());
         }
         if !status.is_success() {
@@ -48,6 +50,8 @@ impl Provider for AnthropicProvider {
             .map(|m| ModelInfo {
                 id: m.id,
                 display: m.display_name.unwrap_or_else(|| "?".to_string()),
+                request_id: None,
+                context_window_tokens: None,
             })
             .collect())
     }
@@ -109,11 +113,15 @@ impl Provider for AnthropicProvider {
                         let line = line.trim_end_matches('\r');
                         if let Some(rest) = line.strip_prefix("data:") {
                             let data = rest.trim();
-                            if data.is_empty() { continue; }
+                            if data.is_empty() {
+                                continue;
+                            }
                             if let Ok(v) = serde_json::from_str::<serde_json::Value>(data) {
                                 match v.get("type").and_then(|t| t.as_str()) {
                                     Some("content_block_start") => {
-                                        if v.pointer("/content_block/type").and_then(|t| t.as_str()) == Some("tool_use") {
+                                        if v.pointer("/content_block/type").and_then(|t| t.as_str())
+                                            == Some("tool_use")
+                                        {
                                             merge_tool_use_start(&mut tool_calls, &v);
                                         }
                                     }
@@ -121,18 +129,24 @@ impl Provider for AnthropicProvider {
                                         if let Some(delta) = v.pointer("/delta/text") {
                                             if let Some(s) = delta.as_str() {
                                                 if !s.is_empty() {
-                                                    let _ = tx.send(ChatEvent::Delta(s.to_string()));
+                                                    let _ =
+                                                        tx.send(ChatEvent::Delta(s.to_string()));
                                                 }
                                             }
                                         }
                                         if let Some(delta) = v.pointer("/delta/thinking") {
                                             if let Some(s) = delta.as_str() {
                                                 if !s.is_empty() {
-                                                    let _ = tx.send(ChatEvent::ThinkingDelta(s.to_string()));
+                                                    let _ = tx.send(ChatEvent::ThinkingDelta(
+                                                        s.to_string(),
+                                                    ));
                                                 }
                                             }
                                         }
-                                        if let Some(partial) = v.pointer("/delta/partial_json").and_then(|p| p.as_str()) {
+                                        if let Some(partial) = v
+                                            .pointer("/delta/partial_json")
+                                            .and_then(|p| p.as_str())
+                                        {
                                             merge_tool_use_delta(&mut tool_calls, &v, partial);
                                         }
                                     }
@@ -211,7 +225,10 @@ fn anthropic_message(m: &super::ChatMessage) -> serde_json::Value {
 }
 
 fn merge_tool_use_start(tool_calls: &mut Vec<ToolCall>, event: &serde_json::Value) {
-    let idx = event.get("index").and_then(|v| v.as_u64()).unwrap_or(tool_calls.len() as u64) as usize;
+    let idx = event
+        .get("index")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(tool_calls.len() as u64) as usize;
     while tool_calls.len() <= idx {
         tool_calls.push(ToolCall {
             id: String::new(),
@@ -223,7 +240,10 @@ fn merge_tool_use_start(tool_calls: &mut Vec<ToolCall>, event: &serde_json::Valu
     if let Some(id) = event.pointer("/content_block/id").and_then(|v| v.as_str()) {
         call.id = id.to_string();
     }
-    if let Some(name) = event.pointer("/content_block/name").and_then(|v| v.as_str()) {
+    if let Some(name) = event
+        .pointer("/content_block/name")
+        .and_then(|v| v.as_str())
+    {
         call.name = name.to_string();
     }
     if let Some(input) = event.pointer("/content_block/input") {
@@ -264,7 +284,10 @@ fn parse_anthropic_usage(v: &serde_json::Value) -> Option<Usage> {
     if let Some(n) = v.get("cache_read_input_tokens").and_then(|x| x.as_u64()) {
         u.cache_read_tokens = n;
     }
-    if let Some(n) = v.get("cache_creation_input_tokens").and_then(|x| x.as_u64()) {
+    if let Some(n) = v
+        .get("cache_creation_input_tokens")
+        .and_then(|x| x.as_u64())
+    {
         u.cache_creation_tokens = n;
     }
     Some(u)

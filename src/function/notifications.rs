@@ -41,6 +41,9 @@ impl Toast {
 #[derive(Debug, Default)]
 pub struct Notifications {
     pub items: VecDeque<Toast>,
+    pub query: String,
+    pub cursor: usize,
+    pub scroll: usize,
 }
 
 use std::collections::VecDeque;
@@ -69,17 +72,87 @@ impl Notifications {
             let drop = self.items.len() - 200;
             self.items.drain(0..drop);
         }
+        self.clamp_cursor();
     }
 
     /// Drop all toasts. The user requested a transient model: toasts arrive,
     /// the user reads them, then the next panel open starts fresh.
     pub fn clear(&mut self) {
         self.items.clear();
+        self.query.clear();
+        self.cursor = 0;
+        self.scroll = 0;
     }
 
     pub fn latest_n(&self, n: usize) -> Vec<&Toast> {
         let start = self.items.len().saturating_sub(n);
         self.items.iter().skip(start).collect()
+    }
+
+    pub fn filtered_indices(&self) -> Vec<usize> {
+        let query = self.query.trim().to_ascii_lowercase();
+        self.items
+            .iter()
+            .enumerate()
+            .rev()
+            .filter_map(|(idx, toast)| {
+                if query.is_empty()
+                    || toast.text.to_ascii_lowercase().contains(&query)
+                    || toast.level.tag().contains(&query)
+                    || toast.format_time().contains(&query)
+                {
+                    Some(idx)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    pub fn clamp_cursor(&mut self) {
+        let len = self.filtered_indices().len();
+        if len == 0 {
+            self.cursor = 0;
+            self.scroll = 0;
+        } else if self.cursor >= len {
+            self.cursor = len - 1;
+        }
+    }
+
+    pub fn move_up(&mut self) {
+        self.clamp_cursor();
+        self.cursor = self.cursor.saturating_sub(1);
+        if self.cursor < self.scroll {
+            self.scroll = self.cursor;
+        }
+    }
+
+    pub fn move_down(&mut self) {
+        let len = self.filtered_indices().len();
+        if len == 0 {
+            self.cursor = 0;
+            self.scroll = 0;
+            return;
+        }
+        self.cursor = (self.cursor + 1).min(len - 1);
+    }
+
+    pub fn insert_query_char(&mut self, c: char) {
+        self.query.push(c);
+        self.cursor = 0;
+        self.scroll = 0;
+        self.clamp_cursor();
+    }
+
+    pub fn backspace_query(&mut self) -> bool {
+        if self.query.pop().is_some() {
+            self.cursor = 0;
+            self.scroll = 0;
+            self.clamp_cursor();
+            true
+        } else {
+            false
+        }
     }
 }
 
@@ -90,9 +163,18 @@ pub struct HitRate {
     cap: usize,
 }
 
+#[derive(Debug)]
+pub struct TokenRate {
+    window: Vec<f64>,
+    cap: usize,
+}
+
 impl HitRate {
     pub fn new(cap: usize) -> Self {
-        Self { window: Vec::with_capacity(cap), cap }
+        Self {
+            window: Vec::with_capacity(cap),
+            cap,
+        }
     }
 
     pub fn record(&mut self, rate: f64) {
@@ -115,14 +197,48 @@ impl HitRate {
     }
 }
 
+impl TokenRate {
+    pub fn new(cap: usize) -> Self {
+        Self {
+            window: Vec::with_capacity(cap),
+            cap,
+        }
+    }
+
+    pub fn record(&mut self, tokens_per_second: f64) {
+        if self.window.len() == self.cap {
+            self.window.remove(0);
+        }
+        self.window.push(tokens_per_second);
+    }
+
+    pub fn current(&self) -> Option<f64> {
+        self.window.last().copied()
+    }
+
+    pub fn average(&self) -> Option<f64> {
+        if self.window.is_empty() {
+            return None;
+        }
+        let sum: f64 = self.window.iter().sum();
+        Some(sum / self.window.len() as f64)
+    }
+}
+
 /// Cached model list per provider.
 use crate::config::ProviderKind;
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelInfo {
+    /// Stable display/selection id shown in the picker.
     pub id: String,
     pub display: String,
+    /// Provider-specific id to send in chat requests. Defaults to `id` for older caches.
+    #[serde(default)]
+    pub request_id: Option<String>,
+    #[serde(default)]
+    pub context_window_tokens: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -143,7 +259,13 @@ impl ModelCache {
         self.by_provider.get(&kind)
     }
 
-    pub fn put(&mut self, kind: ProviderKind, base_url: String, api_key: String, models: Vec<ModelInfo>) {
+    pub fn put(
+        &mut self,
+        kind: ProviderKind,
+        base_url: String,
+        api_key: String,
+        models: Vec<ModelInfo>,
+    ) {
         self.by_provider.insert(
             kind,
             CachedModels {

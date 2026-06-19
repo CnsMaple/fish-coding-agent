@@ -2,7 +2,7 @@ use crate::app::App;
 use crate::config::{parse_id, ProviderKind, ProviderMode};
 use crate::function::notifications::ToastLevel;
 use crate::function::SidebarTab;
-use crate::providers::{ChatMessage, ChatRequest};
+use crate::providers::{ChatMessage, ChatRequest, ToolCall};
 use crate::session::{Message, Role};
 
 pub fn dispatch(app: &mut App, cmd: &str, arg: &str) {
@@ -11,7 +11,7 @@ pub fn dispatch(app: &mut App, cmd: &str, arg: &str) {
         "model" => open_model_picker(app),
         "hotkey" | "help" | "keys" => open_hotkey(app),
         "clear" => {
-            app.session.clear();
+            app.start_new_session();
             app.notify(ToastLevel::Info, "session cleared");
         }
         "think" | "thinking" => {
@@ -29,7 +29,10 @@ pub fn dispatch(app: &mut App, cmd: &str, arg: &str) {
                     "high" => ReasoningMode::High,
                     "adaptive" => ReasoningMode::Adaptive,
                     _ => {
-                        app.notify(ToastLevel::Fail, format!("unknown thinking level: {arg} (off/low/med/high/adaptive)"));
+                        app.notify(
+                            ToastLevel::Fail,
+                            format!("unknown thinking level: {arg} (off/low/med/high/adaptive)"),
+                        );
                         return;
                     }
                 };
@@ -40,11 +43,36 @@ pub fn dispatch(app: &mut App, cmd: &str, arg: &str) {
             }
         }
         "timeline" => {
-            // Open (or focus) the timeline picker in the function panel.
-            // The picker lists every message in the session with a search
-            // box; pressing Enter on an entry jumps the session scroll to
-            // that message.
             open_timeline_picker(app);
+        }
+        "session" | "sessions" => {
+            open_session_picker(app, crate::function::SessionPickerMode::Manage)
+        }
+        "rename" => {
+            let title = arg.trim();
+            if title.is_empty() {
+                open_session_rename(app, None, app.session_title.clone());
+            } else {
+                app.rename_session(None, title.to_string());
+            }
+        }
+        "fork" => app.fork_session(None),
+        "retry" => retry_last_prompt(app),
+        "continue" => continue_response(app),
+        "plan" => {
+            let arg = arg.trim().to_lowercase();
+            if matches!(arg.as_str(), "exit" | "off" | "yolo") {
+                app.set_mode(crate::function::AppMode::Yolo);
+                app.notify(ToastLevel::Info, "mode: yolo");
+            } else if arg.is_empty() {
+                app.set_mode(crate::function::AppMode::Plan);
+                app.notify(ToastLevel::Info, "mode: plan");
+            } else {
+                app.notify(
+                    ToastLevel::Fail,
+                    "unknown plan command: use /plan or /plan exit",
+                );
+            }
         }
         "quit" | "exit" | "q" => {
             app.should_quit = true;
@@ -75,6 +103,7 @@ pub fn dispatch(app: &mut App, cmd: &str, arg: &str) {
             app.config.active = Some(id.clone());
             app.status.set_provider_name(&app.config.active_name());
             app.status.set_model(&app.config.active_model_display());
+            app.refresh_status_model_context();
             app.save_config();
             app.notify(ToastLevel::Ok, format!("provider switched to {id}"));
         }
@@ -82,6 +111,33 @@ pub fn dispatch(app: &mut App, cmd: &str, arg: &str) {
             app.notify(ToastLevel::Fail, format!("unknown command: /{cmd}"));
         }
     }
+}
+
+fn retry_last_prompt(app: &mut App) {
+    if app.inflight.is_some() {
+        app.notify(ToastLevel::Warn, "request in flight, please wait");
+        return;
+    }
+    let Some(idx) = app
+        .session
+        .messages
+        .iter()
+        .rposition(|m| matches!(m.role, Role::User) && !m.content.starts_with("Context from "))
+    else {
+        app.notify(ToastLevel::Warn, "no prompt to retry");
+        return;
+    };
+    let prompt = app.session.messages[idx].content.clone();
+    app.session.messages.truncate(idx);
+    crate::commands::send_chat(app, prompt);
+}
+
+fn continue_response(app: &mut App) {
+    if app.inflight.is_some() {
+        app.notify(ToastLevel::Warn, "request in flight, please wait");
+        return;
+    }
+    crate::commands::send_chat(app, "Continue from where you left off.".to_string());
 }
 
 pub fn open_settings(app: &mut App) {
@@ -92,10 +148,7 @@ pub fn open_settings(app: &mut App) {
 /// `open_model_picker` so the user lands directly on ProviderList (skipping
 /// the redundant TopLevel) when they are routed here because no model is
 /// configured.
-pub fn open_settings_at(
-    app: &mut App,
-    initial_level: crate::function::SettingsLevel,
-) {
+pub fn open_settings_at(app: &mut App, initial_level: crate::function::SettingsLevel) {
     let mut state = crate::function::SettingsState::new(&app.config);
     state.level = initial_level;
     state.clamp_cursor(&app.config);
@@ -170,9 +223,12 @@ pub fn open_model_picker(app: &mut App) {
 /// configured (so the chooser step is skipped).
 pub fn open_model_picker_for_kind(app: &mut App, provider: crate::config::ProviderKind) {
     // If a picker for this exact provider is already open, focus it.
-    if let Some(idx) = app.function.tabs.iter().position(|t| {
-        matches!(t, SidebarTab::ModelPicker(s) if s.provider == provider)
-    }) {
+    if let Some(idx) = app
+        .function
+        .tabs
+        .iter()
+        .position(|t| matches!(t, SidebarTab::ModelPicker(s) if s.provider == provider))
+    {
         app.function.active = idx;
         app.function_visible = true;
         app.acknowledge_panel();
@@ -220,8 +276,9 @@ pub fn open_hotkey(app: &mut App) {
 }
 
 pub fn open_thinking_picker(app: &mut App) {
-    app.function
-        .push(SidebarTab::ThinkingPicker(crate::function::ThinkingPickerState::new()));
+    app.function.push(SidebarTab::ThinkingPicker(
+        crate::function::ThinkingPickerState::new(),
+    ));
     app.function_visible = true;
     app.acknowledge_panel();
 }
@@ -242,6 +299,67 @@ pub fn open_timeline_picker(app: &mut App) {
     app.acknowledge_panel();
 }
 
+pub fn open_session_picker(app: &mut App, mode: crate::function::SessionPickerMode) {
+    app.save_current_session();
+    if let Some(idx) = app
+        .function
+        .tabs
+        .iter()
+        .position(|t| matches!(t, SidebarTab::SessionPicker(_)))
+    {
+        app.function.active = idx;
+        if let Some(SidebarTab::SessionPicker(state)) = app.function.tabs.get_mut(idx) {
+            state.mode = mode;
+            state.reload(&app.cwd);
+        }
+    } else {
+        app.function.push(SidebarTab::SessionPicker(
+            crate::function::SessionPickerState::new(mode, &app.cwd),
+        ));
+    }
+    app.function_visible = true;
+    app.acknowledge_panel();
+}
+
+pub fn open_session_rename(app: &mut App, target_id: Option<String>, title: String) {
+    app.function
+        .push(SidebarTab::SessionRename(match target_id {
+            Some(id) => crate::function::SessionRenameState::new_target(id, title),
+            None => crate::function::SessionRenameState::new_current(&title),
+        }));
+    app.function_visible = true;
+    app.acknowledge_panel();
+}
+
+/// System prompt instructing the model about available tools.
+/// Stresses using the structured tool_calls API, and provides a
+/// text-based fallback format for providers that don't support it.
+fn system_prompt() -> String {
+    format!(
+        "\
+You are a coding assistant with access to the following tools in the user's workspace:
+
+  - read_file(path, start_line?, end_line?)
+  - write_file(path, content, start_line?, end_line?)
+  - shell_command(command) - runs in {shell}
+    Current shell details: {shell_details}
+  - python_command(code) - runs Python source code directly
+  - grep(pattern, path?) - search text in files
+  - list(path?) - list files under a directory
+  - ask(question, options?) - ask the user in the function panel
+  - todo(items) - update the visible todo list in the function panel
+  - plan(title?, content, steps?) - present a plan for user confirmation
+
+When a task requires one of these actions you MUST invoke the appropriate tool via the API's structured tool_calls mechanism. Never describe using a tool without actually calling it.
+
+If your API does not support structured tool_calls, describe each tool call as a single-line JSON object on its own line in the following format:
+  >>> {{\"name\": \"tool_name\", \"arguments\": {{...}}}} <<<
+
+Do NOT claim a tool was used unless you actually see its result.",
+        shell = crate::tools::shell_description(),
+        shell_details = crate::tools::shell_guidance()
+    )
+}
 pub fn send_chat(app: &mut App, user_text: String) {
     if app.inflight.is_some() {
         app.notify(ToastLevel::Warn, "request in flight, please wait");
@@ -293,9 +411,7 @@ pub fn send_chat(app: &mut App, user_text: String) {
                 .unwrap_or_default();
             app.session.push(Message::new(
                 Role::System,
-                format!(
-                    "[no api key for {active_id}: set it via /settings or env {env_name}]"
-                ),
+                format!("[no api key for {active_id}: set it via /settings or env {env_name}]"),
             ));
             app.notify(ToastLevel::Fail, format!("missing api key for {active_id}"));
             return;
@@ -304,18 +420,24 @@ pub fn send_chat(app: &mut App, user_text: String) {
     let model = app.config.active_model().to_string();
     let thinking = app.config.thinking;
 
-    app.session.push(Message::new(Role::User, user_text.clone()));
+    app.maybe_title_from_first_prompt(&user_text);
+    app.session
+        .push(Message::new(Role::User, user_text.clone()));
     let assistant = Message {
         role: Role::Assistant,
         content: String::new(),
         thinking: String::new(),
         thinking_visible: false,
+        tool_results: Vec::new(),
         display_cursor: 0,
         ts: chrono::Utc::now(),
         streaming: true,
     };
     let id = app.session.push(assistant);
     app.session.streaming_id = Some(id);
+    app.response_started_at = None;
+    app.response_output_chars = 0;
+    app.response_output_tokens = None;
 
     let messages: Vec<ChatMessage> = app
         .session
@@ -344,7 +466,7 @@ pub fn send_chat(app: &mut App, user_text: String) {
         model,
         messages,
         thinking,
-        system: None,
+        system: Some(system_prompt()),
     };
 
     if let Some(tx) = app.msg_tx.clone() {
@@ -366,11 +488,19 @@ pub fn send_chat(app: &mut App, user_text: String) {
                     system: req.system.clone(),
                 };
                 let call = tokio::spawn(async move {
-                    p.chat_stream(&client_for_call, &base_for_call, &key_for_call, req_for_call, chat_tx).await
+                    p.chat_stream(
+                        &client_for_call,
+                        &base_for_call,
+                        &key_for_call,
+                        req_for_call,
+                        chat_tx,
+                    )
+                    .await
                 });
 
                 let mut assistant_content = String::new();
                 let mut tool_calls: Vec<crate::providers::ToolCall> = Vec::new();
+                let mut stream_done = false;
                 while let Some(ev) = chat_rx.recv().await {
                     match ev {
                         crate::providers::ChatEvent::Delta(s) => {
@@ -380,13 +510,30 @@ pub fn send_chat(app: &mut App, user_text: String) {
                         crate::providers::ChatEvent::ThinkingDelta(s) => {
                             let _ = tx.send(crate::event::AppMsg::ChatThinkingDelta(s));
                         }
+                        crate::providers::ChatEvent::Debug(s) => {
+                            let _ = tx.send(crate::event::AppMsg::ChatDebug(s));
+                        }
                         crate::providers::ChatEvent::Usage(u) => {
                             let _ = tx.send(crate::event::AppMsg::ChatUsage(u));
+                        }
+                        crate::providers::ChatEvent::ToolResult {
+                            name,
+                            title,
+                            content,
+                        } => {
+                            let _ = tx.send(crate::event::AppMsg::ChatToolResult {
+                                name,
+                                title,
+                                content,
+                            });
                         }
                         crate::providers::ChatEvent::ToolCalls(calls) => {
                             tool_calls = calls;
                         }
-                        crate::providers::ChatEvent::Done => break,
+                        crate::providers::ChatEvent::Done => {
+                            stream_done = true;
+                            break;
+                        }
                         crate::providers::ChatEvent::Error(e) => {
                             let _ = tx.send(crate::event::AppMsg::ChatError(e));
                             return;
@@ -394,15 +541,26 @@ pub fn send_chat(app: &mut App, user_text: String) {
                     }
                 }
 
-                match call.await {
-                    Ok(Ok(())) => {}
-                    Ok(Err(e)) => {
-                        let _ = tx.send(crate::event::AppMsg::ChatError(format!("{e}")));
-                        return;
+                if !stream_done {
+                    match call.await {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => {
+                            let _ = tx.send(crate::event::AppMsg::ChatError(format!("{e}")));
+                            return;
+                        }
+                        Err(e) => {
+                            let _ = tx.send(crate::event::AppMsg::ChatError(format!(
+                                "chat task failed: {e}"
+                            )));
+                            return;
+                        }
                     }
-                    Err(e) => {
-                        let _ = tx.send(crate::event::AppMsg::ChatError(format!("chat task failed: {e}")));
-                        return;
+                }
+
+                if tool_calls.is_empty() && !assistant_content.is_empty() {
+                    let parsed = parse_text_tool_calls(&assistant_content);
+                    if !parsed.is_empty() {
+                        tool_calls = parsed;
                     }
                 }
 
@@ -419,21 +577,21 @@ pub fn send_chat(app: &mut App, user_text: String) {
                 });
 
                 for call in tool_calls {
-                    let _ = tx.send(crate::event::AppMsg::ChatDelta(format!(
-                        "\n\n[tool:{}]\n",
-                        call.name
-                    )));
-                    let result = crate::tools::execute_tool(&call.name, &call.arguments, &cwd).await;
+                    let result =
+                        crate::tools::execute_tool(&call.name, &call.arguments, &cwd).await;
                     req.messages.push(ChatMessage {
                         role: "tool".to_string(),
                         content: result.clone(),
                         tool_call_id: Some(call.id.clone()),
                         tool_calls: Vec::new(),
                     });
-                    let _ = tx.send(crate::event::AppMsg::ChatDelta(format!(
-                        "```json\n{}\n```\n",
-                        result
-                    )));
+                    let title = tool_result_title(&call);
+                    let display_text = parse_tool_result_display(&result);
+                    let _ = tx.send(crate::event::AppMsg::ChatToolResult {
+                        name: call.name.clone(),
+                        title,
+                        content: display_text,
+                    });
                 }
             }
             let _ = tx.send(crate::event::AppMsg::ChatError(
@@ -441,4 +599,96 @@ pub fn send_chat(app: &mut App, user_text: String) {
             ));
         });
     }
+}
+
+/// Extract the human-readable display content from a tool result JSON string.
+/// Strips the `{"ok":true,"result":"..."}` wrapper to show just the inner content.
+fn parse_tool_result_display(result: &str) -> String {
+    if let Ok(val) = serde_json::from_str::<serde_json::Value>(result) {
+        if val.get("ok").and_then(|v| v.as_bool()) == Some(true) {
+            val.get("result")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string()
+        } else {
+            val.get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or(result)
+                .to_string()
+        }
+    } else {
+        result.to_string()
+    }
+}
+
+fn tool_result_title(call: &ToolCall) -> String {
+    if call.name == "shell_command" || call.name == "command" {
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&call.arguments) {
+            if let Some(command) = val.get("command").and_then(|v| v.as_str()) {
+                return format!("$ {}", command.trim());
+            }
+        }
+    }
+    if call.name == "python_command" {
+        return "python".to_string();
+    }
+
+    format!("[tool:{}]", call.name)
+}
+
+/// Fallback: parse text-based tool call descriptions from assistant
+/// content when the model did not emit structured tool_calls.
+/// Looks for JSON objects `{"name": "...", "arguments": {...}}` in
+/// the text and returns valid tool calls found.
+fn parse_text_tool_calls(content: &str) -> Vec<ToolCall> {
+    let mut calls = Vec::new();
+    let mut search_start = 0;
+    let bytes = content.as_bytes();
+    while search_start < bytes.len() {
+        // Find the next '{'
+        let brace = match content[search_start..].find('{') {
+            Some(i) => search_start + i,
+            None => break,
+        };
+        // Match braces to find the full JSON object
+        let mut depth: u32 = 0;
+        let mut end = brace;
+        for (i, ch) in content[brace..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = brace + i + 1;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if depth != 0 {
+            break;
+        }
+        let candidate = &content[brace..end];
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(candidate) {
+            let name = v.get("name").and_then(|n| n.as_str());
+            let args = v.get("arguments");
+            if let (Some(name), Some(args)) = (name, args) {
+                if crate::tools::is_valid_tool(name) {
+                    let args_str = if let Some(s) = args.as_str() {
+                        s.to_string()
+                    } else {
+                        serde_json::to_string(args).unwrap_or_default()
+                    };
+                    calls.push(ToolCall {
+                        id: format!("text_{}", calls.len()),
+                        name: name.to_string(),
+                        arguments: args_str,
+                    });
+                }
+            }
+        }
+        search_start = end;
+    }
+    calls
 }

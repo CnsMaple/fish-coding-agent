@@ -6,8 +6,8 @@ use crate::theme::Theme;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, BorderType, Paragraph, Wrap};
 use ratatui::widgets::Widget;
+use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 #[derive(Debug)]
@@ -45,7 +45,11 @@ impl InputState {
 
     pub fn selected_text(&self) -> Option<String> {
         self.selection.and_then(|(s, e)| {
-            if e > s && e <= self.buffer.len() && self.buffer.is_char_boundary(s) && self.buffer.is_char_boundary(e) {
+            if e > s
+                && e <= self.buffer.len()
+                && self.buffer.is_char_boundary(s)
+                && self.buffer.is_char_boundary(e)
+            {
                 Some(self.buffer[s..e].to_string())
             } else {
                 None
@@ -153,7 +157,9 @@ impl InputState {
 
     pub fn move_left(&mut self) {
         let mut i = self.cursor;
-        if i == 0 { return; }
+        if i == 0 {
+            return;
+        }
         i -= 1;
         while i > 0 && !self.buffer.is_char_boundary(i) {
             i -= 1;
@@ -163,7 +169,9 @@ impl InputState {
 
     pub fn move_right(&mut self) {
         let mut i = self.cursor;
-        if i >= self.buffer.len() { return; }
+        if i >= self.buffer.len() {
+            return;
+        }
         i += 1;
         while i < self.buffer.len() && !self.buffer.is_char_boundary(i) {
             i += 1;
@@ -185,7 +193,10 @@ impl InputState {
             return false;
         }
         let prev_end = line_start.saturating_sub(1);
-        let prev_start = self.buffer[..prev_end].rfind('\n').map(|i| i + 1).unwrap_or(0);
+        let prev_start = self.buffer[..prev_end]
+            .rfind('\n')
+            .map(|i| i + 1)
+            .unwrap_or(0);
         self.cursor = byte_at_display_col(&self.buffer[prev_start..prev_end], col) + prev_start;
         true
     }
@@ -210,7 +221,10 @@ impl InputState {
 
     fn current_line_start_and_col(&self) -> (usize, usize) {
         let cursor = self.cursor.min(self.buffer.len());
-        let line_start = self.buffer[..cursor].rfind('\n').map(|i| i + 1).unwrap_or(0);
+        let line_start = self.buffer[..cursor]
+            .rfind('\n')
+            .map(|i| i + 1)
+            .unwrap_or(0);
         let col = UnicodeWidthStr::width(&self.buffer[line_start..cursor]);
         (line_start, col)
     }
@@ -230,7 +244,8 @@ impl InputState {
     pub fn delete_selection(&mut self) -> bool {
         if let Some((s, e)) = self.selection {
             let (s, e) = if s <= e { (s, e) } else { (e, s) };
-            if s < e && e <= self.buffer.len()
+            if s < e
+                && e <= self.buffer.len()
                 && self.buffer.is_char_boundary(s)
                 && self.buffer.is_char_boundary(e)
             {
@@ -382,11 +397,7 @@ fn byte_at_display_col(s: &str, col: usize) -> usize {
 /// Renders the input area. The status line (model | think | hit) lives
 /// in the input block's title, not inside the box, so the body is just
 /// the prompt row.
-pub fn render(
-    area: Rect,
-    buf: &mut Buffer,
-    app: &mut crate::app::App,
-) {
+pub fn render(area: Rect, buf: &mut Buffer, app: &mut crate::app::App) {
     // Pick the title content: the unread-banner wins when the function
     // panel is hidden but has pending important toasts; otherwise the
     // regular status line.
@@ -404,7 +415,8 @@ pub fn render(
             Span::styled("]", Theme::dim()),
         ])
     } else {
-        app.status.render_line()
+        let mode = input_mode_preview(&app.input.buffer, &app.status.mode);
+        app.status.render_line_with_mode(mode)
     };
     // One space of padding on each side so the title text does not touch
     // the left/right border lines.
@@ -422,13 +434,17 @@ pub fn render(
         return;
     }
 
-    let prompt = if app.inflight.is_some() { spinner_prompt() } else { " > ".to_string() };
+    let prompt = if app.inflight.is_some() {
+        spinner_prompt()
+    } else {
+        " > ".to_string()
+    };
     let prompt_width = UnicodeWidthStr::width(prompt.as_str());
     let buffer = &app.input.buffer;
     let cursor = app.input.cursor.min(buffer.len());
     let cursor_line_idx = buffer[..cursor].chars().filter(|&c| c == '\n').count();
     let all_lines: Vec<&str> = buffer.split('\n').collect();
-    let visible_count = (all_lines.len() as u16).min(inner.height).min(3) as usize;
+    let visible_count = (all_lines.len() as u16).min(inner.height).max(1) as usize;
     let start_line = if cursor_line_idx + 1 > visible_count {
         cursor_line_idx + 1 - visible_count
     } else {
@@ -447,7 +463,11 @@ pub fn render(
         }
 
         let mut spans: Vec<Span<'static>> = vec![Span::styled(
-            if idx == start_line { prompt.clone() } else { " ".repeat(prompt_width) },
+            if idx == start_line {
+                prompt.clone()
+            } else {
+                " ".repeat(prompt_width)
+            },
             Theme::bold(),
         )];
         if let Some((s, e)) = app.input.selection {
@@ -503,6 +523,21 @@ pub fn render(
     }
 }
 
+fn input_mode_preview<'a>(buffer: &'a str, fallback: &'a str) -> &'a str {
+    let trimmed = buffer.trim_start();
+    if trimmed.starts_with("!!") {
+        "shell_context"
+    } else if trimmed.starts_with('!') {
+        "shell"
+    } else if trimmed.starts_with("$$") {
+        "python_context"
+    } else if trimmed.starts_with('$') {
+        "python"
+    } else {
+        fallback
+    }
+}
+
 fn spinner_prompt() -> String {
     const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
     let idx = std::time::SystemTime::now()
@@ -515,11 +550,10 @@ fn spinner_prompt() -> String {
 
 /// Heuristic for whether a "completion" sidebar should be visible based on input.
 pub fn should_show_completion(input: &InputState) -> bool {
-    if !input.is_command() {
+    if !input.is_command() || input.buffer.contains('\n') {
         return false;
     }
-    // show only while typing the first token (no space yet)
-    !input.buffer.contains(' ')
+    !completion_candidates_for(&input.buffer).is_empty()
 }
 
 /// List of slash commands offered by completion.
@@ -531,6 +565,12 @@ pub const COMMAND_LIST: &[&str] = &[
     "/provider",
     "/think",
     "/timeline",
+    "/session",
+    "/rename",
+    "/fork",
+    "/retry",
+    "/continue",
+    "/plan",
     "/quit",
     "/exit",
     "/help",
@@ -549,6 +589,11 @@ pub fn completion_candidates_for(input: &str) -> Vec<String> {
                 .into_iter()
                 .filter(|c| c.starts_with(&rest) || rest.is_empty())
                 .map(|s| format!("/think {s}"))
+                .collect(),
+            "plan" => vec!["exit"]
+                .into_iter()
+                .filter(|c| c.starts_with(&rest) || rest.is_empty())
+                .map(|s| format!("/plan {s}"))
                 .collect(),
             _ => vec![],
         };
@@ -591,6 +636,11 @@ pub fn sidebar_tab_name(t: &SidebarTab) -> &'static str {
         SidebarTab::ProviderPicker(_) => "provider",
         SidebarTab::ThinkingPicker(_) => "thinking",
         SidebarTab::TimelinePicker(_) => "timeline",
+        SidebarTab::SessionPicker(_) => "sessions",
+        SidebarTab::SessionRename(_) => "rename",
+        SidebarTab::Ask(_) => "ask",
+        SidebarTab::Todo(_) => "todo",
+        SidebarTab::Plan(_) => "plan",
         SidebarTab::Hotkey => "hotkey",
     }
 }

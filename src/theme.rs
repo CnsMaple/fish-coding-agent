@@ -81,4 +81,16 @@ impl Theme {
     pub fn cursor_visible() -> Style {
         Self::bold()
     }
+
+    pub fn block_running() -> Style {
+        Self::base().fg(Color::Yellow)
+    }
+
+    pub fn block_done() -> Style {
+        Self::base().fg(Color::Green)
+    }
+
+    pub fn block_failed() -> Style {
+        Self::base().fg(Color::Red).add_modifier(Modifier::BOLD)
+    }
 }

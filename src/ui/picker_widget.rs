@@ -31,8 +31,16 @@ pub fn render_search_row(
     let mut spans: Vec<Span<'static>> = vec![prefix];
     if query.is_empty() {
         spans.push(Span::styled(
-            if focused { "\u{2588}" } else { "(type to filter)" },
-            if focused { Theme::cursor() } else { Theme::dim() },
+            if focused {
+                "\u{2588}"
+            } else {
+                "(type to filter)"
+            },
+            if focused {
+                Theme::cursor()
+            } else {
+                Theme::dim()
+            },
         ));
     } else {
         spans.push(Span::raw(query.to_string()));

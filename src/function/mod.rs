@@ -1,9 +1,10 @@
 use crate::config::{Config, ProviderId, ProviderKind};
-use crate::function::notifications::{HitRate, ModelCache, Notifications};
+use crate::function::notifications::{HitRate, ModelCache, Notifications, TokenRate};
 use crate::session::{Role, Session};
 use chrono::{DateTime, Utc};
 use std::collections::VecDeque;
 use std::path::PathBuf;
+use std::time::Instant;
 
 pub mod notifications;
 
@@ -53,6 +54,29 @@ impl CompletionState {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppMode {
+    Plan,
+    Yolo,
+    Shell,
+    ShellContext,
+    Python,
+    PythonContext,
+}
+
+impl AppMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AppMode::Plan => "plan",
+            AppMode::Yolo => "yolo",
+            AppMode::Shell => "shell",
+            AppMode::ShellContext => "shell_context",
+            AppMode::Python => "python",
+            AppMode::PythonContext => "python_context",
+        }
+    }
+}
+
 /// One sidebar tab entry.
 #[derive(Debug)]
 pub enum SidebarTab {
@@ -63,6 +87,11 @@ pub enum SidebarTab {
     ProviderPicker(ProviderPickerState),
     ThinkingPicker(ThinkingPickerState),
     TimelinePicker(TimelinePickerState),
+    SessionPicker(SessionPickerState),
+    SessionRename(SessionRenameState),
+    Ask(AskState),
+    Todo(TodoState),
+    Plan(PlanState),
     Hotkey,
 }
 
@@ -103,19 +132,17 @@ pub struct ConfigFormState {
 }
 
 impl ConfigFormState {
-    pub fn new_for_create(kind: crate::config::ProviderKind, mode: crate::config::ProviderMode) -> Self {
-        let default_url = match kind {
-            crate::config::ProviderKind::Openai => "https://api.openai.com/v1".to_string(),
-            crate::config::ProviderKind::Anthropic => "https://api.anthropic.com".to_string(),
-        };
-        let default_env = match kind {
-            crate::config::ProviderKind::Openai => "OPENAI_API_KEY".to_string(),
-            crate::config::ProviderKind::Anthropic => "ANTHROPIC_API_KEY".to_string(),
-        };
+    pub fn new_for_create(
+        kind: crate::config::ProviderKind,
+        mode: crate::config::ProviderMode,
+    ) -> Self {
+        let default_url = crate::config::default_base_url(kind).to_string();
+        let default_env = crate::config::default_api_key_env(kind).to_string();
         let id = crate::config::make_id(kind, mode);
         let key_or_env = match mode {
             crate::config::ProviderMode::Key => String::new(),
             crate::config::ProviderMode::Env => default_env,
+            crate::config::ProviderMode::Oauth => String::new(),
         };
         Self {
             is_new: true,
@@ -129,10 +156,15 @@ impl ConfigFormState {
         }
     }
 
-    pub fn new_for_edit(id: String, cfg: &crate::config::ProviderConfig, mode: crate::config::ProviderMode) -> Self {
+    pub fn new_for_edit(
+        id: String,
+        cfg: &crate::config::ProviderConfig,
+        mode: crate::config::ProviderMode,
+    ) -> Self {
         let key_or_env = match mode {
             crate::config::ProviderMode::Key => cfg.api_key.clone(),
             crate::config::ProviderMode::Env => cfg.api_key_env.clone(),
+            crate::config::ProviderMode::Oauth => String::new(),
         };
         Self {
             is_new: false,
@@ -156,6 +188,11 @@ impl ConfigFormState {
                     .unwrap_or(false)
                 {
                     "api key"
+                } else if crate::config::parse_id(&self.id)
+                    .map(|(_, m)| m == crate::config::ProviderMode::Oauth)
+                    .unwrap_or(false)
+                {
+                    "oauth"
                 } else {
                     "env name"
                 }
@@ -181,6 +218,8 @@ pub enum SettingsLevel {
     ConfigForm(ConfigFormState),
     /// Thinking display mode chooser.
     ThinkingDisplayList,
+    /// Tool result display mode chooser.
+    ToolResultDisplayList,
     /// Enter/newline behavior chooser.
     EnterBehaviorList,
 }
@@ -193,7 +232,10 @@ impl SettingsLevel {
             SettingsLevel::ProviderList => "settings / set provider".to_string(),
             SettingsLevel::NewProviderKind => "settings / set provider / new".to_string(),
             SettingsLevel::ExistingActions(id) => {
-                format!("settings / set provider / {}", crate::config::id_display(id))
+                format!(
+                    "settings / set provider / {}",
+                    crate::config::id_display(id)
+                )
             }
             SettingsLevel::ConfigForm(s) => {
                 let stage = if s.is_new { "new" } else { "edit" };
@@ -204,6 +246,7 @@ impl SettingsLevel {
                 )
             }
             SettingsLevel::ThinkingDisplayList => "settings / thinking display".to_string(),
+            SettingsLevel::ToolResultDisplayList => "settings / tool display".to_string(),
             SettingsLevel::EnterBehaviorList => "settings / enter behavior".to_string(),
         }
     }
@@ -218,10 +261,74 @@ impl SettingsLevel {
             SettingsLevel::ConfigForm(_) => {
                 "Up/Down: nav | type: edit | Enter: confirm | Esc: back"
             }
-            SettingsLevel::ThinkingDisplayList | SettingsLevel::EnterBehaviorList => {
-                "Up/Down: nav | Enter: select | Esc: back"
-            }
+            SettingsLevel::ThinkingDisplayList
+            | SettingsLevel::ToolResultDisplayList
+            | SettingsLevel::EnterBehaviorList => "Up/Down: nav | Enter: select | Esc: back",
         }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct NewProviderPickerState {
+    pub entries: Vec<ProviderId>,
+    pub filtered: Vec<usize>,
+    pub query: String,
+    pub cursor: usize,
+    pub scroll: usize,
+    pub focus: PickerFocus,
+}
+
+impl NewProviderPickerState {
+    pub fn new() -> Self {
+        let entries = crate::config::Config::all_possible_ids();
+        let mut s = Self {
+            entries,
+            filtered: Vec::new(),
+            query: String::new(),
+            cursor: 0,
+            scroll: 0,
+            focus: PickerFocus::List,
+        };
+        s.rebuild_filter();
+        s
+    }
+
+    pub fn rebuild_filter(&mut self) {
+        let q = self.query.to_lowercase();
+        self.filtered = self
+            .entries
+            .iter()
+            .enumerate()
+            .filter(|(_, id)| {
+                q.is_empty()
+                    || id.to_lowercase().contains(&q)
+                    || crate::config::id_display(id).to_lowercase().contains(&q)
+            })
+            .map(|(i, _)| i)
+            .collect();
+        if self.cursor >= self.filtered.len() {
+            self.cursor = self.filtered.len().saturating_sub(1);
+        }
+        if self.scroll > self.cursor {
+            self.scroll = self.cursor;
+        }
+    }
+
+    pub fn ensure_cursor_visible(&mut self, visible_rows: usize) {
+        if visible_rows == 0 {
+            return;
+        }
+        if self.cursor < self.scroll {
+            self.scroll = self.cursor;
+        } else if self.cursor >= self.scroll + visible_rows {
+            self.scroll = self.cursor + 1 - visible_rows;
+        }
+    }
+
+    pub fn selected_id(&self) -> Option<ProviderId> {
+        self.filtered
+            .get(self.cursor)
+            .map(|&i| self.entries[i].clone())
     }
 }
 
@@ -236,6 +343,7 @@ pub struct SettingsState {
     pub form_error: Option<String>,
     /// Error reason when config failed to parse, so we can show it.
     pub load_error: Option<String>,
+    pub new_provider: NewProviderPickerState,
 }
 
 impl SettingsState {
@@ -245,19 +353,21 @@ impl SettingsState {
             cursor: 0,
             form_error: None,
             load_error: None,
+            new_provider: NewProviderPickerState::new(),
         }
     }
 
     /// Number of items in the current list view (used to clamp cursor).
     pub fn list_len(&self, cfg: &Config) -> usize {
         match &self.level {
-            SettingsLevel::TopLevel => 3,                         // set provider, thinking display, enter behavior
-            SettingsLevel::ProviderList => 1 + cfg.entries.len(), // new + existing
-            SettingsLevel::NewProviderKind => crate::config::Config::all_possible_ids().len(),
-            SettingsLevel::ExistingActions(_) => 2,               // edit, delete
-            SettingsLevel::ConfigForm(_) => 5,                    // name, base url, key/env, save, exit
-            SettingsLevel::ThinkingDisplayList => 3,               // show, hide, while streaming
-            SettingsLevel::EnterBehaviorList => 2,                  // enter sends, enter newline
+            SettingsLevel::TopLevel => 4, // set provider, thinking display, tool display, enter behavior
+            SettingsLevel::ProviderList => 1 + cfg.configured_provider_ids().len(), // new + existing
+            SettingsLevel::NewProviderKind => self.new_provider.filtered.len(),
+            SettingsLevel::ExistingActions(_) => 2, // edit, delete
+            SettingsLevel::ConfigForm(_) => 5,      // name, base url, key/env, save, exit
+            SettingsLevel::ThinkingDisplayList => 3, // show, hide, while streaming
+            SettingsLevel::ToolResultDisplayList => 3, // show, hide, while streaming
+            SettingsLevel::EnterBehaviorList => 2,  // enter sends, enter newline
         }
     }
 
@@ -303,7 +413,7 @@ impl ModelPickerState {
             models: vec![],
             filtered: vec![],
             cursor: 0,
-            focus: PickerFocus::Search,
+            focus: PickerFocus::List,
             fetching: false,
             fetch_error: None,
             no_endpoint: false,
@@ -392,18 +502,16 @@ pub struct ProviderPickerState {
 impl ProviderPickerState {
     pub fn new(cfg: &Config) -> Self {
         let mut entries: Vec<ProviderPickerEntry> = cfg
-            .entries
-            .iter()
-            .map(|(id, entry)| {
+            .configured_provider_ids()
+            .into_iter()
+            .filter_map(|id| {
+                let entry = cfg.entry(&id)?;
                 let display = if entry.name.trim().is_empty() {
-                    crate::config::id_display(id)
+                    crate::config::id_display(&id)
                 } else {
                     entry.name.clone()
                 };
-                ProviderPickerEntry {
-                    id: id.clone(),
-                    display,
-                }
+                Some(ProviderPickerEntry { id, display })
             })
             .collect();
         entries.sort_by(|a, b| a.display.to_lowercase().cmp(&b.display.to_lowercase()));
@@ -413,7 +521,7 @@ impl ProviderPickerState {
             query: String::new(),
             cursor: 0,
             scroll: 0,
-            focus: PickerFocus::Search,
+            focus: PickerFocus::List,
             active: cfg.active.clone(),
         };
         s.rebuild_filter();
@@ -486,7 +594,10 @@ impl ThinkingPickerState {
     pub const LEVELS: &'static [&'static str] = &["off", "low", "med", "high", "adaptive"];
 
     pub fn selected(&self) -> Option<&'static str> {
-        self.filtered.get(self.cursor).and_then(|&i| Self::LEVELS.get(i)).copied()
+        self.filtered
+            .get(self.cursor)
+            .and_then(|&i| Self::LEVELS.get(i))
+            .copied()
     }
 
     pub fn rebuild_filter(&mut self) {
@@ -551,9 +662,7 @@ impl TimelinePickerState {
             .entries
             .iter()
             .enumerate()
-            .filter(|(_, e)| {
-                q.is_empty() || e.preview.to_lowercase().contains(&q)
-            })
+            .filter(|(_, e)| q.is_empty() || e.preview.to_lowercase().contains(&q))
             .map(|(i, _)| i)
             .collect();
         if self.cursor >= self.filtered.len() {
@@ -613,6 +722,205 @@ fn snapshot_session(session: &Session) -> Vec<TimelineEntry> {
     out
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionScope {
+    Local,
+    Global,
+}
+
+impl SessionScope {
+    pub fn toggle(self) -> Self {
+        match self {
+            SessionScope::Local => SessionScope::Global,
+            SessionScope::Global => SessionScope::Local,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SessionScope::Local => "local",
+            SessionScope::Global => "global",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionPickerMode {
+    Manage,
+}
+
+#[derive(Debug)]
+pub struct SessionPickerState {
+    pub mode: SessionPickerMode,
+    pub scope: SessionScope,
+    pub query: String,
+    pub entries: Vec<crate::session::store::SessionSummary>,
+    pub filtered: Vec<usize>,
+    pub cursor: usize,
+    pub scroll: usize,
+    pub focus: PickerFocus,
+}
+
+impl SessionPickerState {
+    pub fn new(mode: SessionPickerMode, cwd: &std::path::Path) -> Self {
+        let mut s = Self {
+            mode,
+            scope: SessionScope::Local,
+            query: String::new(),
+            entries: Vec::new(),
+            filtered: Vec::new(),
+            cursor: 0,
+            scroll: 0,
+            focus: PickerFocus::Search,
+        };
+        s.reload(cwd);
+        s
+    }
+
+    pub fn reload(&mut self, cwd: &std::path::Path) {
+        let scope = match self.scope {
+            SessionScope::Local => Some(cwd),
+            SessionScope::Global => None,
+        };
+        self.entries = crate::session::store::list(scope).unwrap_or_default();
+        self.rebuild_filter();
+    }
+
+    pub fn toggle_scope(&mut self, cwd: &std::path::Path) {
+        self.scope = self.scope.toggle();
+        self.cursor = 0;
+        self.scroll = 0;
+        self.reload(cwd);
+    }
+
+    pub fn rebuild_filter(&mut self) {
+        let q = self.query.to_lowercase();
+        self.filtered = self
+            .entries
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| {
+                q.is_empty()
+                    || e.title.to_lowercase().contains(&q)
+                    || e.cwd.to_lowercase().contains(&q)
+                    || e.id.to_lowercase().contains(&q)
+            })
+            .map(|(i, _)| i)
+            .collect();
+        if self.cursor >= self.filtered.len() {
+            self.cursor = self.filtered.len().saturating_sub(1);
+        }
+        if self.scroll > self.cursor {
+            self.scroll = self.cursor;
+        }
+    }
+
+    pub fn ensure_cursor_visible(&mut self, visible_rows: usize) {
+        if visible_rows == 0 {
+            return;
+        }
+        if self.cursor < self.scroll {
+            self.scroll = self.cursor;
+        } else if self.cursor >= self.scroll + visible_rows {
+            self.scroll = self.cursor + 1 - visible_rows;
+        }
+    }
+
+    pub fn selected_id(&self) -> Option<String> {
+        self.filtered
+            .get(self.cursor)
+            .map(|&i| self.entries[i].id.clone())
+    }
+
+    pub fn selected_title(&self) -> Option<String> {
+        self.filtered
+            .get(self.cursor)
+            .map(|&i| self.entries[i].title.clone())
+    }
+}
+
+#[derive(Debug)]
+pub struct SessionRenameState {
+    pub target_id: Option<String>,
+    pub title: String,
+    pub cursor: usize,
+}
+
+impl SessionRenameState {
+    pub fn new_current(title: &str) -> Self {
+        Self {
+            target_id: None,
+            title: title.to_string(),
+            cursor: title.len(),
+        }
+    }
+
+    pub fn new_target(id: String, title: String) -> Self {
+        let cursor = title.len();
+        Self {
+            target_id: Some(id),
+            title,
+            cursor,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct AskState {
+    pub question: String,
+    pub options: Vec<String>,
+    pub cursor: usize,
+    pub answered: Option<String>,
+}
+
+impl AskState {
+    pub fn new(question: String, options: Vec<String>) -> Self {
+        Self {
+            question,
+            options,
+            cursor: 0,
+            answered: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct TodoItem {
+    pub content: String,
+    pub status: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct TodoState {
+    pub items: Vec<TodoItem>,
+    pub cursor: usize,
+}
+
+impl TodoState {
+    pub fn new(items: Vec<TodoItem>) -> Self {
+        Self { items, cursor: 0 }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PlanState {
+    pub title: String,
+    pub content: String,
+    pub cursor: usize,
+    pub approved: Option<bool>,
+}
+
+impl PlanState {
+    pub fn new(title: String, content: String) -> Self {
+        Self {
+            title,
+            content,
+            cursor: 0,
+            approved: None,
+        }
+    }
+}
+
 /// Top-level state for the function panel.
 #[derive(Debug)]
 pub struct FunctionPanel {
@@ -637,6 +945,11 @@ impl FunctionPanel {
             Some(SidebarTab::ProviderPicker(_)) => "provider",
             Some(SidebarTab::ThinkingPicker(_)) => "thinking",
             Some(SidebarTab::TimelinePicker(_)) => "timeline",
+            Some(SidebarTab::SessionPicker(_)) => "sessions",
+            Some(SidebarTab::SessionRename(_)) => "rename",
+            Some(SidebarTab::Ask(_)) => "ask",
+            Some(SidebarTab::Todo(_)) => "todo",
+            Some(SidebarTab::Plan(_)) => "plan",
             Some(SidebarTab::Hotkey) => "hotkey",
             None => "?",
         }
@@ -675,6 +988,9 @@ pub struct App {
     pub config: Config,
     pub config_path: PathBuf,
     pub session: Session,
+    pub session_id: String,
+    pub session_title: String,
+    pub mode: AppMode,
     pub function: FunctionPanel,
     pub input: crate::input::InputState,
     pub status: crate::input::status::StatusBar,
@@ -684,6 +1000,10 @@ pub struct App {
     pub notifications: Notifications,
     pub model_cache: ModelCache,
     pub hit_rate: HitRate,
+    pub token_rate: TokenRate,
+    pub response_started_at: Option<Instant>,
+    pub response_output_chars: usize,
+    pub response_output_tokens: Option<u64>,
 
     pub reqwest: reqwest::Client,
     pub inflight: Option<InflightHandle>,
@@ -714,6 +1034,9 @@ pub struct App {
     /// Screen y-positions of thinking toggle lines, each paired with the
     /// index of the corresponding message. Populated after each render.
     pub thinking_toggle_rows: Vec<(u16, usize)>,
+    /// Screen y-positions of tool result toggle lines, each paired with
+    /// the index of the corresponding message. Populated after each render.
+    pub tool_toggle_rows: Vec<(u16, usize, usize)>,
     /// The screen rect of the session area, updated on each render. Used
     /// by the mouse handler to detect click-in-session for scroll.
     pub session_area: Option<ratatui::layout::Rect>,
@@ -780,16 +1103,22 @@ impl App {
         status.set_model(&config.active_model_display());
         status.set_thinking(config.thinking);
         status.set_cwd(&cwd);
+        status.set_mode(AppMode::Yolo.as_str());
         let cache_file = config_path
             .parent()
             .unwrap_or(&config_path)
             .join("model-cache.json");
         let model_cache = ModelCache::load(&cache_file);
         let cache_file = cache_file; // keep alive for the field below
-        Self {
+        let session_id = crate::session::store::new_session_id();
+        let session_title = crate::session::store::default_title(&cwd);
+        let mut app = Self {
             config,
             config_path,
             session: Session::default(),
+            session_id,
+            session_title,
+            mode: AppMode::Yolo,
             function: FunctionPanel::new(),
             input: crate::input::InputState::new(),
             status,
@@ -799,8 +1128,13 @@ impl App {
             model_cache,
             model_cache_path: cache_file,
             thinking_toggle_rows: Vec::new(),
+            tool_toggle_rows: Vec::new(),
             session_area: None,
             hit_rate: HitRate::new(50),
+            token_rate: TokenRate::new(50),
+            response_started_at: None,
+            response_output_chars: 0,
+            response_output_tokens: None,
             reqwest: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(30))
                 .connect_timeout(std::time::Duration::from_secs(10))
@@ -816,6 +1150,34 @@ impl App {
             tui_drag_start: None,
             input_cursor_screen: None,
             function_panel_cursor: None,
+        };
+        app.refresh_status_model_context();
+        app
+    }
+
+    pub fn refresh_status_model_context(&mut self) {
+        let Some(kind) = self.config.active_kind() else {
+            return;
+        };
+        let request_model = self.config.active_model().trim().to_string();
+        let display_model = self.config.active_model_display();
+        let Some(cache) = self.model_cache.get(kind) else {
+            if kind == ProviderKind::Cursor {
+                self.status.clear_context_window_tokens();
+            }
+            return;
+        };
+        let selected = cache.models.iter().find(|m| {
+            m.id == request_model
+                || m.request_id.as_deref() == Some(request_model.as_str())
+                || m.display == display_model
+        });
+        if kind == ProviderKind::Cursor {
+            // GetUsableModels does not include a reliable context window.
+            // Keep Cursor unknown until a runtime checkpoint reports max_tokens.
+            self.status.clear_context_window_tokens();
+        } else if let Some(tokens) = selected.and_then(|m| m.context_window_tokens) {
+            self.status.set_context_window_tokens(tokens);
         }
     }
 
@@ -854,13 +1216,179 @@ impl App {
 
     pub fn save_config(&mut self) {
         if let Err(e) = self.config.save(&self.config_path) {
-            self.notify(crate::function::notifications::ToastLevel::Fail, format!("save config: {e}"));
+            self.notify(
+                crate::function::notifications::ToastLevel::Fail,
+                format!("save config: {e}"),
+            );
         } else {
             self.notify(
                 crate::function::notifications::ToastLevel::Ok,
                 format!("config saved to {}", self.config_path.display()),
             );
         }
+    }
+
+    pub fn save_current_session(&mut self) {
+        if self.session.messages.is_empty() {
+            return;
+        }
+        self.ensure_prompt_title();
+        if let Err(e) = crate::session::store::save(
+            &self.session_id,
+            &self.session_title,
+            &self.cwd,
+            &self.session,
+        ) {
+            self.notify(
+                crate::function::notifications::ToastLevel::Fail,
+                format!("save session: {e}"),
+            );
+        }
+    }
+
+    pub fn start_new_session(&mut self) {
+        if !self.session.messages.is_empty() {
+            self.save_current_session();
+        }
+        self.session.clear();
+        self.session_id = crate::session::store::new_session_id();
+        self.session_title = crate::session::store::default_title(&self.cwd);
+    }
+
+    pub fn maybe_title_from_first_prompt(&mut self, prompt: &str) {
+        if self.session.messages.is_empty()
+            && self.session_title == crate::session::store::default_title(&self.cwd)
+        {
+            self.session_title = crate::session::store::title_from_prompt(prompt);
+        }
+    }
+
+    fn ensure_prompt_title(&mut self) {
+        if self.session_title != crate::session::store::default_title(&self.cwd) {
+            return;
+        }
+        if let Some(prompt) = self
+            .session
+            .messages
+            .iter()
+            .find(|m| matches!(m.role, Role::User))
+            .map(|m| m.content.as_str())
+        {
+            self.session_title = crate::session::store::title_from_prompt(prompt);
+        }
+    }
+
+    pub fn resume_session(&mut self, id: &str) {
+        match crate::session::store::load(id) {
+            Ok(stored) => {
+                self.session = Session {
+                    messages: stored.messages,
+                    scroll: 0,
+                    streaming_id: None,
+                    display: self.config.thinking_display,
+                    tool_display: self.config.tool_display,
+                };
+                self.session_id = stored.id;
+                self.session_title = stored.title;
+                self.notify(
+                    crate::function::notifications::ToastLevel::Ok,
+                    format!("resumed session: {}", self.session_title),
+                );
+            }
+            Err(e) => self.notify(
+                crate::function::notifications::ToastLevel::Fail,
+                format!("resume session: {e}"),
+            ),
+        }
+    }
+
+    pub fn rename_session(&mut self, target_id: Option<String>, title: String) {
+        let title = title.trim().to_string();
+        if title.is_empty() {
+            self.notify(
+                crate::function::notifications::ToastLevel::Fail,
+                "session title is empty",
+            );
+            return;
+        }
+        match target_id {
+            Some(id) => {
+                if let Err(e) = crate::session::store::rename(&id, &title) {
+                    self.notify(
+                        crate::function::notifications::ToastLevel::Fail,
+                        format!("rename session: {e}"),
+                    );
+                } else {
+                    if id == self.session_id {
+                        self.session_title = title.clone();
+                    }
+                    self.notify(
+                        crate::function::notifications::ToastLevel::Ok,
+                        format!("renamed session: {title}"),
+                    );
+                }
+            }
+            None => {
+                self.session_title = title.clone();
+                self.save_current_session();
+                self.notify(
+                    crate::function::notifications::ToastLevel::Ok,
+                    format!("renamed session: {title}"),
+                );
+            }
+        }
+    }
+
+    pub fn fork_session(&mut self, source_id: Option<String>) {
+        self.save_current_session();
+        let source = source_id.unwrap_or_else(|| self.session_id.clone());
+        match crate::session::store::fork(&source, &self.cwd, None) {
+            Ok(stored) => {
+                self.session_id = stored.id;
+                self.session_title = stored.title;
+                self.session = Session {
+                    messages: stored.messages,
+                    scroll: 0,
+                    streaming_id: None,
+                    display: self.config.thinking_display,
+                    tool_display: self.config.tool_display,
+                };
+                self.notify(
+                    crate::function::notifications::ToastLevel::Ok,
+                    format!("forked session: {}", self.session_title),
+                );
+            }
+            Err(e) => self.notify(
+                crate::function::notifications::ToastLevel::Fail,
+                format!("fork session: {e}"),
+            ),
+        }
+    }
+
+    pub fn set_mode(&mut self, mode: AppMode) {
+        self.mode = mode;
+        self.status.set_mode(mode.as_str());
+    }
+
+    pub fn open_ask(&mut self, question: String, options: Vec<String>) {
+        self.function
+            .push(SidebarTab::Ask(AskState::new(question, options)));
+        self.function_visible = true;
+        self.acknowledge_panel();
+    }
+
+    pub fn open_todo(&mut self, items: Vec<TodoItem>) {
+        self.function.push(SidebarTab::Todo(TodoState::new(items)));
+        self.function_visible = true;
+        self.acknowledge_panel();
+    }
+
+    pub fn open_plan(&mut self, title: String, content: String) {
+        self.set_mode(AppMode::Plan);
+        self.function
+            .push(SidebarTab::Plan(PlanState::new(title, content)));
+        self.function_visible = true;
+        self.acknowledge_panel();
     }
 
     /// Mark that the panel was shown by user (Ctrl+N) so we clear pending marker.
@@ -877,9 +1405,7 @@ impl App {
     pub fn sync_completion(&mut self) {
         let buffer = self.input.buffer.clone();
         let cursor = self.input.cursor;
-        let prefix = if buffer.starts_with('/') && !buffer[..cursor].contains(' ')
-            && !buffer[..cursor].contains('\n')
-        {
+        let prefix = if buffer.starts_with('/') && !buffer[..cursor].contains('\n') {
             buffer[..cursor].to_string()
         } else {
             String::new()
@@ -891,7 +1417,13 @@ impl App {
             .iter()
             .position(|t| matches!(t, SidebarTab::Completion(_)));
 
-        if prefix.is_empty() {
+        let candidates = if prefix.is_empty() {
+            Vec::new()
+        } else {
+            crate::input::completion_candidates_for(&prefix)
+        };
+
+        if candidates.is_empty() {
             if let Some(idx) = pos {
                 self.function.tabs.remove(idx);
                 if self.function.active >= self.function.tabs.len() {
@@ -902,7 +1434,6 @@ impl App {
             return;
         }
 
-        let candidates = crate::input::completion_candidates_for(&prefix);
         match pos {
             Some(idx) => {
                 if let SidebarTab::Completion(s) = &mut self.function.tabs[idx] {
@@ -911,11 +1442,10 @@ impl App {
                 }
             }
             None => {
-                self.function
-                    .push(SidebarTab::Completion(CompletionState {
-                        candidates,
-                        cursor: 0,
-                    }));
+                self.function.push(SidebarTab::Completion(CompletionState {
+                    candidates,
+                    cursor: 0,
+                }));
                 // Typing `/` is a "function trigger" — the user must see
                 // the candidate list, so auto-show the panel and focus
                 // the new Completion tab.
