@@ -244,10 +244,10 @@ fn build_thinking_block_rows(content: &str, visible: bool, width: usize) -> Vec<
         "thinking",
         " Thinking ",
         content.trim_end(),
-        "[click to collapse/expand]",
+        "",
         visible,
         width,
-        "click to expand",
+        "",
     )
 }
 
@@ -332,14 +332,19 @@ fn collapsed_output_rows(output: &str, width: usize, hint: &str) -> Vec<String> 
     let shown = total.min(COLLAPSED_PREVIEW_LINES);
     let skipped = total.saturating_sub(shown);
     let mut rows = Vec::new();
+    let hint_suffix = if hint.is_empty() {
+        String::new()
+    } else {
+        format!(" ({hint})")
+    };
     if skipped > 0 {
         rows.extend(box_rows(
-            &format!("... ({skipped} earlier lines, showing {shown} of {total}) ({hint})"),
+            &format!("... ({skipped} earlier lines, showing {shown} of {total}){hint_suffix}"),
             width,
         ));
     } else {
         rows.extend(box_rows(
-            &format!("... (showing {shown} of {total}) ({hint})"),
+            &format!("... (showing {shown} of {total}){hint_suffix}"),
             width,
         ));
     }

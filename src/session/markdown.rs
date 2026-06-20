@@ -159,15 +159,10 @@ impl MdRenderer {
 
     fn push_code(&mut self, t: &str) {
         // Strip the markdown backticks from the rendered output: the
-        // backticks are syntax, not content. The REVERSED style alone
-        // is enough to mark the text as code, and the surrounding
-        // spaces (which previously came from the literal backticks in
-        // the format string) give the inline code a bit of visual
-        // breathing room against adjacent text.
-        let span = Span::styled(
-            format!(" {t} "),
-            Theme::dim().add_modifier(Modifier::REVERSED),
-        );
+        // backticks are syntax, not content. Blue keeps inline code
+        // distinct while inheriting the terminal theme and avoiding a
+        // background/reversed highlight.
+        let span = Span::styled(format!(" {t} "), Style::default().fg(Color::Blue));
         if self.in_table_cell && self.table.is_some() {
             if let Some(table) = self.table.as_mut() {
                 table.current_cell.push(span);
@@ -825,16 +820,23 @@ let x = 1;
 {text}"
         );
 
-        let code_span = lines
+        let code_line = lines
             .iter()
-            .flat_map(|line| line.spans.iter())
-            .find(|span| span.content.contains("let x = 1;"))
-            .expect("code content span missing");
-        assert!(
-            code_span.style.fg.is_none()
-                && !code_span.style.add_modifier.contains(Modifier::REVERSED),
-            "unknown language code should be plain text"
-        );
+            .find(|line| {
+                line.spans
+                    .iter()
+                    .any(|span| span.content.contains("let x = 1;"))
+            })
+            .expect("code content line missing");
+        for span in &code_line.spans {
+            if span.content.trim().is_empty() || span.content.contains('|') {
+                continue;
+            }
+            assert!(
+                span.style.fg.is_none() && !span.style.add_modifier.contains(Modifier::REVERSED),
+                "unknown language code should be plain text"
+            );
+        }
     }
 
     #[test]
