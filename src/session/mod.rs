@@ -69,12 +69,16 @@ pub struct Message {
     /// prompt assembly is needed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skill_ref: Option<SkillRef>,
+    /// Pre-computed line count (content.split('\n').count()).
+    /// Updated when content changes to avoid re-scanning on every frame.
+    pub line_count: u16,
 }
 
 impl Message {
     pub fn new(role: Role, content: impl Into<String>) -> Self {
         let content = content.into();
         let len = content.len();
+        let line_count = content.matches('\n').count() as u16 + 1;
         Self {
             role,
             content,
@@ -85,6 +89,7 @@ impl Message {
             streaming: false,
             display_cursor: len, // non-streaming → fully visible
             skill_ref: None,
+            line_count,
         }
     }
 
@@ -98,7 +103,7 @@ impl Message {
     }
 }
 
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Session {
     pub messages: Vec<Message>,
     /// scroll offset from bottom; 0 = follow tail
@@ -112,6 +117,10 @@ pub struct Session {
     /// Tool result display mode, set from App config on each render.
     #[serde(skip)]
     pub tool_display: crate::config::ToolResultDisplay,
+    /// Cache of rendered `Line`s per message index.
+    /// `None` = uncached; `Some(lines)` = cached until content changes.
+    #[serde(skip)]
+    pub line_cache: std::sync::Mutex<Vec<Option<Vec<ratatui::text::Line<'static>>>>>,
 }
 
 impl Session {
@@ -128,6 +137,10 @@ impl Session {
         if let Some(id) = self.streaming_id {
             if let Some(m) = self.messages.get_mut(id) {
                 m.content.push_str(chunk);
+                m.line_count = m.content.split('\n').count().max(1) as u16;
+                if let Ok(mut c) = self.line_cache.lock() {
+                    if id < c.len() { c[id] = None; }
+                }
                 // Reveal streamed content immediately; providers already
                 // deliver deltas in small chunks, so no artificial delay.
                 m.display_cursor = m.content.len();
@@ -169,6 +182,7 @@ impl Session {
             streaming: false,
             display_cursor: 0,
             skill_ref: None,
+            line_count: 0,
         };
         self.push(msg);
     }
@@ -202,6 +216,10 @@ impl Session {
                 // Strip text-based tool call JSON fallback lines from
                 // content so they don't appear in the rendered chat.
                 m.content = strip_text_tool_calls(&m.content);
+                m.line_count = m.content.split('\n').count().max(1) as u16;
+                if let Ok(mut c) = self.line_cache.lock() {
+                    if id < c.len() { c[id] = None; }
+                }
                 // Reveal all remaining content immediately.
                 m.display_cursor = m.content.len();
                 // Auto-fold thinking when streaming finishes and mode
@@ -229,7 +247,7 @@ impl Session {
 
     pub fn clear(&mut self) {
         self.messages.clear();
-        self.streaming_id = None;
+self.streaming_id = None;
         self.scroll = 0;
     }
 
@@ -267,7 +285,7 @@ impl Session {
                 n += crate::session::render::thinking_block_line_count(&m.thinking, expanded, 120)
                     as u16;
             }
-            n += m.content.split('\n').count().max(1) as u16;
+            n += m.line_count;
             if self.tool_display != crate::config::ToolResultDisplay::Hide {
                 for t in &m.tool_results {
                     let t_vis = match self.tool_display {
@@ -340,7 +358,7 @@ impl Session {
                 n += crate::session::render::thinking_block_line_count(&m.thinking, expanded, 120)
                     as u16;
             }
-            n += m.content.split('\n').count().max(1) as u16;
+            n += m.line_count;
             if self.tool_display != crate::config::ToolResultDisplay::Hide {
                 for t in &m.tool_results {
                     let t_vis = match self.tool_display {

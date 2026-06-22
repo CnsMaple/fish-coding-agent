@@ -539,6 +539,16 @@ async fn handle_key(k: crossterm::event::KeyEvent, app: &mut App) {
 
     match k.code {
         KeyCode::Esc => {
+            // If a request is in flight, cancel it first.
+            if let Some(inflight) = app.inflight.take() {
+                let _ = inflight.cancel.send(true);
+                // Send ChatDone so the streaming message stops.
+                if let Some(tx) = &app.msg_tx {
+                    let _ = tx.send(crate::event::AppMsg::ChatDone);
+                }
+                app.session.streaming_id = None;
+                return;
+            }
             // If a selection is active, just clear it.
             if app.input.has_selection() {
                 app.input.clear_selection();
@@ -775,6 +785,10 @@ static DRAG: std::sync::Mutex<DragState> = std::sync::Mutex::new(DragState {
     prompt_row: -1,
 });
 
+/// Scroll state: (last_event_time, current_step_size).
+/// Step accelerates when events arrive quickly and resets when slow.
+static SCROLL_STATE: std::sync::Mutex<(Option<std::time::Instant>, u32)> = std::sync::Mutex::new((None, 3));
+
 fn handle_mouse(m: MouseEvent, app: &mut App) {
     let prompt = app.input_prompt_area;
     let prefix_width = unicode_width::UnicodeWidthStr::width(" > ") as u16;
@@ -783,10 +797,40 @@ fn handle_mouse(m: MouseEvent, app: &mut App) {
     // Mouse wheel scroll — scroll the session content.
     // scroll = offset from bottom.  ScrollUp = see older content (increase
     // offset).  ScrollDown = see newer content (decrease offset).
+    // Adaptive step: fast scrolling → larger step, slow → smaller.
+    let step = if matches!(m.kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown) {
+        let now = std::time::Instant::now();
+        if let Ok(mut state) = SCROLL_STATE.lock() {
+            let (last, mut step) = *state;
+            if let Some(t) = last {
+                let ms = now.duration_since(t).as_millis();
+                if ms < 15 {
+                    // Rapid: accelerate step up to 10
+                    step = (step + 1).min(10);
+                } else if ms > 80 {
+                    // Very slow: reset to 3
+                    step = 3;
+                } else {
+                    // Moderate: keep current step
+                }
+            }
+            *state = (Some(now), step);
+            step
+        } else {
+            3
+        }
+    } else {
+        3
+    };
     if matches!(m.kind, MouseEventKind::ScrollUp) {
-        app.session.scroll = app.session.scroll.saturating_add(3);
-        // Clamp so the stored value never drifts beyond the actual
-        // maximum, preventing a multi-press dead-zone when reversing.
+        // Edge: already at top, ignore.
+        if let Some(area) = app.session_area {
+            let inner_h = area.height.saturating_sub(2);
+            let total = app.session.count_all_lines();
+            let max_scroll = total.saturating_sub(inner_h);
+            if app.session.scroll >= max_scroll { return; }
+        }
+        app.session.scroll = app.session.scroll.saturating_add(step as u16);
         if let Some(area) = app.session_area {
             let inner_h = area.height.saturating_sub(2);
             let total = app.session.count_all_lines();
@@ -796,7 +840,20 @@ fn handle_mouse(m: MouseEvent, app: &mut App) {
         return;
     }
     if matches!(m.kind, MouseEventKind::ScrollDown) {
-        app.session.scroll = app.session.scroll.saturating_sub(3);
+        if app.session.scroll == 0 { return; } // edge: already at bottom
+        // Clamp to max_scroll first so runaway ScrollUp values are
+        // recovered in one step rather than needing dozens of scroll-downs.
+        if let Some(area) = app.session_area {
+            let inner_h = area.height.saturating_sub(2);
+            let total = app.session.count_all_lines();
+            let max_scroll = total.saturating_sub(inner_h);
+            if app.session.scroll > max_scroll {
+                app.session.scroll = max_scroll;
+            }
+        }
+        if app.session.scroll > 0 {
+            app.session.scroll = app.session.scroll.saturating_sub(step as u16);
+        }
         return;
     }
 
@@ -2014,7 +2071,8 @@ fn handle_settings_back(app: &mut App, state: &mut crate::function::SettingsStat
         }
         SettingsLevel::ThinkingDisplayList
         | SettingsLevel::ToolResultDisplayList
-        | SettingsLevel::EnterBehaviorList => {
+        | SettingsLevel::EnterBehaviorList
+        | SettingsLevel::BorderTypeList => {
             state.level = SettingsLevel::TopLevel;
             state.cursor = 0;
             state.clamp_cursor(&app.config);
@@ -2058,7 +2116,8 @@ fn handle_settings_enter(app: &mut App, state: &mut crate::function::SettingsSta
             0 => SettingsLevel::ProviderList,
             1 => SettingsLevel::ThinkingDisplayList,
             2 => SettingsLevel::ToolResultDisplayList,
-            _ => SettingsLevel::EnterBehaviorList,
+            3 => SettingsLevel::EnterBehaviorList,
+            _ => SettingsLevel::BorderTypeList,
         },
         SettingsLevel::ProviderList => {
             if cursor == 0 {
@@ -2162,6 +2221,17 @@ fn handle_settings_enter(app: &mut App, state: &mut crate::function::SettingsSta
                 app.config.enter_behavior = mode;
                 app.save_config();
                 app.notify(ToastLevel::Ok, format!("enter behavior: {}", mode.as_str()));
+            }
+            SettingsLevel::TopLevel
+        }
+        SettingsLevel::BorderTypeList => {
+            use crate::ui::border_type::BorderType;
+            use crate::function::notifications::ToastLevel;
+            let modes = [BorderType::Ascii, BorderType::Rounded];
+            if let Some(&mode) = modes.get(cursor) {
+                app.config.border_type = mode;
+                app.save_config();
+                app.notify(ToastLevel::Ok, format!("border type: {}", mode.as_str()));
             }
             SettingsLevel::TopLevel
         }
@@ -2633,6 +2703,7 @@ mod tests {
             session_area: None,
             input_cursor_screen: None,
             function_panel_cursor: None,
+
         }
     }
 

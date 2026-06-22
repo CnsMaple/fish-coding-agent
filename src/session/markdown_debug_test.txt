@@ -1,0 +1,11 @@
+#[test]
+fn debug_code_syntax() {
+    use syntect::parsing::SyntaxSet;
+    let ps = SyntaxSet::load_defaults_newlines();
+    let by_token = ps.find_syntax_by_token("code");
+    eprintln!("by_token: {:?}", by_token.map(|s| s.name.clone()));
+    let lines = crate::session::markdown::render("```code\nlet x = 1;\n```");
+    for (i, line) in lines.iter().enumerate() {
+        eprintln!("line {i}: {:?}", line.spans.iter().map(|s| (&s.content, s.style.fg)).collect::<Vec<_>>());
+    }
+}

@@ -10,9 +10,9 @@ pub fn dispatch(app: &mut App, cmd: &str, arg: &str) {
         "settings" => open_settings(app),
         "model" => open_model_picker(app),
         "hotkey" | "help" | "keys" => open_hotkey(app),
-        "clear" => {
+        "new" | "clear" => {
             app.start_new_session();
-            app.notify(ToastLevel::Info, "session cleared");
+            app.notify(ToastLevel::Info, if cmd == "new" { "new session" } else { "session cleared" });
         }
         "think" | "thinking" => {
             use crate::config::ReasoningMode;
@@ -545,6 +545,7 @@ pub fn send_message(app: &mut App, user_msg: Message) {
         thinking_visible: false,
         tool_results: Vec::new(),
         display_cursor: 0,
+        line_count: 0,
         ts: chrono::Utc::now(),
         streaming: true,
         skill_ref: None,
@@ -572,7 +573,7 @@ pub fn send_message(app: &mut App, user_msg: Message) {
             tool_calls: Vec::new(),
         })
         .collect();
-    let (cancel_tx, _cancel_rx) = tokio::sync::watch::channel(false);
+    let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
     app.inflight = Some(crate::app::InflightHandle {
         cancel: cancel_tx,
         label: format!("chat:{active_id}:{model}"),
@@ -590,7 +591,14 @@ pub fn send_message(app: &mut App, user_msg: Message) {
         let cwd = app.cwd.clone();
         tokio::spawn(async move {
             let mut req = req;
-            for _ in 0..8 {
+            for _ in 0..64 {
+                if *cancel_rx.borrow() {
+                    let _ = tx.send(crate::event::AppMsg::ChatDebug(
+                        "user cancelled".to_string()
+                    ));
+                    let _ = tx.send(crate::event::AppMsg::ChatDone);
+                    return;
+                }
                 let (chat_tx, mut chat_rx) =
                     tokio::sync::mpsc::unbounded_channel::<crate::providers::ChatEvent>();
                 let p = crate::providers::provider(provider);

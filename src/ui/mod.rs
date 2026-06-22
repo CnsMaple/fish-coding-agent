@@ -7,6 +7,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 use ratatui::Frame;
 
+pub mod border_type;
 pub mod function_panel;
 pub mod picker_widget;
 
@@ -260,11 +261,16 @@ fn render_cwd(area: Rect, buf: &mut Buffer, cwd: &str) {
 /// Apply a REVERSED style to every cell inside the selection rectangle so
 /// the user can see what they have highlighted.
 fn apply_selection_style(buf: &mut Buffer, sel: &Selection) {
-    let ((sx, sy), (ex, ey)) = sel.rect();
+    // Stream selection: from start through end, flowing across line breaks.
+    let start = sel.start;
+    let end = sel.end;
+    let y_min = start.1.min(end.1);
+    let y_max = start.1.max(end.1);
     let width = buf.area().width;
-    let x_end = ex.min(width.saturating_sub(1));
-    for y in sy..=ey {
-        for x in sx..=x_end {
+    for y in y_min..=y_max {
+        let row_sx = if y == start.1 { start.0 } else { 0 };
+        let row_ex = if y == end.1 { end.0.min(width.saturating_sub(1)) } else { width.saturating_sub(1) };
+        for x in row_sx..=row_ex {
             if let Some(cell) = buf.cell_mut((x, y)) {
                 let new_style = cell.style().add_modifier(Modifier::REVERSED);
                 cell.set_style(new_style);
@@ -278,13 +284,17 @@ fn apply_selection_style(buf: &mut Buffer, sel: &Selection) {
 /// and empty trailing rows are dropped, so a single-row selection across a
 /// padded cell line does not produce a wall of spaces.
 pub fn extract_selection_text(buf: &Buffer, sel: &Selection) -> String {
-    let ((sx, sy), (ex, ey)) = sel.rect();
+    let start = sel.start;
+    let end = sel.end;
+    let y_min = start.1.min(end.1);
+    let y_max = start.1.max(end.1);
     let width = buf.area().width;
-    let x_end = ex.min(width.saturating_sub(1));
     let mut lines: Vec<String> = Vec::new();
-    for y in sy..=ey {
+    for y in y_min..=y_max {
+        let row_sx = if y == start.1 { start.0 } else { 0 };
+        let row_ex = if y == end.1 { end.0.min(width.saturating_sub(1)) } else { width.saturating_sub(1) };
         let mut line = String::new();
-        for x in sx..=x_end {
+        for x in row_sx..=row_ex {
             if let Some(cell) = buf.cell((x, y)) {
                 line.push_str(cell.symbol());
             }

@@ -745,14 +745,11 @@ async fn handle_exec_server_message(
             cursor_debug(
                 tx,
                 format!(
-                    "exec unsupported_unknown id={} exec_id={}",
+                    "exec unsupported_unknown id={} exec_id={} (ignored)",
                     exec.id, exec.exec_id
                 ),
             );
-            Err(
-                ProviderError::Other("Cursor requested an unsupported exec operation".to_string())
-                    .into(),
-            )
+            Ok(CursorServerOutcome::Continue)
         }
     }
 }

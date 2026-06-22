@@ -53,7 +53,18 @@ pub fn build_lines(
     width: usize,
 ) -> (Vec<Line<'static>>, Vec<(usize, usize, usize)>) {
     let mut out: Vec<Line<'static>> = Vec::new();
-    for m in &session.messages {
+    let mut cache = session.line_cache.lock().unwrap();
+    if cache.len() < session.messages.len() {
+        cache.resize(session.messages.len(), None);
+    }
+    for (cache_idx, m) in session.messages.iter().enumerate() {
+        if !m.streaming {
+            if let Some(cached) = &cache[cache_idx] {
+                out.extend(cached.iter().cloned());
+                continue;
+            }
+        }
+        let mut msg_lines: Vec<Line<'static>> = Vec::new();
         let role_style = match m.role {
             Role::User => Theme::role_user(),
             Role::Assistant => Theme::role_assistant(),
@@ -62,15 +73,10 @@ pub fn build_lines(
         let arrow = Span::styled(" › ", role_style);
         let prefix = Span::styled(m.role.prefix(), role_style);
 
-        // Role prefix on its own line; content and blocks start below it.
-        out.push(Line::from(vec![prefix.clone(), arrow.clone()]));
-        // Skill messages render a clean `[skill]` block before any
-        // markdown content, so the user sees name/args/path at a
-        // glance and the AI still gets the raw skill body via
-        // `m.content`.
+        msg_lines.push(Line::from(vec![prefix.clone(), arrow.clone()]));
         if let Some(skill_ref) = &m.skill_ref {
             let rows = build_skill_block_rows(skill_ref, width);
-            push_block_rows(&mut out, rows, Theme::block_done());
+            push_block_rows(&mut msg_lines, rows, Theme::block_done());
         }
 
         let show_thinking = m.role == Role::Assistant
@@ -87,28 +93,18 @@ pub fn build_lines(
                 _ => false,
             };
             let rows = build_thinking_block_rows(&m.thinking, visible, width);
-            push_block_rows(&mut out, rows, block_style(m.streaming));
+            push_block_rows(&mut msg_lines, rows, block_style(m.streaming));
         }
 
-        // Render tool blocks at the content offset where the tool result
-        // arrived. This keeps command output near the assistant text that
-        // triggered it instead of moving every block to the message tail.
-        let raw = if m.streaming {
-            m.visible_content()
-        } else {
-            &m.content
-        };
+        let raw = if m.streaming { m.visible_content() } else { &m.content };
         let mut cursor = 0usize;
         let mut tools: Vec<&ToolResultBlock> = m.tool_results.iter().collect();
         tools.sort_by_key(|tool| tool.content_offset);
         for tool in tools {
             let offset = clamp_char_boundary(raw, tool.content_offset.min(raw.len()));
-            if offset < cursor {
-                continue;
-            }
-            render_content_segment(&strip_legacy_markers(&raw[cursor..offset]), width, &mut out);
+            if offset < cursor { continue; }
+            render_content_segment(&strip_legacy_markers(&raw[cursor..offset]), width, &mut msg_lines);
             cursor = offset;
-
             if session.tool_display != ToolResultDisplay::Hide {
                 let t_vis = match session.tool_display {
                     ToolResultDisplay::Show => tool.visible,
@@ -116,22 +112,27 @@ pub fn build_lines(
                     _ => false,
                 };
                 let rows = build_tool_block_rows(tool, t_vis, width);
-                push_block_rows(&mut out, rows, block_style_for_tool(tool));
+                push_block_rows(&mut msg_lines, rows, block_style_for_tool(tool));
             }
         }
-        render_content_segment(&strip_legacy_markers(&raw[cursor..]), width, &mut out);
+        render_content_segment(&strip_legacy_markers(&raw[cursor..]), width, &mut msg_lines);
 
         if m.streaming {
-            if let Some(last) = out.last_mut() {
+            if let Some(last) = msg_lines.last_mut() {
                 let mut s = last.spans.clone();
                 s.push(Span::styled("▌", Theme::cursor()));
                 *last = Line::from(s);
             } else {
-                out.push(Line::from(Span::styled("▌", Theme::cursor())));
+                msg_lines.push(Line::from(Span::styled("▌", Theme::cursor())));
             }
         }
-        out.push(Line::from(""));
+        msg_lines.push(Line::from(""));
+        if !m.streaming {
+            cache[cache_idx] = Some(msg_lines.clone());
+        }
+        out.extend(msg_lines);
     }
+    drop(cache);
     while out.last().map(|l| l.width() == 0).unwrap_or(false) {
         out.pop();
     }
@@ -140,8 +141,6 @@ pub fn build_lines(
     }
     (out, Vec::new())
 }
-
-/// Strip any remaining `[tool:...]` markers from old session content.
 fn strip_legacy_markers(s: &str) -> String {
     s.lines()
         .filter(|line| {
@@ -739,6 +738,7 @@ mod tests {
             ts: chrono::Utc::now(),
             streaming: false,
             skill_ref: None,
+            line_count: 0,
         });
         s
     }

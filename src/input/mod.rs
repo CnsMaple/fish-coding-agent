@@ -7,7 +7,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
-use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Paragraph};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 #[derive(Debug)]
@@ -423,11 +423,11 @@ pub fn render(area: Rect, buf: &mut Buffer, app: &mut crate::app::App) {
     title.spans.insert(0, Span::raw(" "));
     title.spans.push(Span::raw(" "));
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Plain)
-        .border_style(Theme::unfocused_border())
-        .title(title);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_set(app.config.border_type.ratatui_set())
+            .border_style(Theme::unfocused_border())
+            .title(title);
     let inner = block.inner(area);
     block.render(area, buf);
     if inner.height < 1 {
@@ -452,69 +452,137 @@ pub fn render(area: Rect, buf: &mut Buffer, app: &mut crate::app::App) {
     };
     let end_line = (start_line + visible_count).min(all_lines.len().max(1));
 
-    let mut rendered: Vec<Line<'static>> = Vec::new();
+    let inner_w = inner.width as usize;
+    let mut visual_lines: Vec<Line<'static>> = Vec::new();
+    // Map each (\n-segment, visual_line_within_segment) -> global visual line index
+    let mut seg_visual_starts: Vec<usize> = Vec::new(); // per segment: first global visual line
     let mut byte_pos = 0usize;
     for (idx, text) in all_lines.iter().enumerate() {
         let line_start = byte_pos;
         let line_end = line_start + text.len();
         byte_pos = line_end + 1;
+        let text_width = UnicodeWidthStr::width(*text);
+        let seg_total_w = prompt_width + text_width;
+        let n_vis = if seg_total_w <= inner_w { 1 } else { (seg_total_w + inner_w - 1) / inner_w };
         if idx < start_line || idx >= end_line {
             continue;
         }
+        seg_visual_starts.push(visual_lines.len());
 
-        let mut spans: Vec<Span<'static>> = vec![Span::styled(
-            if idx == start_line {
-                prompt.clone()
+        // Manually split this segment into visual lines
+        let mut text_byte_offset = 0usize;
+        for vi in 0..n_vis {
+            let is_first = vi == 0;
+            let max_text_w = if is_first { inner_w.saturating_sub(prompt_width) } else { inner_w };
+
+            // Find how many bytes of remaining text fit in max_text_w display width
+            let remaining = &text[text_byte_offset..];
+            let mut chunk_w = 0usize;
+            let mut split_at = 0usize;
+            for (bi, ch) in remaining.char_indices() {
+                let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
+                if chunk_w + cw > max_text_w { break; }
+                chunk_w += cw;
+                split_at = bi + ch.len_utf8();
+            }
+            let chunk = &remaining[..split_at];
+            text_byte_offset += split_at;
+
+            let mut spans: Vec<Span<'static>> = Vec::new();
+            // Prompt prefix only on first visual line of each segment
+            if is_first {
+                spans.push(Span::styled(prompt.clone(), Theme::bold()));
             } else {
-                " ".repeat(prompt_width)
-            },
-            Theme::bold(),
-        )];
-        if let Some((s, e)) = app.input.selection {
-            let (s, e) = if s <= e { (s, e) } else { (e, s) };
-            let sel_start = s.max(line_start).min(line_end);
-            let sel_end = e.max(line_start).min(line_end);
-            if sel_start > line_start {
-                spans.push(Span::raw(text[..sel_start - line_start].to_string()));
+                spans.push(Span::raw(" ".repeat(prompt_width)));
             }
-            if sel_start < sel_end {
-                spans.push(Span::styled(
-                    text[sel_start - line_start..sel_end - line_start].to_string(),
-                    Theme::reversed(),
-                ));
+            // Compute byte ranges for this chunk in absolute buffer coordinates
+            let chunk_abs_start = line_start + text_byte_offset - split_at;
+            let chunk_abs_end = line_start + text_byte_offset;
+            let chunk_len = chunk.len();
+
+            // Selection handling
+            if let Some((s, e)) = app.input.selection {
+                let (s, e) = if s <= e { (s, e) } else { (e, s) };
+                let sel_start = s.max(chunk_abs_start).min(chunk_abs_end);
+                let sel_end = e.max(chunk_abs_start).min(chunk_abs_end);
+                let local_start = sel_start - chunk_abs_start;
+                let local_end = sel_end - chunk_abs_start;
+                if local_start > 0 {
+                    spans.push(Span::raw(chunk[..local_start].to_string()));
+                }
+                if local_start < local_end {
+                    spans.push(Span::styled(
+                        chunk[local_start..local_end].to_string(),
+                        Theme::reversed(),
+                    ));
+                }
+                if local_end < chunk_len {
+                    spans.push(Span::raw(chunk[local_end..].to_string()));
+                }
+            } else if app.inflight.is_none() && cursor >= chunk_abs_start && cursor <= chunk_abs_end {
+                let local = cursor - chunk_abs_start;
+                if local > 0 {
+                    spans.push(Span::raw(chunk[..local].to_string()));
+                }
+                spans.push(Span::styled("\u{2588}", Theme::cursor()));
+                if local < chunk_len {
+                    spans.push(Span::raw(chunk[local..].to_string()));
+                }
+            } else {
+                spans.push(Span::raw(chunk.to_string()));
             }
-            if sel_end < line_end {
-                spans.push(Span::raw(text[sel_end - line_start..].to_string()));
-            }
-        } else if app.inflight.is_none() && cursor >= line_start && cursor <= line_end {
-            let local = cursor - line_start;
-            if local > 0 {
-                spans.push(Span::raw(text[..local].to_string()));
-            }
-            spans.push(Span::styled("\u{2588}", Theme::cursor()));
-            if local < text.len() {
-                spans.push(Span::raw(text[local..].to_string()));
-            }
-        } else {
-            spans.push(Span::raw((*text).to_string()));
+            visual_lines.push(Line::from(spans));
         }
-        rendered.push(Line::from(spans));
     }
 
-    let p = Paragraph::new(rendered).wrap(Wrap { trim: false });
+    let p = Paragraph::new(visual_lines);
     p.render(inner, buf);
     app.input_prompt_area = Some(inner);
 
-    if app.inflight.is_none() && cursor_line_idx >= start_line && cursor_line_idx < end_line {
-        let cursor_line_start = buffer[..cursor].rfind('\n').map(|i| i + 1).unwrap_or(0);
-        let text_before_cursor = UnicodeWidthStr::width(&buffer[cursor_line_start..cursor]) as u16;
-        let cy = inner.y + (cursor_line_idx - start_line) as u16;
-        let cx = inner.x + prompt_width as u16 + text_before_cursor;
-        if cx < inner.x + inner.width && cy < inner.y + inner.height {
-            if let Some(c) = buf.cell_mut((cx, cy)) {
-                c.set_style(Theme::cursor());
+    // Cursor position: find which visual_line the cursor is on
+    if app.inflight.is_none() {
+        let mut cursor_vis = 0usize;
+        let mut cursor_col = 0u16;
+        let mut found = false;
+        byte_pos = 0usize;
+        for (idx, text) in all_lines.iter().enumerate() {
+            let line_start = byte_pos;
+            let line_end = line_start + text.len();
+            byte_pos = line_end + 1;
+            if cursor < line_start || cursor > line_end { continue; }
+            // cursor is in this segment
+            let text_width = UnicodeWidthStr::width(*text);
+            let seg_total_w = prompt_width + text_width;
+            let n_vis = if seg_total_w <= inner_w { 1 } else { (seg_total_w + inner_w - 1) / inner_w };
+            let text_before = &text[..cursor - line_start];
+            let width_before = prompt_width + UnicodeWidthStr::width(text_before);
+            let vi = if n_vis <= 1 { 0 } else { width_before / inner_w };
+            cursor_col = (width_before % inner_w) as u16;
+            // Count visual lines from all earlier visible segments
+            let mut vis_before = 0usize;
+            for (j, t) in all_lines.iter().enumerate() {
+                if j >= idx { break; }
+                if j < start_line || j >= end_line { continue; }
+                let tw = UnicodeWidthStr::width(*t);
+                let stw = prompt_width + tw;
+                let nv = if stw <= inner_w { 1 } else { (stw + inner_w - 1) / inner_w };
+                vis_before += nv;
             }
-            app.input_cursor_screen = Some((cx, cy));
+            cursor_vis = vis_before + vi;
+            found = true;
+            break;
+        }
+        if found {
+            let cy = inner.y + cursor_vis as u16;
+            let cx = inner.x + cursor_col;
+            if cy < inner.y + inner.height {
+                if let Some(cell) = buf.cell_mut((cx, cy)) {
+                    cell.set_style(Theme::cursor());
+                }
+                app.input_cursor_screen = Some((cx, cy));
+            } else {
+                app.input_cursor_screen = None;
+            }
         } else {
             app.input_cursor_screen = None;
         }
@@ -561,6 +629,7 @@ pub const COMMAND_LIST: &[&str] = &[
     "/settings",
     "/model",
     "/hotkey",
+    "/new",
     "/clear",
     "/provider",
     "/think",

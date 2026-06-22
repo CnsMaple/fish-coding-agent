@@ -299,6 +299,9 @@ pub struct Config {
     pub tool_display: ToolResultDisplay,
     #[serde(default)]
     pub enter_behavior: EnterBehavior,
+    /// Border style for markdown tables and code blocks.
+    #[serde(default)]
+    pub border_type: crate::ui::border_type::BorderType,
     #[serde(default)]
     pub entries: HashMap<ProviderId, ProviderConfig>,
 }
@@ -359,6 +362,7 @@ impl Config {
             thinking_display: ThinkingDisplay::Show,
             tool_display: ToolResultDisplay::Show,
             enter_behavior: EnterBehavior::EnterSends,
+            border_type: crate::ui::border_type::BorderType::default(),
             entries,
         }
     }
@@ -547,6 +551,7 @@ impl Default for Config {
             thinking_display: ThinkingDisplay::Show,
             tool_display: ToolResultDisplay::Show,
             enter_behavior: EnterBehavior::EnterSends,
+            border_type: crate::ui::border_type::BorderType::default(),
             entries,
         }
     }

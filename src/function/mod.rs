@@ -222,6 +222,8 @@ pub enum SettingsLevel {
     ToolResultDisplayList,
     /// Enter/newline behavior chooser.
     EnterBehaviorList,
+    /// Border type chooser.
+    BorderTypeList,
 }
 
 impl SettingsLevel {
@@ -248,6 +250,7 @@ impl SettingsLevel {
             SettingsLevel::ThinkingDisplayList => "settings / thinking display".to_string(),
             SettingsLevel::ToolResultDisplayList => "settings / tool display".to_string(),
             SettingsLevel::EnterBehaviorList => "settings / enter behavior".to_string(),
+            SettingsLevel::BorderTypeList => "settings / border type".to_string(),
         }
     }
 
@@ -263,7 +266,8 @@ impl SettingsLevel {
             }
             SettingsLevel::ThinkingDisplayList
             | SettingsLevel::ToolResultDisplayList
-            | SettingsLevel::EnterBehaviorList => "Up/Down: nav | Enter: select | Esc: back",
+            | SettingsLevel::EnterBehaviorList
+            | SettingsLevel::BorderTypeList => "Up/Down: nav | Enter: select | Esc: back",
         }
     }
 }
@@ -360,7 +364,7 @@ impl SettingsState {
     /// Number of items in the current list view (used to clamp cursor).
     pub fn list_len(&self, cfg: &Config) -> usize {
         match &self.level {
-            SettingsLevel::TopLevel => 4, // set provider, thinking display, tool display, enter behavior
+            SettingsLevel::TopLevel => 5, // set provider, thinking display, tool display, enter behavior, border type
             SettingsLevel::ProviderList => 1 + cfg.configured_provider_ids().len(), // new + existing
             SettingsLevel::NewProviderKind => self.new_provider.filtered.len(),
             SettingsLevel::ExistingActions(_) => 2, // edit, delete
@@ -368,6 +372,7 @@ impl SettingsState {
             SettingsLevel::ThinkingDisplayList => 3, // show, hide, while streaming
             SettingsLevel::ToolResultDisplayList => 3, // show, hide, while streaming
             SettingsLevel::EnterBehaviorList => 2,  // enter sends, enter newline
+            SettingsLevel::BorderTypeList => 2,  // ascii, rounded
         }
     }
 
@@ -1050,6 +1055,7 @@ pub struct App {
     /// when set, so IME composition windows appear at the right location
     /// when the user is typing in a picker search field.
     pub function_panel_cursor: Option<(u16, u16)>,
+
 }
 
 /// Mouse-driven text selection spanning the full TUI. Coordinates are
@@ -1150,6 +1156,7 @@ impl App {
             tui_drag_start: None,
             input_cursor_screen: None,
             function_panel_cursor: None,
+
         };
         app.refresh_status_model_context();
         app
@@ -1287,6 +1294,7 @@ impl App {
                     streaming_id: None,
                     display: self.config.thinking_display,
                     tool_display: self.config.tool_display,
+                    line_cache: Default::default(),
                 };
                 self.session_id = stored.id;
                 self.session_title = stored.title;
@@ -1352,6 +1360,7 @@ impl App {
                     streaming_id: None,
                     display: self.config.thinking_display,
                     tool_display: self.config.tool_display,
+                    line_cache: Default::default(),
                 };
                 self.notify(
                     crate::function::notifications::ToastLevel::Ok,

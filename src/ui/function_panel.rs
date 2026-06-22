@@ -5,7 +5,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
-use ratatui::widgets::{Block, BorderType, Borders, List, ListItem, Paragraph, Tabs, Wrap};
+use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Tabs, Wrap};
 
 pub fn render(area: Rect, buf: &mut Buffer, app: &mut App) {
     if area.width < 4 || area.height < 4 {
@@ -13,7 +13,7 @@ pub fn render(area: Rect, buf: &mut Buffer, app: &mut App) {
     }
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_type(BorderType::Plain)
+        .border_set(app.config.border_type.ratatui_set())
         .border_style(Theme::unfocused_border())
         .title(Span::styled(" function ", Theme::dim()));
     let inner = block.inner(area);
@@ -372,6 +372,11 @@ fn render_settings(
                 "enter behavior",
                 Some(cfg.enter_behavior.as_str().to_string()),
             ));
+            body_lines.push(list_item(
+                4 == s.cursor,
+                "border type",
+                Some(cfg.border_type.as_str().to_string()),
+            ));
         }
         SettingsLevel::ProviderList => {
             body_lines.push(list_item(0 == s.cursor, "+ new provider", None));
@@ -437,6 +442,18 @@ fn render_settings(
             let modes = [EnterBehavior::EnterSends, EnterBehavior::EnterNewline];
             for (i, mode) in modes.iter().enumerate() {
                 let is_current = *mode == cfg.enter_behavior;
+                let mut label = mode.as_str().to_string();
+                if is_current {
+                    label.push_str("  [current]");
+                }
+                body_lines.push(list_item(s.cursor == i, &label, None));
+            }
+        }
+        SettingsLevel::BorderTypeList => {
+            use crate::ui::border_type::BorderType;
+            let modes = [BorderType::Ascii, BorderType::Rounded];
+            for (i, mode) in modes.iter().enumerate() {
+                let is_current = *mode == cfg.border_type;
                 let mut label = mode.as_str().to_string();
                 if is_current {
                     label.push_str("  [current]");
