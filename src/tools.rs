@@ -145,7 +145,11 @@ fn tool_defs() -> Vec<ToolDef> {
                             "type": "object",
                             "properties": {
                                 "content": { "type": "string" },
-                                "status": { "type": "string" }
+                                "status": {
+                                    "type": "string",
+                                    "enum": ["completed", "in_progress", "pending"],
+                                    "description": "Status of the item. Default: pending."
+                                }
                             },
                             "required": ["content"]
                         }
@@ -164,10 +168,7 @@ fn tool_defs() -> Vec<ToolDef> {
                     "content": { "type": "string", "description": "Full plan text. Use this OR steps, not both empty." },
                     "steps": { "type": "array", "items": { "type": "string" }, "description": "Optional list of step strings, rendered as a numbered list. Used when content is empty." }
                 },
-                "anyOf": [
-                    { "required": ["content"] },
-                    { "required": ["steps"] }
-                ]
+                "required": ["content"]
             }),
         },
     ]

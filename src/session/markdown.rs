@@ -823,9 +823,11 @@ let x = 1;
         let code_line = lines
             .iter()
             .find(|line| {
-                line.spans
+                let joined: String = line.spans
                     .iter()
-                    .any(|span| span.content.contains("let x = 1;"))
+                    .map(|s| s.content.as_ref())
+                    .collect();
+                joined.contains("let x = 1;")
             })
             .expect("code content line missing");
         for span in &code_line.spans {

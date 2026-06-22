@@ -167,7 +167,6 @@ fn note_model_output(app: &mut App, chunk: &str) {
     if app.response_started_at.is_none() {
         app.response_started_at = Some(Instant::now());
         app.response_output_chars = 0;
-        app.response_output_tokens = None;
     }
     app.response_output_chars += chunk.chars().count();
 }
@@ -326,7 +325,7 @@ fn handle_msg(msg: AppMsg, app: &mut App) {
                 app.status.update_token_usage(total_tokens);
             }
             if u.output_tokens > 0 {
-                app.response_output_tokens = Some(u.output_tokens);
+                *app.response_output_tokens.get_or_insert(0) += u.output_tokens;
             }
         }
         AppMsg::ChatDone => {
@@ -1344,6 +1343,32 @@ async fn handle_ask_key(
                 false
             }
         }
+        KeyCode::Left => {
+            if freeform_mode && state.input_cursor > 0 {
+                let prev = state.input[..state.input_cursor]
+                    .char_indices()
+                    .next_back()
+                    .map(|(i, _)| i)
+                    .unwrap_or(0);
+                state.input_cursor = prev;
+                true
+            } else {
+                false
+            }
+        }
+        KeyCode::Right => {
+            if freeform_mode && state.input_cursor < state.input.len() {
+                let next = state.input[state.input_cursor..]
+                    .char_indices()
+                    .nth(1)
+                    .map(|(i, c)| state.input_cursor + i + c.len_utf8())
+                    .unwrap_or(state.input.len());
+                state.input_cursor = next;
+                true
+            } else {
+                false
+            }
+        }
         KeyCode::Enter => {
             let answer = if freeform_mode {
                 let trimmed = state.input.trim().to_string();
@@ -1373,6 +1398,7 @@ async fn handle_ask_key(
             // of the conversation history and will be sent to the
             // model by send_chat.
             close_active_function_tab(app);
+            app.set_mode(crate::function::AppMode::Yolo);
             app.notify(
                 crate::function::notifications::ToastLevel::Ok,
                 "answer recorded",
@@ -1382,6 +1408,7 @@ async fn handle_ask_key(
         }
         KeyCode::Esc => {
             close_active_function_tab(app);
+            app.set_mode(crate::function::AppMode::Yolo);
             true
         }
         _ => false,
@@ -1393,19 +1420,84 @@ fn handle_todo_key(
     _app: &mut App,
     state: &mut crate::function::TodoState,
 ) -> bool {
-    use crossterm::event::KeyCode;
-    match k.code {
-        KeyCode::Up => {
-            state.cursor = state.cursor.saturating_sub(1);
-            true
-        }
-        KeyCode::Down => {
-            if !state.items.is_empty() {
-                state.cursor = (state.cursor + 1).min(state.items.len().saturating_sub(1));
+    use crossterm::event::{KeyCode, KeyModifiers};
+    // When editing an item, most keys go to the edit buffer.
+    if let Some(_) = state.editing {
+        match k.code {
+            KeyCode::Esc => {
+                state.cancel_edit();
+                true
             }
-            true
+            KeyCode::Enter => {
+                state.commit_edit();
+                true
+            }
+            KeyCode::Backspace => {
+                state.edit_buffer.pop();
+                true
+            }
+            KeyCode::Char(c) if !k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
+                state.edit_buffer.push(c);
+                true
+            }
+            _ => false,
         }
-        _ => false,
+    } else {
+        match k.code {
+            KeyCode::Up => {
+                state.cursor = state.cursor.saturating_sub(1);
+                true
+            }
+            KeyCode::Down => {
+                if !state.items.is_empty() {
+                    state.cursor = (state.cursor + 1).min(state.items.len().saturating_sub(1));
+                }
+                true
+            }
+            KeyCode::Enter => {
+                if !state.items.is_empty() {
+                    let item = &mut state.items[state.cursor];
+                    match item.status.as_str() {
+                        "pending" | "" => item.status = "in_progress".to_string(),
+                        "in_progress" | "running" => item.status = "completed".to_string(),
+                        _ => item.status = "pending".to_string(),
+                    }
+                }
+                true
+            }
+            KeyCode::Char('d') if k.modifiers == KeyModifiers::CONTROL => {
+                state.cursor += 1;
+                state.items.insert(state.cursor, crate::function::TodoItem {
+                    content: String::new(),
+                    status: "pending".to_string(),
+                });
+                state.start_edit(state.cursor);
+                true
+            }
+            KeyCode::Char('u') if k.modifiers == KeyModifiers::CONTROL => {
+                let idx = state.cursor;
+                state.items.insert(idx, crate::function::TodoItem {
+                    content: String::new(),
+                    status: "pending".to_string(),
+                });
+                state.start_edit(idx);
+                true
+            }
+            KeyCode::Delete => {
+                if !state.items.is_empty() {
+                    state.items.remove(state.cursor);
+                    if state.cursor >= state.items.len() && !state.items.is_empty() {
+                        state.cursor = state.items.len() - 1;
+                    }
+                }
+                true
+            }
+            KeyCode::Char('e') if k.modifiers == KeyModifiers::CONTROL => {
+                state.start_edit(state.cursor);
+                true
+            }
+            _ => false,
+        }
     }
 }
 
@@ -1424,6 +1516,7 @@ async fn handle_plan_key(
                 prompt.clone(),
             ));
             close_active_function_tab(app);
+            app.set_mode(crate::function::AppMode::Yolo);
             app.notify(
                 crate::function::notifications::ToastLevel::Ok,
                 "plan approved",
@@ -1440,6 +1533,7 @@ async fn handle_plan_key(
                 prompt.clone(),
             ));
             close_active_function_tab(app);
+            app.set_mode(crate::function::AppMode::Yolo);
             app.notify(
                 crate::function::notifications::ToastLevel::Warn,
                 "plan rejected",
@@ -1449,6 +1543,7 @@ async fn handle_plan_key(
         }
         KeyCode::Esc => {
             close_active_function_tab(app);
+            app.set_mode(crate::function::AppMode::Yolo);
             true
         }
         _ => false,
@@ -1468,6 +1563,7 @@ fn handle_session_picker_key(
         }
         KeyCode::Esc => {
             close_active_function_tab(app);
+            app.set_mode(crate::function::AppMode::Yolo);
             true
         }
         KeyCode::Up => {
@@ -1544,6 +1640,7 @@ fn handle_session_rename_key(
     match k.code {
         KeyCode::Esc => {
             close_active_function_tab(app);
+            app.set_mode(crate::function::AppMode::Yolo);
             true
         }
         KeyCode::Enter => {
@@ -2360,11 +2457,20 @@ fn settings_save_form(app: &mut App, form: crate::function::ConfigFormState) {
     use crate::config::{parse_id, ProviderKind, ProviderMode};
     use crate::function::notifications::ToastLevel;
 
-    let id = form.id.clone();
+    let mut id = form.id.clone();
     let (_kind, mode) = parse_id(&id).unwrap_or((ProviderKind::Openai, ProviderMode::Key));
     let base_url = form.base_url.trim().to_string();
     let key_or_env = form.key_or_env.clone();
     let was_new = form.is_new;
+
+    // Deduplicate: if the base ID already exists, append -2, -3, etc.
+    if was_new {
+        let mut n = 2;
+        while app.config.entries.contains_key(&id) {
+            id = format!("{}-{}", form.id, n);
+            n += 1;
+        }
+    }
 
     // Preserve existing model and api_key (for Key mode in edit form) if
     // the user did not touch the corresponding field. We always pull the
@@ -2747,7 +2853,21 @@ mod tests {
     use crate::function::{FunctionPanel, ModelPickerState};
 
     fn make_app() -> App {
-        let cfg = Config::default();
+        let mut cfg = Config::default();
+        // Add default entries so tests that expect providers work.
+        // (Real app starts with empty config; test helper adds stubs.)
+        for kind in [ProviderKind::Openai, ProviderKind::Anthropic] {
+            let id = make_id(kind, ProviderMode::Key);
+            cfg.entries.entry(id).or_insert_with(|| ProviderConfig {
+                api_key: String::new(),
+                api_key_env: String::new(),
+                base_url: crate::config::default_base_url(kind).to_string(),
+                model: String::new(),
+                model_display: String::new(),
+                name: String::new(),
+            });
+        }
+        cfg.active = Some(make_id(ProviderKind::Openai, ProviderMode::Key));
         // Use a per-test config file so parallel `cargo test` invocations
         // do not race on the same path. The atomic counter is process-wide
         // and yields a unique id for every call to `make_app`.
@@ -2774,6 +2894,7 @@ mod tests {
             hit_rate: crate::function::notifications::HitRate::new(50),
             token_rate: crate::function::notifications::TokenRate::new(50),
             response_started_at: None,
+            response_accumulated: std::time::Duration::ZERO,
             response_output_chars: 0,
             response_output_tokens: None,
             reqwest: reqwest::Client::new(),
@@ -2816,13 +2937,14 @@ mod tests {
             ProviderKind::Openai,
             ProviderMode::Key,
         );
-        // form starts pre-populated with default base_url and empty key.
+        // form starts with empty base_url and key.
         settings_save_form(&mut app, form.clone());
-        let id: ProviderId = make_id(ProviderKind::Openai, ProviderMode::Key);
+        // make_app already has openai:key, so dedup creates openai:key-2.
+        let id: ProviderId = format!("{}-2", make_id(ProviderKind::Openai, ProviderMode::Key));
         assert!(app.config.entries.contains_key(&id));
         assert_eq!(app.config.active.as_deref(), Some(id.as_str()));
         let entry = app.config.entry(&id).unwrap();
-        assert_eq!(entry.base_url, "https://api.openai.com/v1");
+        assert_eq!(entry.base_url, "");
         assert_eq!(entry.model, "");
     }
 

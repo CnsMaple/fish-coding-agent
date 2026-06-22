@@ -103,9 +103,17 @@ impl Message {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TodoItem {
+    pub content: String,
+    pub status: String,
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Session {
     pub messages: Vec<Message>,
+    #[serde(default)]
+    pub todo_items: Vec<TodoItem>,
     /// scroll offset from bottom; 0 = follow tail
     pub scroll: u16,
     /// id of the message currently being edited/streamed
@@ -249,6 +257,7 @@ impl Session {
         self.messages.clear();
 self.streaming_id = None;
         self.scroll = 0;
+        self.todo_items.clear();
     }
 
     /// Rough count of rendered lines up to (but not including) `msg_idx`,

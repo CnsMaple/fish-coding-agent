@@ -95,6 +95,8 @@ pub fn make_id(kind: ProviderKind, mode: ProviderMode) -> ProviderId {
 
 pub fn parse_id(id: &str) -> Option<(ProviderKind, ProviderMode)> {
     let (k, m) = id.split_once(':')?;
+    // Strip dedup suffix like "-2" from duplicated provider IDs (e.g. openai:key-2).
+    let m = m.split('-').next().unwrap_or(m);
     Some((
         ProviderKind::from_str_opt(k)?,
         ProviderMode::from_str_opt(m)?,
@@ -536,23 +538,14 @@ impl Config {
 
 impl Default for Config {
     fn default() -> Self {
-        let mut entries = HashMap::new();
-        entries.insert(
-            make_id(ProviderKind::Openai, ProviderMode::Key),
-            ProviderConfig::preset(ProviderKind::Openai),
-        );
-        entries.insert(
-            make_id(ProviderKind::Anthropic, ProviderMode::Key),
-            ProviderConfig::preset(ProviderKind::Anthropic),
-        );
         Self {
-            active: Some(make_id(ProviderKind::Openai, ProviderMode::Key)),
+            active: None,
             thinking: ReasoningMode::Off,
             thinking_display: ThinkingDisplay::Show,
             tool_display: ToolResultDisplay::Show,
             enter_behavior: EnterBehavior::EnterSends,
             border_type: crate::ui::border_type::BorderType::default(),
-            entries,
+            entries: HashMap::new(),
         }
     }
 }

@@ -1,6 +1,7 @@
 use crate::config::{Config, ProviderId, ProviderKind};
 use crate::function::notifications::{HitRate, ModelCache, Notifications, TokenRate};
 use crate::session::{Role, Session};
+pub use crate::session::TodoItem;
 use chrono::{DateTime, Utc};
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -56,7 +57,9 @@ impl CompletionState {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppMode {
+    Ask,
     Plan,
+    Todo,
     Yolo,
     Shell,
     ShellContext,
@@ -67,7 +70,9 @@ pub enum AppMode {
 impl AppMode {
     pub fn as_str(self) -> &'static str {
         match self {
+            AppMode::Ask => "ask",
             AppMode::Plan => "plan",
+            AppMode::Todo => "todo",
             AppMode::Yolo => "yolo",
             AppMode::Shell => "shell",
             AppMode::ShellContext => "shell_context",
@@ -136,19 +141,25 @@ impl ConfigFormState {
         kind: crate::config::ProviderKind,
         mode: crate::config::ProviderMode,
     ) -> Self {
-        let default_url = crate::config::default_base_url(kind).to_string();
-        let default_env = crate::config::default_api_key_env(kind).to_string();
         let id = crate::config::make_id(kind, mode);
         let key_or_env = match mode {
             crate::config::ProviderMode::Key => String::new(),
-            crate::config::ProviderMode::Env => default_env,
+            crate::config::ProviderMode::Env => String::new(),
             crate::config::ProviderMode::Oauth => String::new(),
+        };
+        let name = match kind {
+            crate::config::ProviderKind::Cursor => "Cursor".to_string(),
+            _ => String::new(),
+        };
+        let base_url = match kind {
+            crate::config::ProviderKind::Cursor => crate::config::default_base_url(kind).to_string(),
+            _ => String::new(),
         };
         Self {
             is_new: true,
             id,
-            name: String::new(),
-            base_url: default_url,
+            name,
+            base_url,
             key_or_env,
             focused: ConfigField::Name,
             form_error: None,
@@ -894,20 +905,42 @@ impl AskState {
 }
 
 #[derive(Debug, Clone)]
-pub struct TodoItem {
-    pub content: String,
-    pub status: String,
-}
-
-#[derive(Debug, Clone)]
 pub struct TodoState {
     pub items: Vec<TodoItem>,
     pub cursor: usize,
+    /// Index of the item being edited inline, or None.
+    pub editing: Option<usize>,
+    /// Buffer for the in-progress edit.
+    pub edit_buffer: String,
 }
 
 impl TodoState {
     pub fn new(items: Vec<TodoItem>) -> Self {
-        Self { items, cursor: 0 }
+        Self { items, cursor: 0, editing: None, edit_buffer: String::new() }
+    }
+
+    /// Start editing the item at `idx`. Returns false if out of bounds.
+    pub fn start_edit(&mut self, idx: usize) -> bool {
+        if idx >= self.items.len() { return false; }
+        self.editing = Some(idx);
+        self.edit_buffer = self.items[idx].content.clone();
+        true
+    }
+
+    /// Commit the edit buffer to the item.
+    pub fn commit_edit(&mut self) {
+        if let Some(idx) = self.editing {
+            if idx < self.items.len() {
+                self.items[idx].content = std::mem::take(&mut self.edit_buffer);
+            }
+        }
+        self.editing = None;
+    }
+
+    /// Cancel the edit (discard buffer).
+    pub fn cancel_edit(&mut self) {
+        self.editing = None;
+        self.edit_buffer.clear();
     }
 }
 
@@ -915,7 +948,6 @@ impl TodoState {
 pub struct PlanState {
     pub title: String,
     pub content: String,
-    pub cursor: usize,
     pub approved: Option<bool>,
 }
 
@@ -924,7 +956,6 @@ impl PlanState {
         Self {
             title,
             content,
-            cursor: 0,
             approved: None,
         }
     }
@@ -1242,6 +1273,13 @@ impl App {
     }
 
     pub fn save_current_session(&mut self) {
+        // Sync todo items from the function panel to the session.
+        for tab in &self.function.tabs {
+            if let crate::function::SidebarTab::Todo(state) = tab {
+                self.session.todo_items = state.items.clone();
+                break;
+            }
+        }
         if self.session.messages.is_empty() {
             return;
         }
@@ -1296,12 +1334,16 @@ impl App {
             Ok(stored) => {
                 self.session = Session {
                     messages: stored.messages,
+                    todo_items: stored.todo_items.clone(),
                     scroll: 0,
                     streaming_id: None,
                     display: self.config.thinking_display,
                     tool_display: self.config.tool_display,
                     line_cache: Default::default(),
                 };
+                if !stored.todo_items.is_empty() {
+                    self.open_todo(stored.todo_items);
+                }
                 self.session_id = stored.id;
                 self.session_title = stored.title;
                 self.notify(
@@ -1362,6 +1404,7 @@ impl App {
                 self.session_title = stored.title;
                 self.session = Session {
                     messages: stored.messages,
+                    todo_items: stored.todo_items.clone(),
                     scroll: 0,
                     streaming_id: None,
                     display: self.config.thinking_display,
@@ -1386,22 +1429,60 @@ impl App {
     }
 
     pub fn open_ask(&mut self, question: String, options: Vec<String>) {
-        self.function
-            .push(SidebarTab::Ask(AskState::new(question, options)));
+        self.set_mode(AppMode::Ask);
+        // Reuse existing Ask tab if present, otherwise push a new one.
+        if let Some((i, _)) = self
+            .function
+            .tabs
+            .iter_mut()
+            .enumerate()
+            .find(|(_, t)| matches!(t, SidebarTab::Ask(_)))
+        {
+            self.function.tabs[i] = SidebarTab::Ask(AskState::new(question, options));
+            self.function.active = i;
+        } else {
+            self.function
+                .push(SidebarTab::Ask(AskState::new(question, options)));
+        }
         self.function_visible = true;
         self.acknowledge_panel();
     }
 
     pub fn open_todo(&mut self, items: Vec<TodoItem>) {
-        self.function.push(SidebarTab::Todo(TodoState::new(items)));
+        self.set_mode(AppMode::Todo);
+        // Reuse existing Todo tab if present, otherwise push a new one.
+        if let Some((i, _)) = self
+            .function
+            .tabs
+            .iter_mut()
+            .enumerate()
+            .find(|(_, t)| matches!(t, SidebarTab::Todo(_)))
+        {
+            self.function.tabs[i] = SidebarTab::Todo(TodoState::new(items));
+            self.function.active = i;
+        } else {
+            self.function.push(SidebarTab::Todo(TodoState::new(items)));
+        }
         self.function_visible = true;
         self.acknowledge_panel();
     }
 
     pub fn open_plan(&mut self, title: String, content: String) {
         self.set_mode(AppMode::Plan);
-        self.function
-            .push(SidebarTab::Plan(PlanState::new(title, content)));
+        // Reuse existing Plan tab if present, otherwise push a new one.
+        if let Some((i, _)) = self
+            .function
+            .tabs
+            .iter_mut()
+            .enumerate()
+            .find(|(_, t)| matches!(t, SidebarTab::Plan(_)))
+        {
+            self.function.tabs[i] = SidebarTab::Plan(PlanState::new(title, content));
+            self.function.active = i;
+        } else {
+            self.function
+                .push(SidebarTab::Plan(PlanState::new(title, content)));
+        }
         self.function_visible = true;
         self.acknowledge_panel();
     }

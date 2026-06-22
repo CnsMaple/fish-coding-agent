@@ -3,7 +3,7 @@ use crate::config::ProviderKind;
 use crate::function::notifications::ModelInfo;
 use anyhow::Result;
 use async_trait::async_trait;
-use futures_util::StreamExt;
+
 use serde::Deserialize;
 use tokio::sync::mpsc;
 

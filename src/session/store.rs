@@ -3,7 +3,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-use super::{Message, Session};
+use super::{Message, Session, TodoItem};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredSession {
@@ -13,6 +13,8 @@ pub struct StoredSession {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub messages: Vec<Message>,
+    #[serde(default)]
+    pub todo_items: Vec<TodoItem>,
 }
 
 #[derive(Debug, Clone)]
@@ -79,6 +81,7 @@ pub fn save(id: &str, title: &str, cwd: &Path, session: &Session) -> Result<()> 
         created_at,
         updated_at: now,
         messages: session.messages.clone(),
+        todo_items: session.todo_items.clone(),
     };
     let raw = serde_json::to_string_pretty(&stored)?;
     std::fs::write(&path, raw).with_context(|| format!("write {}", path.display()))?;
@@ -120,6 +123,7 @@ pub fn fork(source_id: &str, cwd: &Path, title: Option<&str>) -> Result<StoredSe
         created_at: now,
         updated_at: now,
         messages: source.messages,
+        todo_items: source.todo_items,
     };
     write_stored(&forked)?;
     Ok(forked)

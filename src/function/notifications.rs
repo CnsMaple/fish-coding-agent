@@ -163,11 +163,6 @@ pub struct HitRate {
     cap: usize,
 }
 
-#[derive(Debug, Default)]
-pub struct TokenRate {
-    current: Option<f64>,
-}
-
 impl HitRate {
     pub fn new(cap: usize) -> Self {
         Self {
@@ -196,17 +191,53 @@ impl HitRate {
     }
 }
 
+/// Token rate tracker with a sliding window.
+/// Stores the rate (tokens/second) of each completed response.
+/// Exposes both the latest rate and the average across recent responses.
+#[derive(Debug)]
+pub struct TokenRate {
+    window: VecDeque<f64>,
+    cap: usize,
+    current: Option<f64>,
+}
+
+impl Default for TokenRate {
+    fn default() -> Self {
+        Self {
+            window: VecDeque::new(),
+            cap: 50,
+            current: None,
+        }
+    }
+}
+
 impl TokenRate {
-    pub fn new(_cap: usize) -> Self {
-        Self::default()
+    pub fn new(cap: usize) -> Self {
+        Self {
+            window: VecDeque::with_capacity(cap),
+            cap,
+            current: None,
+        }
     }
 
     pub fn record(&mut self, val: f64) {
         self.current = Some(val);
+        if self.window.len() == self.cap {
+            self.window.pop_front();
+        }
+        self.window.push_back(val);
     }
 
     pub fn current(&self) -> Option<f64> {
         self.current
+    }
+
+    pub fn average(&self) -> Option<f64> {
+        if self.window.is_empty() {
+            return None;
+        }
+        let sum: f64 = self.window.iter().sum();
+        Some(sum / self.window.len() as f64)
     }
 }
 

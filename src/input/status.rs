@@ -4,8 +4,6 @@ use crate::theme::Theme;
 use ratatui::text::{Line, Span};
 use std::path::Path;
 
-const DEFAULT_CONTEXT_WINDOW_TOKENS: u64 = 128_000;
-
 #[derive(Debug)]
 pub struct StatusBar {
     pub cwd: String,
@@ -19,6 +17,7 @@ pub struct StatusBar {
     pub hit_cur: Option<f64>,
     pub hit_avg: Option<f64>,
     pub tok_cur: Option<f64>,
+    pub tok_avg: Option<f64>,
     pub token_total: Option<u64>,
     pub token_pct: Option<f64>,
     pub context_window_tokens: u64,
@@ -36,10 +35,11 @@ impl StatusBar {
             hit_cur: None,
             hit_avg: None,
             tok_cur: None,
+            tok_avg: None,
             token_total: None,
             token_pct: None,
-            context_window_tokens: DEFAULT_CONTEXT_WINDOW_TOKENS,
-            context_window_known: true,
+            context_window_tokens: 0,
+            context_window_known: false,
         }
     }
 
@@ -65,11 +65,6 @@ impl StatusBar {
 
     pub fn set_model(&mut self, m: &str) {
         self.model = strip_stale_context_label(m).to_string();
-        self.context_window_tokens = infer_context_window_tokens(m);
-        self.context_window_known = true;
-        if let Some(total) = self.token_total {
-            self.token_pct = Some(total as f64 / self.context_window_tokens as f64);
-        }
     }
 
     pub fn set_context_window_tokens(&mut self, tokens: u64) {
@@ -99,11 +94,12 @@ impl StatusBar {
 
     pub fn update_token_rate(&mut self, t: &TokenRate) {
         self.tok_cur = t.current();
+        self.tok_avg = t.average();
     }
 
     pub fn update_token_usage(&mut self, total: u64) {
         self.token_total = Some(total);
-        self.token_pct = if self.context_window_known {
+        self.token_pct = if self.context_window_known && self.context_window_tokens > 0 {
             Some(total as f64 / self.context_window_tokens as f64)
         } else {
             None
@@ -131,7 +127,7 @@ impl StatusBar {
         };
         let fmt_total = |v: Option<u64>| match v {
             None => "--".to_string(),
-            Some(x) => fmt_tokens(x),
+            Some(x) => fmt_tokens_k(x),
         };
         let mut spans: Vec<Span<'static>> = Vec::new();
         spans.push(Span::styled(mode.to_string(), Theme::bold()));
@@ -150,6 +146,11 @@ impl StatusBar {
         }
         spans.push(Span::raw(" | tok:"));
         spans.push(Span::styled(fmt_tps(self.tok_cur), Theme::base()));
+        if let Some(avg) = self.tok_avg {
+            spans.push(Span::raw(" (avg "));
+            spans.push(Span::styled(format!("{:.1}/s", avg), Theme::dim()));
+            spans.push(Span::raw(")"));
+        }
         spans.push(Span::raw(" | ctx:"));
         if self.context_window_known {
             spans.push(Span::styled(fmt_pct(self.token_pct), Theme::base()));
@@ -157,7 +158,7 @@ impl StatusBar {
             spans.push(Span::styled(fmt_total(self.token_total), Theme::dim()));
             spans.push(Span::raw("/"));
             spans.push(Span::styled(
-                fmt_tokens(self.context_window_tokens),
+                fmt_tokens_k(self.context_window_tokens),
                 Theme::dim(),
             ));
         } else {
@@ -172,36 +173,26 @@ impl StatusBar {
 }
 
 fn strip_stale_context_label(model: &str) -> &str {
-    let trimmed = model.trim_end();
-    trimmed
-        .strip_suffix(" [200K]")
-        .or_else(|| trimmed.strip_suffix(" [200k]"))
-        .unwrap_or(trimmed)
-}
-
-fn infer_context_window_tokens(model: &str) -> u64 {
-    let model = model.to_lowercase();
-    if model.contains("minimax-m3") || model.contains("minimax:m3") || model == "m3" {
-        512_000
-    } else if model.contains("claude") {
-        200_000
-    } else if model.contains("gemini-1.5") || model.contains("gemini-2") {
-        1_000_000
-    } else if model.contains("gpt-4.1") || model.contains("gpt-4o") || model.contains("o3") {
-        128_000
-    } else {
-        DEFAULT_CONTEXT_WINDOW_TOKENS
-    }
-}
-
-fn fmt_tokens(tokens: u64) -> String {
-    if tokens >= 1_000_000 {
-        let v = tokens as f64 / 1_000_000.0;
-        if tokens % 1_000_000 == 0 {
-            format!("{:.0}m", v)
-        } else {
-            format!("{:.1}m", v)
+    // Providers like "OpenAI: GPT-4o" or "Anthropic: Claude 3.5 Sonnet"
+    // sometimes embed a stale " (128K)" context window label in the
+    // saved session. Strip it unconditionally — the live context window
+    // comes from the API response, not the model name.
+    if let Some(idx) = model.rfind(" (") {
+        let suffix = &model[idx + 2..];
+        if suffix.ends_with('K') || suffix.ends_with('M') {
+            let num_part = &suffix[..suffix.len() - 1];
+            if num_part.parse::<u64>().is_ok() {
+                return &model[..idx];
+            }
         }
+    }
+    model
+}
+
+fn fmt_tokens_k(tokens: u64) -> String {
+    if tokens >= 1_000_000 {
+        let v = tokens as f64 / 1_000.0;
+        format!("{:.0}k", v)
     } else if tokens >= 1_000 {
         let v = tokens as f64 / 1_000.0;
         if tokens % 1_000 == 0 {
@@ -209,7 +200,9 @@ fn fmt_tokens(tokens: u64) -> String {
         } else {
             format!("{:.1}k", v)
         }
+    } else if tokens > 0 {
+        format!("{}k", 1)
     } else {
-        tokens.to_string()
+        "0k".to_string()
     }
 }

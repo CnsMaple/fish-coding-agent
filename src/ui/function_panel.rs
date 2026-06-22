@@ -232,7 +232,7 @@ fn render_notifications(area: Rect, buf: &mut Buffer, app: &App) {
     }
 
     let hint = Line::from(Span::styled(
-        " Up/Down: nav | type: filter | Backspace: edit | Esc: close ",
+        " Up/Down: nav | type: filter | Backspace: edit | Ctrl+E: edit | Esc: close ",
         Theme::dim(),
     ));
     Paragraph::new(hint).render(rows[2], buf);
@@ -487,17 +487,7 @@ fn render_settings(
                 let focused = form.focused == *f;
                 let label = form.field_label(*f);
                 let value: Option<String> = match f {
-                    ConfigField::Name => {
-                        if form.name.is_empty() {
-                            Some(
-                                crate::config::parse_id(&form.id)
-                                    .map(|(k, _)| k.as_str().to_string())
-                                    .unwrap_or_default(),
-                            )
-                        } else {
-                            Some(form.name.clone())
-                        }
-                    }
+                    ConfigField::Name => Some(form.name.clone()),
                     ConfigField::BaseUrl => Some(form.base_url.clone()),
                     ConfigField::KeyOrEnv => {
                         let is_oauth = crate::config::parse_id(&form.id)
@@ -647,7 +637,7 @@ fn render_picker(
 
     // --- hint row -------------------------------------------------------
     let hint = Line::from(Span::styled(
-        " Enter: select | Ctrl+R: refresh | Ctrl+M: manual | Esc: close ",
+        " Enter: select | Ctrl+R: refresh | Ctrl+M: manual | Ctrl+E: edit | Esc: close ",
         Theme::dim(),
     ));
     Paragraph::new(hint).render(rows[2], buf);
@@ -719,7 +709,7 @@ fn render_provider_picker(
 
     // --- hint row -------------------------------------------------------
     let hint = Line::from(Span::styled(
-        " Enter: pick | Up/Down: nav | type to filter | Esc: close ",
+        " Enter: pick | Up/Down: nav | type to filter | Ctrl+E: edit | Esc: close ",
         Theme::dim(),
     ));
     Paragraph::new(hint).render(rows[2], buf);
@@ -877,7 +867,7 @@ fn render_timeline_picker(
 
     // --- hint ---
     let hint = Line::from(Span::styled(
-        " Enter: jump to message | Up/Down: nav | Esc: close ",
+        " Enter: jump to message | Up/Down: nav | Ctrl+E: edit | Esc: close ",
         Theme::dim(),
     ));
     Paragraph::new(hint).render(rows[2], buf);
@@ -947,7 +937,7 @@ fn render_session_picker(
     }
 
     let hint_text =
-        " Enter: resume | R: rename | D: delete | F: fork | Tab: local/global | Esc: close ";
+        " Enter: resume | R: rename | D: delete | F: fork | Tab: local/global | Ctrl+E: edit | Esc: close ";
     let hint = Line::from(vec![
         Span::styled(format!(" [{}] ", s.scope.label()), Theme::bold()),
         Span::styled(hint_text, Theme::dim()),
@@ -978,7 +968,7 @@ fn render_session_rename(
     ]);
     buf.set_line(rows[0].x, rows[0].y, &line, rows[0].width);
     let cursor_x = rows[0].x + 8 + s.cursor.min(s.title.len()) as u16;
-    let hint = Line::from(Span::styled(" Enter: save | Esc: close ", Theme::dim()));
+    let hint = Line::from(Span::styled(" Enter: save | Ctrl+E: edit | Esc: close ", Theme::dim()));
     Paragraph::new(hint).render(rows[1], buf);
     Some((cursor_x.min(rows[0].right().saturating_sub(1)), rows[0].y))
 }
@@ -1026,9 +1016,9 @@ fn render_ask(area: Rect, buf: &mut Buffer, s: &crate::function::AskState) -> Op
         .wrap(Wrap { trim: false })
         .render(rows[0], buf);
     let hint = if s.options.is_empty() {
-        " Enter: submit | Backspace: delete | Esc: close "
+        " Enter: submit | Left/Right: move cursor | Backspace: delete | Ctrl+E: edit | Esc: close "
     } else {
-        " Enter: answer | Up/Down: nav | Esc: close "
+        " Enter: answer | Up/Down: nav | Ctrl+E: edit | Esc: close "
     };
     Paragraph::new(Line::from(Span::styled(hint, Theme::dim()))).render(rows[1], buf);
 
@@ -1067,6 +1057,11 @@ fn render_todo(area: Rect, buf: &mut Buffer, s: &crate::function::TodoState) -> 
                 _ => "[ ]",
             };
             let prefix = if i == s.cursor { "> " } else { "  " };
+            let display_content = if Some(i) == s.editing {
+                format!("{}█", s.edit_buffer)
+            } else {
+                item.content.clone()
+            };
             lines.push(Line::from(vec![
                 Span::styled(
                     prefix,
@@ -1077,15 +1072,20 @@ fn render_todo(area: Rect, buf: &mut Buffer, s: &crate::function::TodoState) -> 
                     },
                 ),
                 Span::styled(format!("{mark} "), Theme::dim()),
-                Span::raw(item.content.clone()),
+                Span::raw(display_content),
             ]));
         }
     }
     Paragraph::new(lines)
         .wrap(Wrap { trim: false })
         .render(rows[0], buf);
+    let help = if s.editing.is_some() {
+        " Enter: confirm | Esc: cancel "
+    } else {
+        " Up/Down: nav | Enter: cycle | Ctrl+D: below | Ctrl+U: above | Del: delete | Ctrl+E: edit | Esc: close "
+    };
     Paragraph::new(Line::from(Span::styled(
-        " Up/Down: nav | Esc: close ",
+        help,
         Theme::dim(),
     )))
     .render(rows[1], buf);
@@ -1125,7 +1125,7 @@ fn render_plan(area: Rect, buf: &mut Buffer, s: &crate::function::PlanState) -> 
         .wrap(Wrap { trim: false })
         .render(rows[1], buf);
     Paragraph::new(Line::from(Span::styled(
-        " Enter: approve | R: reject | Esc: close ",
+        " Enter: approve | R: reject | Ctrl+E: edit | Esc: close ",
         Theme::dim(),
     )))
     .render(rows[2], buf);

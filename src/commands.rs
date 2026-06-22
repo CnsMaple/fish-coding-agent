@@ -717,6 +717,11 @@ pub fn send_message(app: &mut App, user_msg: Message) {
                 });
 
                 let _ = tx.send(crate::event::AppMsg::ChatTimerPause);
+                // If any tool was "ask" or "plan", stop auto-continue and wait for user input
+                let has_interaction_tool = tool_calls.iter().any(|c| c.name == "ask" || c.name == "plan");
+                if has_interaction_tool {
+                    return;
+                }
                 for call in tool_calls {
                     let result =
                         crate::tools::execute_tool(&call.name, &call.arguments, &cwd).await;
