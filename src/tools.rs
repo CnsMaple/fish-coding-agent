@@ -160,10 +160,14 @@ fn tool_defs() -> Vec<ToolDef> {
             schema: json!({
                 "type": "object",
                 "properties": {
-                    "title": { "type": "string" },
-                    "content": { "type": "string" },
-                    "steps": { "type": "array", "items": { "type": "string" } }
-                }
+                    "title": { "type": "string", "description": "Short plan title. Defaults to 'Plan'." },
+                    "content": { "type": "string", "description": "Full plan text. Use this OR steps, not both empty." },
+                    "steps": { "type": "array", "items": { "type": "string" }, "description": "Optional list of step strings, rendered as a numbered list. Used when content is empty." }
+                },
+                "anyOf": [
+                    { "required": ["content"] },
+                    { "required": ["steps"] }
+                ]
             }),
         },
     ]
@@ -369,7 +373,13 @@ async fn ask_user(args: &str) -> Result<String> {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    Ok(json!({ "kind": "ask", "question": question, "options": options, "status": "pending_user_answer", "instruction": "Wait for the user answer shown in the function panel before assuming a choice." }).to_string())
+    Ok(json!({
+        "kind": "ask",
+        "question": question,
+        "options": options,
+        "status": "pending",
+        "instruction": "Do not call this tool again. The question is now shown to the user in the function panel. Stop and wait for the user to pick an option or type a free-form answer. The user will submit their answer and the conversation will resume automatically -- you will be re-prompted with the user's response."
+    }).to_string())
 }
 
 async fn todo_items(args: &str) -> Result<String> {
@@ -409,7 +419,13 @@ async fn plan_review(args: &str) -> Result<String> {
     if content.trim().is_empty() {
         return Err(anyhow!("plan content is empty"));
     }
-    Ok(json!({ "kind": "plan", "title": title, "content": content, "status": "pending_user_confirmation", "instruction": "Stop and wait for user approval before executing this plan." }).to_string())
+    Ok(json!({
+        "kind": "plan",
+        "title": title,
+        "content": content,
+        "status": "pending",
+        "instruction": "Do not call this tool again. The plan is now shown to the user in the function panel. Stop and wait for the user to approve, reject, or request changes. The user will submit their decision and the conversation will resume automatically -- you will be re-prompted with the user's response."
+    }).to_string())
 }
 
 async fn run_command(args: &str, cwd: &Path) -> Result<String> {

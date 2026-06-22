@@ -19,7 +19,6 @@ pub struct StatusBar {
     pub hit_cur: Option<f64>,
     pub hit_avg: Option<f64>,
     pub tok_cur: Option<f64>,
-    pub tok_avg: Option<f64>,
     pub token_total: Option<u64>,
     pub token_pct: Option<f64>,
     pub context_window_tokens: u64,
@@ -37,7 +36,6 @@ impl StatusBar {
             hit_cur: None,
             hit_avg: None,
             tok_cur: None,
-            tok_avg: None,
             token_total: None,
             token_pct: None,
             context_window_tokens: DEFAULT_CONTEXT_WINDOW_TOKENS,
@@ -101,7 +99,6 @@ impl StatusBar {
 
     pub fn update_token_rate(&mut self, t: &TokenRate) {
         self.tok_cur = t.current();
-        self.tok_avg = t.average();
     }
 
     pub fn update_token_usage(&mut self, total: u64) {
@@ -153,8 +150,6 @@ impl StatusBar {
         }
         spans.push(Span::raw(" | tok:"));
         spans.push(Span::styled(fmt_tps(self.tok_cur), Theme::base()));
-        spans.push(Span::raw("/avg "));
-        spans.push(Span::styled(fmt_tps(self.tok_avg), Theme::dim()));
         spans.push(Span::raw(" | ctx:"));
         if self.context_window_known {
             spans.push(Span::styled(fmt_pct(self.token_pct), Theme::base()));

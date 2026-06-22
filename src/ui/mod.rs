@@ -19,7 +19,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     // Layout: [session, (function panel)?, input, cwd]. The cwd is shown
     // as a separate line below the input — the user no longer wants the
     // project path on the input block's title.
-    let input_height = input_height(app, area.height);
+    let input_height = input_height(app, area.height, area.width);
     let chunks = if app.function_visible {
         Layout::default()
             .direction(Direction::Vertical)
@@ -187,11 +187,22 @@ pub fn render(f: &mut Frame, app: &mut App) {
     }
 }
 
-fn input_height(app: &App, viewport_height: u16) -> u16 {
-    let lines = app.input.buffer.split('\n').count().max(1) as u16;
+fn input_height(app: &App, viewport_height: u16, terminal_width: u16) -> u16 {
+    // Count visual lines accounting for wrapping: each \n segment wraps
+    // when prompt (2) + text exceeds inner width (terminal_width - 2 borders).
+    let inner_w = terminal_width.saturating_sub(2).max(1) as usize;
+    let prompt_w = 3usize;
+    let mut visual_lines = 0u16;
+    for seg in app.input.buffer.split('\n') {
+        let tw = unicode_width::UnicodeWidthStr::width(seg);
+        let total = prompt_w + tw;
+        let seg_lines = if total <= inner_w { 1 } else { (total + inner_w - 1) / inner_w };
+        visual_lines += seg_lines as u16;
+    }
+    visual_lines = visual_lines.max(1);
     let max_body = ((viewport_height as f32) * 0.40).floor() as u16;
     let max_body = max_body.max(1).saturating_sub(2).max(1);
-    lines.min(max_body) + 2
+    visual_lines.min(max_body) + 2
 }
 
 fn session_content_area(area: Rect) -> Rect {

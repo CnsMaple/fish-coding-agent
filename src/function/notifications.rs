@@ -163,10 +163,9 @@ pub struct HitRate {
     cap: usize,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct TokenRate {
-    window: Vec<f64>,
-    cap: usize,
+    current: Option<f64>,
 }
 
 impl HitRate {
@@ -198,30 +197,16 @@ impl HitRate {
 }
 
 impl TokenRate {
-    pub fn new(cap: usize) -> Self {
-        Self {
-            window: Vec::with_capacity(cap),
-            cap,
-        }
+    pub fn new(_cap: usize) -> Self {
+        Self::default()
     }
 
-    pub fn record(&mut self, tokens_per_second: f64) {
-        if self.window.len() == self.cap {
-            self.window.remove(0);
-        }
-        self.window.push(tokens_per_second);
+    pub fn record(&mut self, val: f64) {
+        self.current = Some(val);
     }
 
     pub fn current(&self) -> Option<f64> {
-        self.window.last().copied()
-    }
-
-    pub fn average(&self) -> Option<f64> {
-        if self.window.is_empty() {
-            return None;
-        }
-        let sum: f64 = self.window.iter().sum();
-        Some(sum / self.window.len() as f64)
+        self.current
     }
 }
 

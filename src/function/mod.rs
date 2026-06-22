@@ -876,6 +876,8 @@ pub struct AskState {
     pub options: Vec<String>,
     pub cursor: usize,
     pub answered: Option<String>,
+    pub input: String,
+    pub input_cursor: usize,
 }
 
 impl AskState {
@@ -885,6 +887,8 @@ impl AskState {
             options,
             cursor: 0,
             answered: None,
+            input: String::new(),
+            input_cursor: 0,
         }
     }
 }
@@ -1007,6 +1011,7 @@ pub struct App {
     pub hit_rate: HitRate,
     pub token_rate: TokenRate,
     pub response_started_at: Option<Instant>,
+    pub response_accumulated: std::time::Duration,
     pub response_output_chars: usize,
     pub response_output_tokens: Option<u64>,
 
@@ -1139,6 +1144,7 @@ impl App {
             hit_rate: HitRate::new(50),
             token_rate: TokenRate::new(50),
             response_started_at: None,
+            response_accumulated: std::time::Duration::ZERO,
             response_output_chars: 0,
             response_output_tokens: None,
             reqwest: reqwest::Client::builder()

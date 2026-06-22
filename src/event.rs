@@ -75,6 +75,10 @@ pub enum AppMsg {
         refresh_token: String,
     },
     CursorAuthFailed(String),
+    /// Pause the model-output timer (during tool calls).
+    ChatTimerPause,
+    /// Resume the model-output timer (after tool calls).
+    ChatTimerResume,
 }
 
 pub struct EventChannels {
@@ -174,7 +178,10 @@ fn finish_model_output_rate(app: &mut App) {
         app.response_output_tokens = None;
         return;
     };
-    let elapsed = started_at.elapsed().as_secs_f64();
+    let elapsed_self = started_at.elapsed();
+    let total_elapsed = app.response_accumulated + elapsed_self;
+    app.response_accumulated = std::time::Duration::ZERO;
+    let elapsed = total_elapsed.as_secs_f64();
     if elapsed <= 0.0 {
         app.response_output_chars = 0;
         app.response_output_tokens = None;
@@ -448,6 +455,15 @@ fn handle_msg(msg: AppMsg, app: &mut App) {
             use crate::function::notifications::ToastLevel;
             app.notify(ToastLevel::Fail, format!("Cursor OAuth: {e}"));
         }
+        AppMsg::ChatTimerPause => {
+            if let Some(started_at) = &app.response_started_at {
+                app.response_accumulated += started_at.elapsed();
+                app.response_started_at = None;
+            }
+        }
+        AppMsg::ChatTimerResume => {
+            app.response_started_at = Some(std::time::Instant::now());
+        }
     }
 }
 
@@ -533,7 +549,7 @@ async fn handle_key(k: crossterm::event::KeyEvent, app: &mut App) {
     }
 
     // If a sidebar tab is open, give it a chance to handle the key first.
-    if dispatch_to_active_tab(k, app) {
+    if dispatch_to_active_tab(k, app).await {
         return;
     }
 
@@ -1178,7 +1194,7 @@ fn enter_action(behavior: crate::config::EnterBehavior, shift: bool) -> EnterAct
 ///    pressed Enter).
 ///
 /// Returns `true` if the handler consumed the key.
-fn dispatch_to_active_tab(k: crossterm::event::KeyEvent, app: &mut App) -> bool {
+async fn dispatch_to_active_tab(k: crossterm::event::KeyEvent, app: &mut App) -> bool {
     let active = app.function.active;
     if active >= app.function.tabs.len() {
         return false;
@@ -1202,9 +1218,9 @@ fn dispatch_to_active_tab(k: crossterm::event::KeyEvent, app: &mut App) -> bool 
         crate::function::SidebarTab::SessionRename(state) => {
             handle_session_rename_key(k, app, state)
         }
-        crate::function::SidebarTab::Ask(state) => handle_ask_key(k, app, state),
+        crate::function::SidebarTab::Ask(state) => handle_ask_key(k, app, state).await,
         crate::function::SidebarTab::Todo(state) => handle_todo_key(k, app, state),
-        crate::function::SidebarTab::Plan(state) => handle_plan_key(k, app, state),
+        crate::function::SidebarTab::Plan(state) => handle_plan_key(k, app, state).await,
         _ => false,
     };
     if active < app.function.tabs.len()
@@ -1268,35 +1284,100 @@ fn handle_notifications_key(k: crossterm::event::KeyEvent, app: &mut App) -> boo
     }
 }
 
-fn handle_ask_key(
+async fn handle_ask_key(
     k: crossterm::event::KeyEvent,
     app: &mut App,
     state: &mut crate::function::AskState,
 ) -> bool {
     use crossterm::event::KeyCode;
+
+    // When options are present, the picker owns Enter: pick the
+    // highlighted option. When there are no options, the free-form
+    // input buffer owns Enter: submit whatever the user typed.
+    let freeform_mode = state.options.is_empty();
+
     match k.code {
         KeyCode::Up => {
+            if freeform_mode {
+                // In free-form mode, Up/Down move the input cursor
+                // (the picker is hidden so cursor is unused, but
+                // we keep the gesture consistent).
+                return true;
+            }
             state.cursor = state.cursor.saturating_sub(1);
             true
         }
         KeyCode::Down => {
+            if freeform_mode {
+                return true;
+            }
             if !state.options.is_empty() {
                 state.cursor = (state.cursor + 1).min(state.options.len().saturating_sub(1));
             }
             true
         }
-        KeyCode::Enter => {
-            if let Some(answer) = state.options.get(state.cursor).cloned() {
-                state.answered = Some(answer.clone());
-                app.session.push(crate::session::Message::new(
-                    crate::session::Role::User,
-                    format!("Answer: {answer}"),
-                ));
-                app.notify(
-                    crate::function::notifications::ToastLevel::Ok,
-                    "answer recorded",
-                );
+        KeyCode::Char(c) => {
+            if freeform_mode
+                && (k.modifiers.is_empty()
+                    || k.modifiers == crossterm::event::KeyModifiers::SHIFT)
+            {
+                state.input.insert(state.input_cursor, c);
+                state.input_cursor += c.len_utf8();
+                true
+            } else {
+                false
             }
+        }
+        KeyCode::Backspace => {
+            if freeform_mode && state.input_cursor > 0 {
+                // Find the previous char boundary and remove the
+                // char that ends at input_cursor.
+                let prev = state.input[..state.input_cursor]
+                    .char_indices()
+                    .next_back()
+                    .map(|(i, _)| i)
+                    .unwrap_or(0);
+                state.input.replace_range(prev..state.input_cursor, "");
+                state.input_cursor = prev;
+                true
+            } else {
+                false
+            }
+        }
+        KeyCode::Enter => {
+            let answer = if freeform_mode {
+                let trimmed = state.input.trim().to_string();
+                if trimmed.is_empty() {
+                    app.notify(
+                        crate::function::notifications::ToastLevel::Warn,
+                        "type an answer or press Esc to dismiss",
+                    );
+                    return true;
+                }
+                trimmed
+            } else {
+                match state.options.get(state.cursor).cloned() {
+                    Some(a) => a,
+                    None => return true,
+                }
+            };
+            state.answered = Some(answer.clone());
+            let prompt = format!("Answer: {answer}");
+            app.session.push(crate::session::Message::new(
+                crate::session::Role::User,
+                prompt.clone(),
+            ));
+            // Close the tab BEFORE dispatching the follow-up chat so
+            // the user sees a clean panel when the new response
+            // starts streaming. The "Answer: …" message is now part
+            // of the conversation history and will be sent to the
+            // model by send_chat.
+            close_active_function_tab(app);
+            app.notify(
+                crate::function::notifications::ToastLevel::Ok,
+                "answer recorded",
+            );
+            crate::commands::send_chat(app, prompt);
             true
         }
         KeyCode::Esc => {
@@ -1328,7 +1409,7 @@ fn handle_todo_key(
     }
 }
 
-fn handle_plan_key(
+async fn handle_plan_key(
     k: crossterm::event::KeyEvent,
     app: &mut App,
     state: &mut crate::function::PlanState,
@@ -1337,26 +1418,33 @@ fn handle_plan_key(
     match k.code {
         KeyCode::Enter => {
             state.approved = Some(true);
+            let prompt = "Plan approved. Please proceed.".to_string();
             app.session.push(crate::session::Message::new(
                 crate::session::Role::User,
-                "Plan approved.",
+                prompt.clone(),
             ));
+            close_active_function_tab(app);
             app.notify(
                 crate::function::notifications::ToastLevel::Ok,
                 "plan approved",
             );
+            crate::commands::send_chat(app, prompt);
             true
         }
         KeyCode::Char('r') | KeyCode::Char('R') => {
             state.approved = Some(false);
+            let prompt = "Plan rejected. Please revise or ask a follow-up question."
+                .to_string();
             app.session.push(crate::session::Message::new(
                 crate::session::Role::User,
-                "Plan rejected.",
+                prompt.clone(),
             ));
+            close_active_function_tab(app);
             app.notify(
                 crate::function::notifications::ToastLevel::Warn,
                 "plan rejected",
             );
+            crate::commands::send_chat(app, prompt);
             true
         }
         KeyCode::Esc => {
@@ -2889,8 +2977,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn dispatch_provider_picker_enter_replaces_with_model_picker() {
+    #[tokio::test]
+    async fn dispatch_provider_picker_enter_replaces_with_model_picker() {
         // The user-reported bug: pressing Enter in the provider picker
         // did nothing. Root cause: the per-tab handler removed the
         // ProviderPicker and pushed a new ModelPicker, but the
@@ -2919,7 +3007,7 @@ mod tests {
 
         // Simulate Enter through the dispatcher.
         let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
-        let consumed = dispatch_to_active_tab(key, &mut app);
+        let consumed = dispatch_to_active_tab(key, &mut app).await;
         assert!(consumed, "Enter must be consumed by the picker");
 
         // After Enter: ModelPicker is pushed on top of the
@@ -2941,8 +3029,8 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn dispatch_model_picker_esc_returns_to_provider_picker() {
+    #[tokio::test]
+    async fn dispatch_model_picker_esc_returns_to_provider_picker() {
         // The user reported that Esc on the ModelPicker did not
         // navigate back to the ProviderPicker. The fix is to push
         // (not replace) the ModelPicker so the ProviderPicker stays in
@@ -2955,7 +3043,7 @@ mod tests {
         crate::commands::open_model_picker(&mut app);
         // Pick the first provider to push a ModelPicker.
         let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
-        dispatch_to_active_tab(key, &mut app);
+        dispatch_to_active_tab(key, &mut app).await;
         assert!(matches!(
             app.function.tabs[app.function.active],
             SidebarTab::ModelPicker(_)
@@ -3037,8 +3125,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn dispatch_settings_esc_at_toplevel_with_other_tab_does_not_resurrect_settings() {
+    #[tokio::test]
+    async fn dispatch_settings_esc_at_toplevel_with_other_tab_does_not_resurrect_settings() {
         // The same dispatcher bug also affected Settings: pressing Esc
         // at TopLevel removed the Settings tab, but the dispatcher put
         // it back when there were other tabs after it. Fixing the
@@ -3061,7 +3149,7 @@ mod tests {
 
         // Simulate Esc through the dispatcher.
         let key = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
-        let consumed = dispatch_to_active_tab(key, &mut app);
+        let consumed = dispatch_to_active_tab(key, &mut app).await;
         assert!(consumed, "Esc at TopLevel must be consumed");
 
         // After Esc: Settings tab is gone; Notifications tab remains.

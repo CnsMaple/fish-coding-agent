@@ -326,7 +326,15 @@ impl Provider for CursorProvider {
                 break;
             };
             let chunk = chunk
-                .map_err(|e| ProviderError::Other(format!("Cursor response body decode: {e}")))?;
+                .map_err(|e| {
+                    let preview = if pending.len() > 5 {
+                        let len = u32::from_be_bytes([pending[1], pending[2], pending[3], pending[4]]) as usize;
+                        format!(" pending_frame_len={} pending_bytes={}", len, pending.len())
+                    } else {
+                        String::new()
+                    };
+                    ProviderError::Other(format!("Cursor response body decode: {e}{preview}"))
+                })?;
             pending.extend_from_slice(&chunk);
             while pending.len() >= 5 {
                 let flags = pending[0];
@@ -391,7 +399,6 @@ fn finish_cursor_stream(
 
 fn cursor_http2_client() -> Result<reqwest::Client, ProviderError> {
     reqwest::Client::builder()
-        .http2_prior_knowledge()
         .no_gzip()
         .no_brotli()
         .no_deflate()

@@ -995,10 +995,14 @@ fn render_ask(area: Rect, buf: &mut Buffer, s: &crate::function::AskState) -> Op
     ]));
     lines.push(Line::from(""));
     if s.options.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "  [type an answer in chat or Esc to close]",
-            Theme::dim(),
-        )));
+        // Free-form mode: the user types into `s.input` directly in
+        // this panel (no options to pick). Show a one-line input
+        // box and return its cursor so the OS-level IME / cursor
+        // placement still works.
+        lines.push(Line::from(vec![
+            Span::styled("> ", Theme::bold()),
+            Span::raw(s.input.clone()),
+        ]));
     } else {
         for (i, opt) in s.options.iter().enumerate() {
             if i == s.cursor {
@@ -1021,11 +1025,29 @@ fn render_ask(area: Rect, buf: &mut Buffer, s: &crate::function::AskState) -> Op
     Paragraph::new(lines)
         .wrap(Wrap { trim: false })
         .render(rows[0], buf);
-    Paragraph::new(Line::from(Span::styled(
-        " Enter: answer | Up/Down: nav | Esc: close ",
-        Theme::dim(),
-    )))
-    .render(rows[1], buf);
+    let hint = if s.options.is_empty() {
+        " Enter: submit | Backspace: delete | Esc: close "
+    } else {
+        " Enter: answer | Up/Down: nav | Esc: close "
+    };
+    Paragraph::new(Line::from(Span::styled(hint, Theme::dim()))).render(rows[1], buf);
+
+    // For free-form mode, expose the text cursor so position_ime_cursor
+    // can place the hardware cursor on top of the input. The visible
+    // "> " prefix is 2 cells wide, and we add a small left margin of
+    // 1 cell so the cursor lines up with the first character of input.
+    if s.options.is_empty() {
+        // Find the y coordinate of the input line — it is the
+        // third Line we pushed (index 2: question, blank, input).
+        let y = rows[0].y + 2;
+        // Convert input_cursor (byte offset) to a display column.
+        let prefix_cols: u16 = 2; // "> "
+        let cursor_col = s.input[..s.input_cursor.min(s.input.len())]
+            .chars()
+            .count() as u16;
+        let x = (rows[0].x + prefix_cols + cursor_col).min(rows[0].right().saturating_sub(1));
+        return Some((x, y));
+    }
     None
 }
 

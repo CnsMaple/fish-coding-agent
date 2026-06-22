@@ -84,7 +84,14 @@ impl Provider for AnthropicProvider {
             body["thinking"] = serde_json::Value::Object(thinking);
         }
 
-        let resp = client
+let body_bytes: Vec<u8> = {
+    let mut last_err = String::new();
+    let mut body_result: Option<Vec<u8>> = None;
+    for attempt in 0..3 {
+        if attempt > 0 {
+            let _ = tx.send(ChatEvent::Debug(format!("retry {attempt}/3 after: {last_err}")));
+        }
+        let resp = match client
             .post(&url)
             .header("x-api-key", api_key)
             .header("anthropic-version", "2023-06-01")
@@ -92,21 +99,35 @@ impl Provider for AnthropicProvider {
             .json(&body)
             .send()
             .await
-            .map_err(ProviderError::Http)?;
-        let status = resp.status();
-        if !status.is_success() {
+        {
+            Ok(r) => r,
+            Err(e) => { last_err = format!("{e}"); continue; }
+        };
+        let resp_status = resp.status();
+        let resp_ct = resp.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+        let resp_cl = resp.headers().get("content-length").and_then(|v| v.to_str().ok()).unwrap_or("?").to_string();
+        if !resp_status.is_success() {
             let text = resp.text().await.unwrap_or_default();
-            return Err(ProviderError::Other(format!("status {}: {}", status, text)).into());
+            last_err = format!("status {} ct={} cl={} body={}", resp_status, resp_ct, resp_cl, text);
+            continue;
         }
-
-        let mut stream = resp.bytes_stream();
-        let mut buf: Vec<u8> = Vec::new();
-        let mut final_usage: Option<Usage> = None;
-        let mut tool_calls: Vec<ToolCall> = Vec::new();
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(ProviderError::Http)?;
-            buf.extend_from_slice(&chunk);
-            while let Some(pos) = find_sse_boundary(&buf) {
+        match resp.bytes().await {
+            Ok(b) => { body_result = Some(b.to_vec()); break; }
+            Err(e) => { last_err = format!("bytes fail status={} ct={} cl={}: {}", resp_status, resp_ct, resp_cl, e); continue; }
+        }
+    }
+    match body_result {
+        Some(b) => b,
+        None => return Err(ProviderError::Other(format!("request failed after 3 retries: {last_err}")).into()),
+    }
+};
+let mut buf = body_bytes;
+if buf.is_empty() {
+    let _ = tx.send(ChatEvent::Debug("empty response body from server".to_string()));
+}
+let mut final_usage: Option<Usage> = None;
+let mut tool_calls: Vec<ToolCall> = Vec::new();
+                    while let Some(pos) = find_sse_boundary(&buf) {
                 let raw: Vec<u8> = buf.drain(..pos + 1).collect();
                 if let Ok(text) = std::str::from_utf8(&raw) {
                     for line in text.lines() {
@@ -175,7 +196,6 @@ impl Provider for AnthropicProvider {
                     }
                 }
             }
-        }
         if let Some(u) = final_usage {
             let _ = tx.send(ChatEvent::Usage(u));
         }

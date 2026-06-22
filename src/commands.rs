@@ -246,6 +246,13 @@ fn continue_response(app: &mut App) {
         return;
     }
     crate::commands::send_chat(app, "Continue from where you left off.".to_string());
+    // Remove the user message from session (kept in API request)
+    if app.inflight.is_some() && app.session.messages.len() >= 2 {
+        let idx = app.session.messages.len() - 2;
+        if app.session.messages[idx].role == Role::User {
+            app.session.messages.remove(idx);
+        }
+    }
 }
 
 pub fn open_settings(app: &mut App) {
@@ -591,7 +598,8 @@ pub fn send_message(app: &mut App, user_msg: Message) {
         let cwd = app.cwd.clone();
         tokio::spawn(async move {
             let mut req = req;
-            for _ in 0..64 {
+            let mut stream_retries = 0u32;
+            loop {
                 if *cancel_rx.borrow() {
                     let _ = tx.send(crate::event::AppMsg::ChatDebug(
                         "user cancelled".to_string()
@@ -666,18 +674,26 @@ pub fn send_message(app: &mut App, user_msg: Message) {
                 }
 
                 if !stream_done {
-                    match call.await {
-                        Ok(Ok(())) => {}
-                        Ok(Err(e)) => {
-                            let _ = tx.send(crate::event::AppMsg::ChatError(format!("{e}")));
+                    let err = match call.await {
+                        Ok(Ok(())) => None,
+                        Ok(Err(e)) => Some(format!("{e}")),
+                        Err(e) => Some(format!("chat task failed: {e}")),
+                    };
+                    if let Some(e) = err {
+                        stream_retries += 1;
+                        if stream_retries >= 3 {
+                            let _ = tx.send(crate::event::AppMsg::ChatError(e));
                             return;
                         }
-                        Err(e) => {
-                            let _ = tx.send(crate::event::AppMsg::ChatError(format!(
-                                "chat task failed: {e}"
-                            )));
-                            return;
+                        let _ = tx.send(crate::event::AppMsg::ChatDebug(
+                            format!("stream retry {stream_retries}/3: {e}")
+                        ));
+                        // If an assistant message was pushed to req (we got tool calls),
+                        // pop it so the retry starts clean.
+                        if !tool_calls.is_empty() {
+                            req.messages.pop(); // assistant
                         }
+                        continue;
                     }
                 }
 
@@ -700,6 +716,7 @@ pub fn send_message(app: &mut App, user_msg: Message) {
                     tool_calls: tool_calls.clone(),
                 });
 
+                let _ = tx.send(crate::event::AppMsg::ChatTimerPause);
                 for call in tool_calls {
                     let result =
                         crate::tools::execute_tool(&call.name, &call.arguments, &cwd).await;
@@ -717,10 +734,9 @@ pub fn send_message(app: &mut App, user_msg: Message) {
                         content: display_text,
                     });
                 }
+                let _ = tx.send(crate::event::AppMsg::ChatTimerResume);
             }
-            let _ = tx.send(crate::event::AppMsg::ChatError(
-                "tool loop exceeded maximum iterations".to_string(),
-            ));
+            // unreachable
         });
     }
 }
