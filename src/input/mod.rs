@@ -583,6 +583,8 @@ pub fn completion_candidates_for(input: &str) -> Vec<String> {
     let trimmed = input.trim_start_matches('/').to_lowercase();
     if let Some((cmd, rest)) = trimmed.split_once(' ') {
         // Show sub-argument completions for known commands.
+        // Sub-args are short, fixed vocabularies (`off`/`low`/...)
+        // so we keep the exact prefix filter rather than fuzzy.
         let rest = rest.trim().to_lowercase();
         return match cmd {
             "think" | "thinking" => vec!["off", "low", "med", "high", "adaptive"]
@@ -598,12 +600,76 @@ pub fn completion_candidates_for(input: &str) -> Vec<String> {
             _ => vec![],
         };
     }
-    COMMAND_LIST
-        .iter()
-        .copied()
-        .filter(|c| c[1..].starts_with(trimmed.as_str()) || trimmed.is_empty())
-        .map(|s| s.to_string())
-        .collect()
+    // Top-level: fuzzy-match against static command names and the
+    // dynamic `/skill:<name>` / `/mcp:<name>` lists. The trimmed
+    // prefix may be:
+    //   - empty               -> list everything
+    //   - `skill` / `mcp`     -> list every `/skill:<n>` / `/mcp:<n>`
+    //   - `skill:foo` / `mcp:f` -> filter the dynamic list by `foo` / `f`
+    //   - anything else       -> fuzzy against the static command list
+    // We dedupe (a candidate may match both static and dynamic) and
+    // sort by fuzzy score then alphabetically so the best matches
+    // appear at the top of the picker.
+    let mut scored: Vec<(u32, String)> = Vec::new();
+    for cmd in COMMAND_LIST.iter().copied() {
+        let stem = &cmd[1..]; // strip leading '/'
+        if let Some(sc) = crate::fuzzy::score(&trimmed, stem) {
+            scored.push((sc, cmd.to_string()));
+        }
+    }
+    // Decide which dynamic list to query and with what arg.
+    let (skill_q, mcp_q) = match trimmed.split_once(':') {
+        Some(("skill", r)) => (r.trim().to_string(), None),
+        Some(("mcp", r)) => (String::new(), Some(r.trim().to_string())),
+        Some(_) => (String::new(), None),
+        None => match trimmed.as_str() {
+            // Bare `skill` / `mcp` -> list every entry.
+            "skill" => (String::new(), None),
+            "mcp" => (String::new(), Some(String::new())),
+            // Otherwise, only feed dynamic lists when the trimmed
+            // prefix is a prefix of the base name (`sk` -> skill,
+            // `m` -> mcp). This avoids spamming `/skill:<n>` for
+            // queries like `/think` that share no base name.
+            _ if trimmed.starts_with("sk") || trimmed.starts_with("skill") => {
+                (trimmed.clone(), None)
+            }
+            _ if trimmed.starts_with("mcp") => (String::new(), Some(trimmed.clone())),
+            _ => (String::new(), None),
+        },
+    };
+    for cand in crate::skill::completion_candidates(&skill_q) {
+        // Re-score so cross-source ranking stays consistent: a skill
+        // name that matches the query better than a static command
+        // must rank higher.
+        let stem = cand.trim_start_matches("/skill:").to_string();
+        let sc = crate::fuzzy::score(&trimmed, &stem).unwrap_or(u32::MAX);
+        push_unique(&mut scored, sc, cand);
+    }
+    if let Some(q) = mcp_q.as_deref() {
+        for cand in crate::mcp::completion_candidates(q) {
+            let stem = cand.trim_start_matches("/mcp:").to_string();
+            let sc = crate::fuzzy::score(&trimmed, &stem).unwrap_or(u32::MAX);
+            push_unique(&mut scored, sc, cand);
+        }
+    }
+    // Sort: best score first, alphabetical tiebreak so the picker is
+    // deterministic across renders.
+    scored.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    let mut out: Vec<String> = scored.into_iter().map(|(_, s)| s).collect();
+    // Cap the picker at a sane size so a very broad fuzzy match
+    // doesn't dump the entire skill library into the sidebar.
+    const MAX_CANDIDATES: usize = 50;
+    out.truncate(MAX_CANDIDATES);
+    out
+}
+
+/// Helper: push `(score, cand)` into `scored` only if no candidate
+/// with the same string is already there. Used by the top-level
+/// completion builder to dedupe across static + dynamic sources.
+fn push_unique(scored: &mut Vec<(u32, String)>, score: u32, cand: String) {
+    if !scored.iter().any(|(_, c)| *c == cand) {
+        scored.push((score, cand));
+    }
 }
 
 /// Backwards-compatible shim for places that still want borrowed candidates.

@@ -107,8 +107,116 @@ pub fn dispatch(app: &mut App, cmd: &str, arg: &str) {
             app.save_config();
             app.notify(ToastLevel::Ok, format!("provider switched to {id}"));
         }
+        "skill" => dispatch_skill(app, arg, ""),
+        "mcp" => open_mcp(app, arg),
         _ => {
             app.notify(ToastLevel::Fail, format!("unknown command: /{cmd}"));
+        }
+    }
+}
+/// Public entry used by `event::submit_input` for the colon form.
+pub fn dispatch_skill(app: &mut App, name: &str, args: &str) {
+    open_skill(app, name, args);
+}
+
+/// `/skill:<name> [args...]` - dispatch immediately. The skill's
+/// template body goes to the AI as the user prompt; the chat UI
+/// renders a clean `[skill]` block (name / args / context path) so
+/// the user sees what was invoked without scrolling through the
+/// raw template.
+
+fn open_skill(app: &mut App, name: &str, args: &str) {
+    let name = name.trim();
+    let args = args.trim();
+    if name.is_empty() {
+        let names = crate::skill::list_names();
+        let preview = names
+            .iter()
+            .take(8)
+            .map(|n| format!("/skill:{n}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let more = names.len().saturating_sub(8);
+        let msg = if more == 0 {
+            format!("skills: {preview}")
+        } else {
+            format!("skills: {preview} (+{more} more)")
+        };
+        app.notify(ToastLevel::Info, msg);
+        return;
+    }
+    let Some(skill) = crate::skill::find(name) else {
+        let known = crate::skill::list_names().join(", ");
+        app.notify(
+            ToastLevel::Fail,
+            format!("unknown skill '{name}'. try: {known}"),
+        );
+        return;
+    };
+    if app.inflight.is_some() {
+        app.notify(ToastLevel::Warn, "request in flight, please wait");
+        return;
+    }
+    let context_path = crate::skill::skill_path(name)
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|| format!("<unknown skill path: {name}>"));
+    // Body sent to the AI: the skill template alone, or template +
+    // user's trailing instruction. The `[skill]` block is purely a
+    // UI artifact (`Message::skill_ref`) and never reaches the model.
+    let prompt_body = if args.is_empty() {
+        skill.template.clone()
+    } else {
+        format!("{}\n\n{}", skill.template, args)
+    };
+    let mut msg = Message::new(Role::User, prompt_body);
+    msg.skill_ref = Some(crate::session::SkillRef {
+        name: name.to_string(),
+        context_path,
+        args: if args.is_empty() {
+            None
+        } else {
+            Some(args.to_string())
+        },
+    });
+    send_message(app, msg);
+}
+
+/// `/mcp:<name>` - with no arg, list the available MCP servers; with a
+/// name, switch the session to that server's tool surface. Skill
+/// completion follows the same shape: Tab on a focused MCP
+/// candidate fills the input directly.
+fn open_mcp(app: &mut App, arg: &str) {
+    let name = arg.trim();
+    if name.is_empty() {
+        let names = crate::mcp::builtin_names();
+        let preview = names
+            .iter()
+            .take(8)
+            .map(|n| format!("/mcp:{n}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let more = names.len().saturating_sub(8);
+        let msg = if more == 0 {
+            format!("mcps: {preview}")
+        } else {
+            format!("mcps: {preview} (+{more} more)")
+        };
+        app.notify(ToastLevel::Info, msg);
+        return;
+    }
+    match crate::mcp::find(name) {
+        Some(server) => {
+            app.notify(
+                ToastLevel::Ok,
+                format!("mcp '{}' ready: {}", server.name, server.description),
+            );
+        }
+        None => {
+            let known = crate::mcp::builtin_names().join(", ");
+            app.notify(
+                ToastLevel::Fail,
+                format!("unknown mcp '{name}'. try: {known}"),
+            );
         }
     }
 }
@@ -361,6 +469,14 @@ Do NOT claim a tool was used unless you actually see its result.",
     )
 }
 pub fn send_chat(app: &mut App, user_text: String) {
+    send_message(app, Message::new(Role::User, user_text));
+}
+
+/// Dispatch a pre-built user message to the active provider. Used by
+/// `/skill:<name>` to send the skill's body (rather than a literal
+/// `[skill]` marker) as the user prompt, while the chat UI still
+/// renders the marker block via `Message::skill_ref`.
+pub fn send_message(app: &mut App, user_msg: Message) {
     if app.inflight.is_some() {
         app.notify(ToastLevel::Warn, "request in flight, please wait");
         return;
@@ -420,9 +536,8 @@ pub fn send_chat(app: &mut App, user_text: String) {
     let model = app.config.active_model().to_string();
     let thinking = app.config.thinking;
 
-    app.maybe_title_from_first_prompt(&user_text);
-    app.session
-        .push(Message::new(Role::User, user_text.clone()));
+    app.maybe_title_from_first_prompt(&user_msg.content);
+    app.session.push(user_msg);
     let assistant = Message {
         role: Role::Assistant,
         content: String::new(),
@@ -432,6 +547,7 @@ pub fn send_chat(app: &mut App, user_text: String) {
         display_cursor: 0,
         ts: chrono::Utc::now(),
         streaming: true,
+        skill_ref: None,
     };
     let id = app.session.push(assistant);
     app.session.streaming_id = Some(id);

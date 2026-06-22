@@ -915,6 +915,28 @@ fn submit_input(app: &mut App) {
         let mut parts = rest.splitn(2, char::is_whitespace);
         let cmd: String = parts.next().unwrap_or("").to_lowercase();
         let arg: String = parts.next().unwrap_or("").trim().to_string();
+        // Treat `/skill:foo` and `/mcp:foo` as one-shot top-level
+        // commands: split the name off the colon so the dispatch
+        // table sees `skill` + `foo` rather than a single unknown
+        // token.
+        // Treat `/skill:foo` and `/mcp:foo` as one-shot top-level
+        // commands: split the name off the colon so the dispatch
+        // table sees `skill` + `foo` rather than a single unknown
+        // token. The trailing `arg` is also forwarded so the user
+        // can write `/skill:<name> 加上一些额外说明` and have the
+        // extra text treated as the skill's invocation args.
+        if let Some((base, name)) = cmd.split_once(':') {
+            if base == "skill" {
+                crate::commands::dispatch_skill(app, name.trim(), &arg);
+                app.sync_completion();
+                return;
+            }
+            if base == "mcp" {
+                crate::commands::dispatch(app, base, name.trim());
+                app.sync_completion();
+                return;
+            }
+        }
         crate::commands::dispatch(app, &cmd, &arg);
     } else {
         crate::commands::send_chat(app, raw);
@@ -2614,6 +2636,20 @@ mod tests {
         }
     }
 
+    /// Build an app with a configured + validated active provider,
+    /// suitable for tests that exercise the chat dispatch path (e.g.
+    /// skill dispatch sends a real prompt through send_message).
+    fn make_app_with_provider() -> App {
+        let mut app = make_app();
+        let id = make_id(ProviderKind::Openai, ProviderMode::Key);
+        app.config.active = Some(id.clone());
+        if let Some(entry) = app.config.entry_mut(&id) {
+            entry.base_url = "https://api.example.invalid/v1".to_string();
+            entry.api_key = "test-key-do-not-call".to_string();
+        }
+        app
+    }
+
     #[test]
     fn settings_save_form_creates_new_entry() {
         let mut app = make_app();
@@ -3438,6 +3474,74 @@ mod tests {
     }
 
     #[test]
+    fn submit_input_dispatches_skill_colon_form() {
+        // `/skill:<name>` must submit as a slash command, NOT pass
+        // the whole `/skill:<name>` string to the chat as a plain
+        // message. The new contract is "send immediately": the
+        // skill body is pushed as a user message with skill_ref set,
+        // and the input buffer is cleared (no manual edit step).
+        let names = crate::skill::list_names();
+        let pick = names
+            .first()
+            .cloned()
+            .expect("test host must have at least one skill under ~/.agents/skills/");
+        let mut app = make_app_with_provider();
+        app.input.buffer = format!("/skill:{pick}");
+        app.input.cursor = app.input.buffer.len();
+        submit_input(&mut app);
+
+        let user_msg = app
+            .session
+            .messages
+            .iter()
+            .rev()
+            .find(|m| matches!(m.role, crate::session::Role::User))
+            .expect("skill dispatch must push a user message");
+        assert_ne!(
+            user_msg.content,
+            format!("/skill:{pick}"),
+            "the literal `/skill:<name>` must NOT be the message content - the skill body must be inlined",
+        );
+        assert!(
+            user_msg.skill_ref.is_some(),
+            "skill message must carry skill_ref for the [skill] block",
+        );
+        assert!(
+            app.input.buffer.is_empty(),
+            "input buffer must be empty after the immediate-send dispatch",
+        );
+    }
+
+    #[test]
+    fn submit_input_skill_colon_with_args_picks_up_trailing_text() {
+        // `/skill:<name> 加上一些额外说明` must capture the trailing
+        // text into skill_ref.args and append it to the AI prompt.
+        let names = crate::skill::list_names();
+        let pick = names
+            .first()
+            .cloned()
+            .expect("test host must have at least one skill under ~/.agents/skills/");
+        let mut app = make_app_with_provider();
+        let user_args = "加上一些额外说明";
+        app.input.buffer = format!("/skill:{pick} {user_args}");
+        app.input.cursor = app.input.buffer.len();
+        submit_input(&mut app);
+        let user_msg = app
+            .session
+            .messages
+            .iter()
+            .rev()
+            .find(|m| matches!(m.role, crate::session::Role::User))
+            .expect("skill dispatch must push a user message");
+        let skill_ref = user_msg
+            .skill_ref
+            .as_ref()
+            .expect("skill_ref must be set");
+        assert_eq!(skill_ref.args.as_deref(), Some(user_args));
+        assert!(user_msg.content.contains(user_args));
+    }
+
+    #[test]
     fn sync_completion_auto_shows_function_panel() {
         // Typing `/` is a function trigger: the user must see the candidate
         // list, so the panel must become visible and focus the new
@@ -3481,6 +3585,283 @@ mod tests {
             })
             .expect("completion tab should be visible for /plan subcommands");
         assert_eq!(completion.candidates, vec!["/plan exit".to_string()]);
+    }
+
+    #[test]
+    fn sync_completion_shows_skill_names_top_level() {
+        // Typing `/skill` (no colon yet) should populate the completion
+        // list with `/skill:<name>` for every skill under
+        // `~/.agents/skills/`. The user can then either keep typing
+        // or Tab to insert the full form.
+        use crate::function::SidebarTab;
+
+        let mut app = make_app();
+        app.input.buffer = "/skill".to_string();
+        app.input.cursor = app.input.buffer.len();
+        app.sync_completion();
+
+        let completion = app
+            .function
+            .tabs
+            .iter()
+            .find_map(|t| match t {
+                SidebarTab::Completion(s) => Some(s),
+                _ => None,
+            })
+            .expect("completion tab should be visible for /skill");
+        // Every candidate must be the top-level `/skill:<name>` form.
+        assert!(
+            completion
+                .candidates
+                .iter()
+                .all(|c| c.starts_with("/skill:")),
+            "expected only /skill:<name> candidates, got: {:?}",
+            completion.candidates,
+        );
+        let names: Vec<String> = completion
+            .candidates
+            .iter()
+            .map(|c| c.trim_start_matches("/skill:").to_string())
+            .collect();
+        let commit_skills: Vec<&String> = names
+            .iter()
+            .filter(|n| n.starts_with("commit"))
+            .collect();
+        assert!(
+            !commit_skills.is_empty(),
+            "expected at least one skill starting with 'commit' under ~/.agents/skills/, got: {names:?}",
+        );
+    }
+
+    #[test]
+    fn sync_completion_filters_skill_by_prefix() {
+        // `/skill:co` filters the skill list to names starting with
+        // `co`; the candidate strings must be top-level
+        // `/skill:<name>` form, not the legacy `/skill <name>`.
+        use crate::function::SidebarTab;
+
+        let mut app = make_app();
+        app.input.buffer = "/skill:co".to_string();
+        app.input.cursor = app.input.buffer.len();
+        app.sync_completion();
+
+        let completion = app
+            .function
+            .tabs
+            .iter()
+            .find_map(|t| match t {
+                SidebarTab::Completion(s) => Some(s),
+                _ => None,
+            })
+            .expect("completion tab should be visible for /skill:co");
+        assert!(
+            completion
+                .candidates
+                .iter()
+                .any(|c| c == "/skill:commit-and-push-all"
+                    || c == "/skill:conventional-commit"),
+            "expected a /skill:commit-* candidate from ~/.agents/skills/, got: {:?}",
+            completion.candidates,
+        );
+        assert!(!completion
+            .candidates
+            .iter()
+            .any(|c| c == "/skill:karpathy-guidelines"));
+        // No legacy `/skill ` candidates must leak through.
+        assert!(
+            completion
+                .candidates
+                .iter()
+                .all(|c| c.starts_with("/skill:")),
+            "every candidate must be a /skill:<name>, got: {:?}",
+            completion.candidates,
+        );
+    }
+
+    #[test]
+    fn sync_completion_skill_fuzzy_matches_subsequence() {
+        // Fuzzy completion: typing `kpgy` (or any subsequence of
+        // `karpathy-guidelines`) should surface that skill. We use a
+        // query that actually appears in order: `khg` (k...h...g).
+        use crate::function::SidebarTab;
+
+        let mut app = make_app();
+        app.input.buffer = "/skill:khg".to_string();
+        app.input.cursor = app.input.buffer.len();
+        app.sync_completion();
+
+        let completion = app
+            .function
+            .tabs
+            .iter()
+            .find_map(|t| match t {
+                SidebarTab::Completion(s) => Some(s),
+                _ => None,
+            })
+            .expect("completion tab should be visible for /skill:khg");
+        assert!(
+            completion
+                .candidates
+                .iter()
+                .any(|c| c == "/skill:karpathy-guidelines"),
+            "fuzzy subsequence match for 'khg' should surface karpathy-guidelines, got: {:?}",
+            completion.candidates,
+        );
+    }
+
+    #[test]
+    fn sync_completion_command_fuzzy_matches_static() {
+        // Fuzzy completion should also work for the static command
+        // list: `mdl` subsequence-matches `/model`.
+        use crate::function::SidebarTab;
+
+        let mut app = make_app();
+        app.input.buffer = "/mdl".to_string();
+        app.input.cursor = app.input.buffer.len();
+        app.sync_completion();
+
+        let completion = app
+            .function
+            .tabs
+            .iter()
+            .find_map(|t| match t {
+                SidebarTab::Completion(s) => Some(s),
+                _ => None,
+            })
+            .expect("completion tab should be visible for /mdl");
+        assert!(
+            completion.candidates.iter().any(|c| c == "/model"),
+            "fuzzy match for 'mdl' should surface /model, got: {:?}",
+            completion.candidates,
+        );
+    }
+
+    #[test]
+    fn skill_completion_directly_fills_input() {
+        // Tab on a focused `/skill:co` candidate fills the buffer with
+        // the full `/skill:<name>` form directly. The exact expanded
+        // name depends on the user's skills dir, so we only assert the
+        // contract: colon preserved, buffer grew.
+        let mut app = make_app();
+        app.input.buffer = "/skill:co".to_string();
+        app.input.cursor = app.input.buffer.len();
+        app.sync_completion();
+        assert!(complete_focused_candidate(&mut app));
+        assert!(
+            app.input.buffer.starts_with("/skill:co"),
+            "Tab must directly fill with /skill:<name>, got: {}",
+            app.input.buffer,
+        );
+        assert!(app.input.buffer.len() > "/skill:co".len());
+    }
+
+
+
+    #[test]
+    fn dispatch_skill_sends_immediately_with_skill_ref() {
+        // /skill:<name> (or dispatch("skill", name)) used to populate
+        // the input buffer for the user to edit. The contract changed:
+        // the skill now dispatches immediately, pushing a User
+        // message into the session with the template body as content
+        // and a `skill_ref` describing the visual block.
+        use crate::commands::{dispatch, dispatch_skill};
+        let names = crate::skill::list_names();
+        let pick = names
+            .iter()
+            .find(|n| n.starts_with("karpathy"))
+            .or_else(|| names.first())
+            .cloned()
+            .expect("test host must have at least one skill under ~/.agents/skills/");
+        let mut app = make_app_with_provider();
+        dispatch_skill(&mut app, &pick, "");
+        // The skill message must be in the session, NOT in the input
+        // buffer (which should have been cleared by submit).
+        let last_user = app
+            .session
+            .messages
+            .iter()
+            .rev()
+            .find(|m| matches!(m.role, crate::session::Role::User));
+        let user_msg = last_user.expect("skill dispatch must push a user message");
+        assert!(
+            user_msg.skill_ref.is_some(),
+            "skill message must carry skill_ref for the [skill] block render",
+        );
+        let skill_ref = user_msg.skill_ref.as_ref().unwrap();
+        assert_eq!(skill_ref.name, pick);
+        assert!(
+            user_msg.content.contains('#')
+                || !user_msg.content.is_empty(),
+            "skill body must be inlined into the user message",
+        );
+        // Input buffer should be empty after dispatch (no leftover
+        // for the user to edit - the contract is "send now").
+        assert!(
+            app.input.buffer.is_empty(),
+            "input buffer must be empty after /skill:<name> dispatch (got: {:?})",
+            app.input.buffer,
+        );
+        // The `dispatch` alias still routes through `dispatch_skill`.
+        let mut app2 = make_app_with_provider();
+        dispatch(&mut app2, "skill", &pick);
+        // Same shape: message pushed with skill_ref, buffer cleared.
+        assert!(app2.input.buffer.is_empty());
+        assert!(app2
+            .session
+            .messages
+            .iter()
+            .any(|m| m.skill_ref.as_ref().map(|s| s.name == pick).unwrap_or(false)));
+    }
+
+    #[test]
+    fn dispatch_skill_passes_trailing_args_through() {
+        // /skill:<name> 加上一些额外说明 - the trailing text must be
+        // captured into the skill_ref's args field and appended to
+        // the AI prompt body.
+        use crate::commands::dispatch_skill;
+        let names = crate::skill::list_names();
+        let pick = names
+            .iter()
+            .find(|n| n.starts_with("karpathy"))
+            .or_else(|| names.first())
+            .cloned()
+            .expect("test host must have at least one skill under ~/.agents/skills/");
+        let mut app = make_app_with_provider();
+        let user_args = "加上一些额外说明";
+        dispatch_skill(&mut app, &pick, user_args);
+        let user_msg = app
+            .session
+            .messages
+            .iter()
+            .rev()
+            .find(|m| matches!(m.role, crate::session::Role::User))
+            .expect("skill dispatch must push a user message");
+        let skill_ref = user_msg
+            .skill_ref
+            .as_ref()
+            .expect("skill_ref must be set");
+        assert_eq!(skill_ref.args.as_deref(), Some(user_args));
+        assert!(
+            user_msg.content.contains(user_args),
+            "trailing args must be appended to the AI prompt body",
+        );
+    }
+    #[test]
+    fn dispatch_skill_unknown_name_toasts() {
+        use crate::commands::dispatch;
+        let mut app = make_app();
+        dispatch(&mut app, "skill", "no-such-skill");
+        // Input buffer must remain untouched.
+        assert!(app.input.buffer.is_empty());
+    }
+
+    #[test]
+    fn dispatch_mcp_unknown_name_toasts() {
+        use crate::commands::dispatch;
+        let mut app = make_app();
+        dispatch(&mut app, "mcp", "no-such-mcp");
+        // No panic, no buffer side-effect.
+        assert!(app.input.buffer.is_empty());
     }
 
     #[test]

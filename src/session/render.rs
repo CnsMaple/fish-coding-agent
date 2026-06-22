@@ -1,4 +1,4 @@
-use super::{Role, Session, ToolResultBlock};
+use super::{Role, Session, SkillRef, ToolResultBlock};
 use crate::config::{ThinkingDisplay, ToolResultDisplay};
 use crate::theme::Theme;
 use ratatui::buffer::Buffer;
@@ -64,6 +64,14 @@ pub fn build_lines(
 
         // Role prefix on its own line; content and blocks start below it.
         out.push(Line::from(vec![prefix.clone(), arrow.clone()]));
+        // Skill messages render a clean `[skill]` block before any
+        // markdown content, so the user sees name/args/path at a
+        // glance and the AI still gets the raw skill body via
+        // `m.content`.
+        if let Some(skill_ref) = &m.skill_ref {
+            let rows = build_skill_block_rows(skill_ref, width);
+            push_block_rows(&mut out, rows, Theme::block_done());
+        }
 
         let show_thinking = m.role == Role::Assistant
             && !m.thinking.trim().is_empty()
@@ -249,6 +257,25 @@ fn build_thinking_block_rows(content: &str, visible: bool, width: usize) -> Vec<
         width,
         "",
     )
+}
+
+/// Build the boxed rows for a `[skill]` marker block. The block
+/// shows name, optional args, and the on-disk context path so the
+/// user has a stable visual identifier for the skill they invoked.
+/// The actual skill body lives in `Message::content` and is rendered
+/// below the block as ordinary markdown.
+fn build_skill_block_rows(skill: &SkillRef, width: usize) -> Vec<String> {
+    let width = width.max(8);
+    let mut rows = Vec::new();
+    rows.push(border(width));
+    rows.extend(box_rows("[skill]", width));
+    rows.extend(box_rows(&format!("name: {}", skill.name), width));
+    if let Some(args) = skill.args.as_deref().filter(|a| !a.trim().is_empty()) {
+        rows.extend(box_rows(&format!("args: {args}"), width));
+    }
+    rows.extend(box_rows(&format!("context: {}", skill.context_path), width));
+    rows.push(border(width));
+    rows
 }
 
 fn build_tool_block_rows(tool: &ToolResultBlock, visible: bool, width: usize) -> Vec<String> {
@@ -711,6 +738,7 @@ mod tests {
             display_cursor: usize::MAX,
             ts: chrono::Utc::now(),
             streaming: false,
+            skill_ref: None,
         });
         s
     }

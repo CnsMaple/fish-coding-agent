@@ -12,6 +12,7 @@ pub struct ToolResultBlock {
     pub content: String,
     pub content_offset: usize,
     pub visible: bool,
+
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -32,6 +33,17 @@ impl Role {
     }
 }
 
+/// Marker for a user message inserted by `/skill:<name>` dispatch.
+/// The renderer uses this to show a clean `[skill]` block in the
+/// chat. The AI sees only the actual skill content (stored in
+/// `Message::content`); the path is purely a UI hint.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillRef {
+    pub name: String,
+    pub context_path: String,
+    #[serde(default)]
+    pub args: Option<String>,
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     pub role: Role,
@@ -51,6 +63,12 @@ pub struct Message {
     /// revealed.  Advances by a few bytes per frame during streaming so
     /// that bursts from the API don't all appear at once.
     pub display_cursor: usize,
+    /// `Some` when this message was inserted by a `/skill:<name>`
+    /// dispatch. Drives the `[skill]` block rendering and tells the
+    /// API path that the content is already the skill body, no extra
+    /// prompt assembly is needed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skill_ref: Option<SkillRef>,
 }
 
 impl Message {
@@ -66,6 +84,7 @@ impl Message {
             ts: Utc::now(),
             streaming: false,
             display_cursor: len, // non-streaming → fully visible
+            skill_ref: None,
         }
     }
 
@@ -149,6 +168,7 @@ impl Session {
             ts: Utc::now(),
             streaming: false,
             display_cursor: 0,
+            skill_ref: None,
         };
         self.push(msg);
     }
