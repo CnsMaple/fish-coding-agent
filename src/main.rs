@@ -2,7 +2,9 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use crossterm::cursor::{RestorePosition, SavePosition};
-use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
+use crossterm::event::{
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+};
 use crossterm::execute;
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, Clear, ClearType};
 use fish_coding_agent::app::App;
@@ -131,7 +133,7 @@ impl TerminalGuard {
     fn enter() -> Result<Self> {
         execute!(std::io::stdout(), SavePosition)?;
         enable_raw_mode()?;
-        execute!(std::io::stdout(), EnableMouseCapture)?;
+        execute!(std::io::stdout(), EnableMouseCapture, EnableBracketedPaste)?;
         Ok(Self)
     }
 }
@@ -143,6 +145,7 @@ impl Drop for TerminalGuard {
             Clear(ClearType::FromCursorDown),
             crossterm::cursor::MoveTo(0, 9999),
             DisableMouseCapture,
+            DisableBracketedPaste,
             crossterm::cursor::Show,
         );
         let _ = disable_raw_mode();

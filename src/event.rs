@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -23,11 +24,17 @@ fn position_ime_cursor(app: &mut App) {
         return;
     };
 
+    static LAST_CURSOR_POS: std::sync::Mutex<Option<(u16, u16)>> = std::sync::Mutex::new(None);
+    if let Ok(mut last) = LAST_CURSOR_POS.lock() {
+        if *last == Some((cx, cy)) {
+            return;
+        }
+        *last = Some((cx, cy));
+    }
+
     use std::io::Write;
 
-    // Position cursor (so TSF-based IMEs can find it) but hide the
-    // terminal cursor — the TUI draws its own styled block cursor.
-    let _ = write!(std::io::stdout(), "\x1B[{};{}H\x1B[?25l", cy + 1, cx + 1,);
+    let _ = write!(std::io::stdout(), "\x1B[{};{}H\x1B[?25h", cy + 1, cx + 1,);
     let _ = std::io::stdout().flush();
 }
 
@@ -105,34 +112,54 @@ where
     let mut events = EventStream::new();
     let mut tick = interval(Duration::from_millis(100));
     let mut last_status_refresh = std::time::Instant::now();
+    let mut needs_draw = true;
+    let mut last_draw = Instant::now();
+    // Minimum interval between draws (~60 fps).
+    const DRAW_INTERVAL: Duration = Duration::from_millis(16);
 
     loop {
-        // redraw
-        if let Err(e) = terminal.draw(|f| crate::ui::render(f, app)) {
-            let _ = e;
+        // Throttled draw: at most once per DRAW_INTERVAL.
+        if needs_draw && last_draw.elapsed() >= DRAW_INTERVAL {
+            if let Err(e) = terminal.draw(|f| crate::ui::render(f, app)) {
+                let _ = e;
+            }
+            position_ime_cursor(app);
+            last_draw = Instant::now();
+            needs_draw = false;
         }
-
-        // Position the hardware cursor at the input field so TSF-based
-        // IMEs (WeChat Input Method, etc.) draw their candidate window
-        // at the correct location.
-        position_ime_cursor(app);
 
         tokio::select! {
             biased;
             evt = events.next() => {
+                needs_draw = true;
                 let Some(evt) = evt else { break; };
                 match evt? {
                     Event::Key(k) if k.kind == KeyEventKind::Press => {
-                        handle_key(k, app).await;
+                        match try_consume_burst(k, &mut events).await {
+                            BurstResult::Paste(text) => {
+                                // Paste was fully consumed from the event stream;
+                                // no remaining chars to suppress.
+                                insert_paste_block(text, app, false);
+                            }
+                            BurstResult::Keys(keys) => {
+                                for k in keys {
+                                    handle_key(k, app).await;
+                                }
+                            }
+                        }
                     }
                     Event::Mouse(m) => {
                         handle_mouse(m, app);
+                    }
+                    Event::Paste(text) => {
+                        handle_paste(text, app).await;
                     }
                     Event::Resize(_, _) => {}
                     _ => {}
                 }
             }
             msg = channels.rx.recv() => {
+                needs_draw = true;
                 if let Some(m) = msg { handle_msg(m, app); }
             }
             _ = tick.tick() => {
@@ -142,12 +169,14 @@ where
                     if let Some(m) = app.session.messages.get_mut(id) {
                         if m.streaming && m.display_cursor < m.content.len() {
                             m.display_cursor = (m.display_cursor + 15).min(m.content.len());
+                            needs_draw = true;
                         }
                     }
                 }
                 if last_status_refresh.elapsed() >= Duration::from_millis(500) {
                     app.status.update_hit(&app.hit_rate);
                     last_status_refresh = std::time::Instant::now();
+                    needs_draw = true;
                 }
             }
         }
@@ -158,6 +187,160 @@ where
     }
 
     Ok(())
+}
+
+async fn handle_paste(text: String, app: &mut App) {
+    insert_paste_block(text, app, false);
+}
+
+/// `quota=true` 表示这是 legacy 逐字符终端（如 conhost），需要在
+/// handle_key 里抑制随后重发的字符，避免输入重复。
+fn insert_paste_block(text: String, app: &mut App, quota: bool) {
+    let mut text = normalize_paste_text(&text);
+    if let Ok(mut cb) = arboard::Clipboard::new() {
+        if let Ok(clip) = cb.get_text() {
+            let clip = normalize_paste_text(&clip);
+            if !clip.is_empty() && (clip == text || clip.contains(&text)) {
+                text = clip;
+            }
+        }
+    }
+    if text.is_empty() {
+        return;
+    }
+    let now = Instant::now();
+    if app
+        .last_paste_text
+        .as_ref()
+        .map(|last| last == &text)
+        .unwrap_or(false)
+        && app
+            .last_paste_at
+            .map(|at| now.duration_since(at) < Duration::from_secs(2))
+            .unwrap_or(false)
+    {
+        return;
+    }
+    app.last_paste_text = Some(text.clone());
+    app.last_paste_at = Some(now);
+    if quota {
+        app.paste_key_quota = text.chars().count();
+    }
+    if app.input.has_selection() {
+        app.input.delete_selection();
+    }
+    let line_count = paste_line_count(&text);
+    let marker = format!("[paste {line_count} lines]");
+    app.paste_blocks.push_back(text);
+    app.input.insert_str(&marker);
+    app.sync_completion();
+}
+
+fn normalize_paste_text(text: &str) -> String {
+    text.replace("\r\n", "\n").replace('\r', "\n")
+}
+
+fn paste_line_count(text: &str) -> usize {
+    text.lines().count().max(1)
+}
+
+/// Heuristic: treat text as a paste if it spans multiple lines or is long enough.
+fn classify_burst(text: &str) -> bool {
+    text.contains('\n') || text.chars().count() >= 20
+}
+
+/// Cross-check burst text against clipboard to avoid IME false positives.
+/// IME commits characters in burst-like fashion but does NOT modify the
+/// clipboard, so a clipboard mismatch reliably rules out a paste.
+fn clipboard_matches(text: &str) -> bool {
+    if let Ok(mut cb) = arboard::Clipboard::new() {
+        if let Ok(clip) = cb.get_text() {
+            let clip = normalize_paste_text(&clip);
+            let t = normalize_paste_text(text);
+            return !clip.is_empty() && (clip == t || clip.contains(&t) || t.contains(&clip));
+        }
+    }
+    // No clipboard access → err on the side of treating it as paste.
+    true
+}
+
+/// Try to aggregate rapid-fire key events into a single paste burst.
+/// Returns `Some(text)` when the burst looks like a paste; the caller
+/// should treat it as `Event::Paste`. Returns `None` otherwise; the
+/// original `first_key` (and any collected chars) must be dispatched
+/// through the normal `handle_key` path.
+///
+/// This is primarily for legacy Windows terminals (conhost) that do not
+/// support bracketed paste and instead emit a stream of individual
+/// `KeyEvent`s.
+
+enum BurstResult {
+    /// The burst qualifies as a paste; contains the aggregated text.
+    Paste(String),
+    /// The burst does not qualify; the caller must dispatch these keys
+    /// through the normal `handle_key` path.
+    Keys(Vec<crossterm::event::KeyEvent>),
+}
+
+async fn try_consume_burst(
+    first_key: crossterm::event::KeyEvent,
+    events: &mut EventStream,
+) -> BurstResult {
+    use crossterm::event::{Event, KeyCode, KeyEventKind};
+
+    let mut keys = vec![first_key];
+    let mut text = String::new();
+
+    // Only start burst detection on a plain printable char (no modifiers).
+    match first_key.code {
+        KeyCode::Char(c) if first_key.modifiers.is_empty() => text.push(c),
+        _ => return BurstResult::Keys(keys),
+    }
+
+    // Adaptive timeout: start short, grow as we see more chars.
+    // This lets paste bursts (which are fast) collect before the timeout
+    // fires, while single keystrokes return almost instantly.
+    let mut timeout = Duration::from_millis(10);
+    const MAX_COLLECTED: usize = 4096;
+
+    loop {
+        if text.len() >= MAX_COLLECTED {
+            break;
+        }
+        match tokio::time::timeout(timeout, events.next()).await {
+            Ok(Some(Ok(Event::Key(k)))) if k.kind == KeyEventKind::Press => {
+                match k.code {
+                    KeyCode::Char(c) if k.modifiers.is_empty() => {
+                        text.push(c);
+                        keys.push(k);
+                        // Once we've seen 3+ chars, extend the timeout so
+                        // a real paste doesn't get split into tiny chunks.
+                        if keys.len() >= 3 {
+                            timeout = Duration::from_millis(200);
+                        }
+                    }
+                    KeyCode::Enter if k.modifiers.is_empty() => {
+                        text.push('\n');
+                        keys.push(k);
+                    }
+                    KeyCode::Tab if k.modifiers.is_empty() => {
+                        text.push('\t');
+                        keys.push(k);
+                    }
+                    // Any other key breaks the burst.
+                    _ => break,
+                }
+            }
+            // Timeout or any other event ends the burst.
+            _ => break,
+        }
+    }
+
+    if classify_burst(&text) {
+        BurstResult::Paste(text)
+    } else {
+        BurstResult::Keys(keys)
+    }
 }
 
 fn note_model_output(app: &mut App, chunk: &str) {
@@ -475,7 +658,29 @@ fn handle_msg(msg: AppMsg, app: &mut App) {
 }
 
 async fn handle_key(k: crossterm::event::KeyEvent, app: &mut App) {
+    // Post-paste quota: suppress characters the terminal re-sends as raw keys.
+    if app.paste_key_quota > 0 {
+        use crossterm::event::KeyCode;
+        // 5000ms window covers slowly-arriving legacy paste chars on conhost.
+        let expired = app
+            .last_paste_at
+            .map(|t| t.elapsed() >= Duration::from_millis(5000))
+            .unwrap_or(true);
+        if expired {
+            app.paste_key_quota = 0;
+        } else if matches!(k.code, KeyCode::Char(_) | KeyCode::Enter | KeyCode::Tab) {
+            app.paste_key_quota -= 1;
+            return;
+        }
+    }
+
     use crossterm::event::{KeyCode, KeyModifiers};
+
+    // Non-text keys break any ongoing paste-burst tracking.
+    if !matches!(k.code, KeyCode::Char(_) | KeyCode::Enter) {
+        app.burst_buf.clear();
+        app.burst_snapshot = None;
+    }
 
     let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
 
@@ -520,6 +725,16 @@ async fn handle_key(k: crossterm::event::KeyEvent, app: &mut App) {
             app.input.buffer.clear();
             app.input.cursor = 0;
             app.input.clear_selection();
+            app.paste_blocks.clear();
+        }
+        return;
+    }
+
+    if ctrl && matches!(k.code, KeyCode::Char('v') | KeyCode::Char('V')) {
+        if let Ok(mut cb) = arboard::Clipboard::new() {
+            if let Ok(text) = cb.get_text() {
+                insert_paste_block(text, app, false);
+            }
         }
         return;
     }
@@ -582,6 +797,7 @@ async fn handle_key(k: crossterm::event::KeyEvent, app: &mut App) {
                 if !app.input.buffer.is_empty() {
                     app.input.buffer.clear();
                     app.input.cursor = 0;
+                    app.paste_blocks.clear();
                 }
             } else {
                 // A function tab was closed. If it was the last non-
@@ -630,8 +846,42 @@ async fn handle_key(k: crossterm::event::KeyEvent, app: &mut App) {
             if newline {
                 if app.input.has_selection() {
                     app.input.delete_selection();
+                    app.burst_buf.clear();
+                    app.burst_snapshot = None;
+                }
+                // Track Enter in burst for legacy paste detection
+                let now = Instant::now();
+                let expired = app.burst_snapshot
+                    .map(|(t, _, _)| now.duration_since(t) > Duration::from_millis(100))
+                    .unwrap_or(true);
+                if expired {
+                    app.burst_buf.clear();
+                    app.burst_buf.push('\n');
+                    app.burst_snapshot = Some((now, app.input.cursor, app.input.buffer.len()));
+                } else {
+                    app.burst_buf.push('\n');
+                    if let Some((_, sc, sl)) = app.burst_snapshot {
+                        app.burst_snapshot = Some((now, sc, sl));
+                    }
                 }
                 app.input.insert_newline();
+                if app.burst_snapshot.is_some()
+                    && classify_burst(&app.burst_buf)
+                    && clipboard_matches(&app.burst_buf)
+                {
+                    let burst_text = std::mem::take(&mut app.burst_buf);
+                    let processed = burst_text.chars().count();
+                    if let Some((_, old_cursor, old_len)) = app.burst_snapshot.take() {
+                        app.input.buffer.truncate(old_len);
+                        app.input.cursor = old_cursor;
+                    }
+                    insert_paste_block(burst_text, app, true);
+                    if app.paste_key_quota > processed {
+                        app.paste_key_quota -= processed;
+                    } else {
+                        app.paste_key_quota = 0;
+                    }
+                }
                 app.sync_completion();
             } else {
                 submit_input(app);
@@ -639,7 +889,9 @@ async fn handle_key(k: crossterm::event::KeyEvent, app: &mut App) {
         }
         KeyCode::Backspace => {
             if !app.input.delete_selection() {
-                app.input.backspace();
+                if !try_remove_paste_marker(app) {
+                    app.input.backspace();
+                }
             }
             app.sync_completion();
         }
@@ -662,6 +914,7 @@ async fn handle_key(k: crossterm::event::KeyEvent, app: &mut App) {
                         app.input.buffer.clear();
                         app.input.cursor = 0;
                         app.input.clear_selection();
+                        app.paste_blocks.clear();
                         app.sync_completion();
                     }
                     'k' | 'K' => {
@@ -673,8 +926,45 @@ async fn handle_key(k: crossterm::event::KeyEvent, app: &mut App) {
             } else {
                 if app.input.has_selection() {
                     app.input.delete_selection();
+                    app.burst_buf.clear();
+                    app.burst_snapshot = None;
+                }
+                // Track burst for legacy-paste detection (conhost etc.).
+                let now = Instant::now();
+                let expired = app.burst_snapshot
+                    .map(|(t, _, _)| now.duration_since(t) > Duration::from_millis(100))
+                    .unwrap_or(true);
+                if expired {
+                    app.burst_buf.clear();
+                    app.burst_buf.push(c);
+                    app.burst_snapshot = Some((now, app.input.cursor, app.input.buffer.len()));
+                } else {
+                    app.burst_buf.push(c);
+                    if let Some((_, sc, sl)) = app.burst_snapshot {
+                        app.burst_snapshot = Some((now, sc, sl));
+                    }
                 }
                 app.input.insert_char(c);
+                if app.burst_snapshot.is_some()
+                    && classify_burst(&app.burst_buf)
+                    && clipboard_matches(&app.burst_buf)
+                {
+                    let burst_text = std::mem::take(&mut app.burst_buf);
+                    let processed = burst_text.chars().count();
+                    if let Some((_, old_cursor, old_len)) = app.burst_snapshot.take() {
+                        app.input.buffer.truncate(old_len);
+                        app.input.cursor = old_cursor;
+                    }
+                    insert_paste_block(burst_text, app, true);
+                    // Do not over-suppress: quota was set to the (possibly
+                    // clipboard-expanded) paste length, which includes chars
+                    // we already handled via handle_key. Subtract them.
+                    if app.paste_key_quota > processed {
+                        app.paste_key_quota -= processed;
+                    } else {
+                        app.paste_key_quota = 0;
+                    }
+                }
                 app.sync_completion();
             }
         }
@@ -810,7 +1100,8 @@ static DRAG: std::sync::Mutex<DragState> = std::sync::Mutex::new(DragState {
 
 /// Scroll state: (last_event_time, current_step_size).
 /// Step accelerates when events arrive quickly and resets when slow.
-static SCROLL_STATE: std::sync::Mutex<(Option<std::time::Instant>, u32)> = std::sync::Mutex::new((None, 3));
+static SCROLL_STATE: std::sync::Mutex<(Option<std::time::Instant>, u32)> =
+    std::sync::Mutex::new((None, 3));
 
 fn handle_mouse(m: MouseEvent, app: &mut App) {
     let prompt = app.input_prompt_area;
@@ -821,7 +1112,10 @@ fn handle_mouse(m: MouseEvent, app: &mut App) {
     // scroll = offset from bottom.  ScrollUp = see older content (increase
     // offset).  ScrollDown = see newer content (decrease offset).
     // Adaptive step: fast scrolling → larger step, slow → smaller.
-    let step = if matches!(m.kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown) {
+    let step = if matches!(
+        m.kind,
+        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+    ) {
         let now = std::time::Instant::now();
         if let Ok(mut state) = SCROLL_STATE.lock() {
             let (last, mut step) = *state;
@@ -851,7 +1145,9 @@ fn handle_mouse(m: MouseEvent, app: &mut App) {
             let inner_h = area.height.saturating_sub(2);
             let total = app.session.count_all_lines();
             let max_scroll = total.saturating_sub(inner_h);
-            if app.session.scroll >= max_scroll { return; }
+            if app.session.scroll >= max_scroll {
+                return;
+            }
         }
         app.session.scroll = app.session.scroll.saturating_add(step as u16);
         if let Some(area) = app.session_area {
@@ -863,9 +1159,11 @@ fn handle_mouse(m: MouseEvent, app: &mut App) {
         return;
     }
     if matches!(m.kind, MouseEventKind::ScrollDown) {
-        if app.session.scroll == 0 { return; } // edge: already at bottom
-        // Clamp to max_scroll first so runaway ScrollUp values are
-        // recovered in one step rather than needing dozens of scroll-downs.
+        if app.session.scroll == 0 {
+            return;
+        } // edge: already at bottom
+          // Clamp to max_scroll first so runaway ScrollUp values are
+          // recovered in one step rather than needing dozens of scroll-downs.
         if let Some(area) = app.session_area {
             let inner_h = area.height.saturating_sub(2);
             let total = app.session.count_all_lines();
@@ -982,8 +1280,43 @@ pub fn cycle_sidebar_forward(app: &mut App) {
     }
 }
 
+fn try_remove_paste_marker(app: &mut App) -> bool {
+    let buf = &app.input.buffer;
+    let cursor = app.input.cursor;
+    if cursor < "[paste 1 lines]".len() || !buf.is_char_boundary(cursor) {
+        return false;
+    }
+    let before = &buf[..cursor];
+    // Find "[paste " backwards from cursor
+    if let Some(start) = before.rfind("[paste ") {
+        let candidate = &buf[start..cursor];
+        if let Some(rest) = candidate.strip_prefix("[paste ").and_then(|s| s.strip_suffix(" lines]")) {
+            if !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()) {
+                app.input.buffer.replace_range(start..cursor, "");
+                app.input.cursor = start;
+                app.paste_blocks.pop_front();
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn expand_paste_blocks(mut raw: String, paste_blocks: &mut VecDeque<String>) -> String {
+    while let Some(text) = paste_blocks.pop_front() {
+        let line_count = paste_line_count(&text);
+        let marker = format!("[paste {line_count} lines]");
+        let text = text.strip_suffix('\n').unwrap_or(&text);
+        let block = format!("```paste\n{text}\n```");
+        if raw.contains(&marker) {
+            raw = raw.replacen(&marker, &block, 1);
+        }
+    }
+    raw
+}
+
 fn submit_input(app: &mut App) {
-    let raw = app.input.take();
+    let raw = expand_paste_blocks(app.input.take(), &mut app.paste_blocks);
     if raw.is_empty() {
         return;
     }
@@ -1325,8 +1658,7 @@ async fn handle_ask_key(
         }
         KeyCode::Char(c) => {
             if freeform_mode
-                && (k.modifiers.is_empty()
-                    || k.modifiers == crossterm::event::KeyModifiers::SHIFT)
+                && (k.modifiers.is_empty() || k.modifiers == crossterm::event::KeyModifiers::SHIFT)
             {
                 state.input.insert(state.input_cursor, c);
                 state.input_cursor += c.len_utf8();
@@ -1444,7 +1776,11 @@ fn handle_todo_key(
                 state.edit_buffer.pop();
                 true
             }
-            KeyCode::Char(c) if !k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
+            KeyCode::Char(c)
+                if !k
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
                 state.edit_buffer.push(c);
                 true
             }
@@ -1475,19 +1811,25 @@ fn handle_todo_key(
             }
             KeyCode::Char('d') if k.modifiers == KeyModifiers::CONTROL => {
                 state.cursor += 1;
-                state.items.insert(state.cursor, crate::function::TodoItem {
-                    content: String::new(),
-                    status: "pending".to_string(),
-                });
+                state.items.insert(
+                    state.cursor,
+                    crate::function::TodoItem {
+                        content: String::new(),
+                        status: "pending".to_string(),
+                    },
+                );
                 state.start_edit(state.cursor);
                 true
             }
             KeyCode::Char('u') if k.modifiers == KeyModifiers::CONTROL => {
                 let idx = state.cursor;
-                state.items.insert(idx, crate::function::TodoItem {
-                    content: String::new(),
-                    status: "pending".to_string(),
-                });
+                state.items.insert(
+                    idx,
+                    crate::function::TodoItem {
+                        content: String::new(),
+                        status: "pending".to_string(),
+                    },
+                );
                 state.start_edit(idx);
                 true
             }
@@ -1534,8 +1876,7 @@ async fn handle_plan_key(
         }
         KeyCode::Char('r') | KeyCode::Char('R') => {
             state.approved = Some(false);
-            let prompt = "Plan rejected. Please revise or ask a follow-up question."
-                .to_string();
+            let prompt = "Plan rejected. Please revise or ask a follow-up question.".to_string();
             app.session.push(crate::session::Message::new(
                 crate::session::Role::User,
                 prompt.clone(),
@@ -2117,7 +2458,9 @@ fn trigger_picker_fetch(app: &mut App, state: &mut crate::function::ModelPickerS
             .unwrap_or_default();
         let client = app.reqwest.clone();
         tokio::spawn(async move {
-            match crate::providers::list_models(&client, p, &base, &key, &access_key, &secret_key).await {
+            match crate::providers::list_models(&client, p, &base, &key, &access_key, &secret_key)
+                .await
+            {
                 Ok(models) => {
                     let _ = tx.send(AppMsg::ModelsFetched {
                         provider: p,
@@ -2426,8 +2769,8 @@ fn handle_settings_enter(app: &mut App, state: &mut crate::function::SettingsSta
             SettingsLevel::TopLevel
         }
         SettingsLevel::BorderTypeList => {
-            use crate::ui::border_type::BorderType;
             use crate::function::notifications::ToastLevel;
+            use crate::ui::border_type::BorderType;
             let modes = [BorderType::Ascii, BorderType::Rounded];
             if let Some(&mode) = modes.get(cursor) {
                 app.config.border_type = mode;
@@ -2604,7 +2947,16 @@ fn settings_save_form(app: &mut App, form: crate::function::ConfigFormState) {
             let client = app.reqwest.clone();
             if let Some(tx) = app.msg_tx.clone() {
                 tokio::spawn(async move {
-                    match crate::providers::list_models(&client, k, &base, &key, &access_key, &secret_key).await {
+                    match crate::providers::list_models(
+                        &client,
+                        k,
+                        &base,
+                        &key,
+                        &access_key,
+                        &secret_key,
+                    )
+                    .await
+                    {
                         Ok(models) => {
                             let _ = tx.send(AppMsg::ModelsFetched {
                                 provider: k,
@@ -2721,10 +3073,7 @@ fn handle_form_text(
     if matches!(k.code, crossterm::event::KeyCode::Tab) {
         // Tab cycles fields within the form using active_fields.
         let fields = form.active_fields();
-        let idx = fields
-            .iter()
-            .position(|f| *f == form.focused)
-            .unwrap_or(0);
+        let idx = fields.iter().position(|f| *f == form.focused).unwrap_or(0);
         form.focused = fields[(idx + 1) % fields.len()];
         return true;
     }
@@ -2980,7 +3329,12 @@ mod tests {
             session_area: None,
             input_cursor_screen: None,
             function_panel_cursor: None,
-
+            paste_blocks: VecDeque::new(),
+            last_paste_text: None,
+            last_paste_at: None,
+            paste_key_quota: 0,
+            burst_buf: String::new(),
+            burst_snapshot: None,
         }
     }
 
@@ -2996,6 +3350,47 @@ mod tests {
             entry.api_key = "test-key-do-not-call".to_string();
         }
         app
+    }
+
+    #[test]
+    fn expand_paste_blocks_replaces_marker_with_block() {
+        let mut blocks = VecDeque::from(["a\nb\nc".to_string()]);
+        let out = expand_paste_blocks("before [paste 3 lines] after".to_string(), &mut blocks);
+        assert_eq!(
+            out,
+            "before ```paste\na\nb\nc\n``` after"
+        );
+        assert!(blocks.is_empty());
+    }
+
+    #[test]
+    fn paste_line_count_ignores_trailing_newline() {
+        assert_eq!(paste_line_count("a\nb\nc\n"), 3);
+    }
+
+    #[test]
+    fn classify_burst_multiline() {
+        assert!(classify_burst("line1\nline2"));
+        assert!(classify_burst("a\n"));
+    }
+
+    #[test]
+    fn classify_burst_long_single() {
+        assert!(classify_burst(&"a".repeat(20)));
+        assert!(classify_burst(&"a".repeat(100)));
+    }
+
+    #[test]
+    fn classify_burst_short_single() {
+        assert!(!classify_burst("hello"));
+        assert!(!classify_burst(&"a".repeat(19)));
+        assert!(!classify_burst(""));
+    }
+
+    #[test]
+    fn classify_burst_typical_code() {
+        let code = "fn main() {\n    println!(\"hello\");\n}";
+        assert!(classify_burst(code));
     }
 
     #[test]
@@ -3889,10 +4284,7 @@ mod tests {
             .rev()
             .find(|m| matches!(m.role, crate::session::Role::User))
             .expect("skill dispatch must push a user message");
-        let skill_ref = user_msg
-            .skill_ref
-            .as_ref()
-            .expect("skill_ref must be set");
+        let skill_ref = user_msg.skill_ref.as_ref().expect("skill_ref must be set");
         assert_eq!(skill_ref.args.as_deref(), Some(user_args));
         assert!(user_msg.content.contains(user_args));
     }
@@ -3979,10 +4371,8 @@ mod tests {
             .iter()
             .map(|c| c.trim_start_matches("/skill:").to_string())
             .collect();
-        let commit_skills: Vec<&String> = names
-            .iter()
-            .filter(|n| n.starts_with("commit"))
-            .collect();
+        let commit_skills: Vec<&String> =
+            names.iter().filter(|n| n.starts_with("commit")).collect();
         assert!(
             !commit_skills.is_empty(),
             "expected at least one skill starting with 'commit' under ~/.agents/skills/, got: {names:?}",
@@ -4014,8 +4404,7 @@ mod tests {
             completion
                 .candidates
                 .iter()
-                .any(|c| c == "/skill:commit-and-push-all"
-                    || c == "/skill:conventional-commit"),
+                .any(|c| c == "/skill:commit-and-push-all" || c == "/skill:conventional-commit"),
             "expected a /skill:commit-* candidate from ~/.agents/skills/, got: {:?}",
             completion.candidates,
         );
@@ -4111,8 +4500,6 @@ mod tests {
         assert!(app.input.buffer.len() > "/skill:co".len());
     }
 
-
-
     #[test]
     fn dispatch_skill_sends_immediately_with_skill_ref() {
         // /skill:<name> (or dispatch("skill", name)) used to populate
@@ -4146,8 +4533,7 @@ mod tests {
         let skill_ref = user_msg.skill_ref.as_ref().unwrap();
         assert_eq!(skill_ref.name, pick);
         assert!(
-            user_msg.content.contains('#')
-                || !user_msg.content.is_empty(),
+            user_msg.content.contains('#') || !user_msg.content.is_empty(),
             "skill body must be inlined into the user message",
         );
         // Input buffer should be empty after dispatch (no leftover
@@ -4162,11 +4548,11 @@ mod tests {
         dispatch(&mut app2, "skill", &pick);
         // Same shape: message pushed with skill_ref, buffer cleared.
         assert!(app2.input.buffer.is_empty());
-        assert!(app2
-            .session
-            .messages
-            .iter()
-            .any(|m| m.skill_ref.as_ref().map(|s| s.name == pick).unwrap_or(false)));
+        assert!(app2.session.messages.iter().any(|m| m
+            .skill_ref
+            .as_ref()
+            .map(|s| s.name == pick)
+            .unwrap_or(false)));
     }
 
     #[test]
@@ -4192,10 +4578,7 @@ mod tests {
             .rev()
             .find(|m| matches!(m.role, crate::session::Role::User))
             .expect("skill dispatch must push a user message");
-        let skill_ref = user_msg
-            .skill_ref
-            .as_ref()
-            .expect("skill_ref must be set");
+        let skill_ref = user_msg.skill_ref.as_ref().expect("skill_ref must be set");
         assert_eq!(skill_ref.args.as_deref(), Some(user_args));
         assert!(
             user_msg.content.contains(user_args),

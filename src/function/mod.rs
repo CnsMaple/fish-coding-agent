@@ -1,7 +1,7 @@
 use crate::config::{Config, ProviderId, ProviderKind};
 use crate::function::notifications::{HitRate, ModelCache, Notifications, TokenRate};
-use crate::session::{Role, Session};
 pub use crate::session::TodoItem;
+use crate::session::{Role, Session};
 use chrono::{DateTime, Utc};
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -434,8 +434,8 @@ impl SettingsState {
             SettingsLevel::ConfigForm(form) => form.active_fields().len(),
             SettingsLevel::ThinkingDisplayList => 3, // show, hide, while streaming
             SettingsLevel::ToolResultDisplayList => 3, // show, hide, while streaming
-            SettingsLevel::EnterBehaviorList => 2,  // enter sends, enter newline
-            SettingsLevel::BorderTypeList => 2,  // ascii, rounded
+            SettingsLevel::EnterBehaviorList => 2,   // enter sends, enter newline
+            SettingsLevel::BorderTypeList => 2,      // ascii, rounded
         }
     }
 
@@ -968,12 +968,19 @@ pub struct TodoState {
 
 impl TodoState {
     pub fn new(items: Vec<TodoItem>) -> Self {
-        Self { items, cursor: 0, editing: None, edit_buffer: String::new() }
+        Self {
+            items,
+            cursor: 0,
+            editing: None,
+            edit_buffer: String::new(),
+        }
     }
 
     /// Start editing the item at `idx`. Returns false if out of bounds.
     pub fn start_edit(&mut self, idx: usize) -> bool {
-        if idx >= self.items.len() { return false; }
+        if idx >= self.items.len() {
+            return false;
+        }
         self.editing = Some(idx);
         self.edit_buffer = self.items[idx].content.clone();
         true
@@ -1143,7 +1150,23 @@ pub struct App {
     /// when set, so IME composition windows appear at the right location
     /// when the user is typing in a picker search field.
     pub function_panel_cursor: Option<(u16, u16)>,
+    pub paste_blocks: VecDeque<String>,
+    pub last_paste_text: Option<String>,
+    pub last_paste_at: Option<Instant>,
+    /// Number of keystrokes to suppress after a paste (terminal re-sends
+    /// raw text as individual key events). Decremented for each Char/Enter/Tab.
+    pub paste_key_quota: usize,
 
+    /// Burst buffer for legacy-paste detection in `handle_key`.
+    /// Accumulates consecutive `Char` / `Enter` key events so that
+    /// conhost-style pastes (which arrive as individual `KeyEvent`s)
+    /// can be folded into a `[paste N lines]` block.
+    pub burst_buf: String,
+
+    /// Snapshot of cursor position and buffer length taken when the
+    /// current burst started, so we can undo the inserted characters
+    /// if the burst qualifies as a paste.
+    pub burst_snapshot: Option<(Instant, usize, usize)>,
 }
 
 /// Mouse-driven text selection spanning the full TUI. Coordinates are
@@ -1245,7 +1268,12 @@ impl App {
             tui_drag_start: None,
             input_cursor_screen: None,
             function_panel_cursor: None,
-
+            paste_blocks: VecDeque::new(),
+            last_paste_text: None,
+            last_paste_at: None,
+            paste_key_quota: 0,
+            burst_buf: String::new(),
+            burst_snapshot: None,
         };
         app.refresh_status_model_context();
         app

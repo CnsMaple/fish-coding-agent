@@ -105,6 +105,12 @@ impl InputState {
         self.cursor = idx + c.len_utf8();
     }
 
+    pub fn insert_str(&mut self, s: &str) {
+        let idx = self.cursor;
+        self.buffer.insert_str(idx, s);
+        self.cursor = idx + s.len();
+    }
+
     pub fn insert_newline(&mut self) {
         self.insert_char('\n');
     }
@@ -423,11 +429,11 @@ pub fn render(area: Rect, buf: &mut Buffer, app: &mut crate::app::App) {
     title.spans.insert(0, Span::raw(" "));
     title.spans.push(Span::raw(" "));
 
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_set(app.config.border_type.ratatui_set())
-            .border_style(Theme::unfocused_border())
-            .title(title);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_set(app.config.border_type.ratatui_set())
+        .border_style(Theme::unfocused_border())
+        .title(title);
     let inner = block.inner(area);
     block.render(area, buf);
     if inner.height < 1 {
@@ -463,7 +469,11 @@ pub fn render(area: Rect, buf: &mut Buffer, app: &mut crate::app::App) {
         byte_pos = line_end + 1;
         let text_width = UnicodeWidthStr::width(*text);
         let seg_total_w = prompt_width + text_width;
-        let n_vis = if seg_total_w <= inner_w { 1 } else { (seg_total_w + inner_w - 1) / inner_w };
+        let n_vis = if seg_total_w <= inner_w {
+            1
+        } else {
+            (seg_total_w + inner_w - 1) / inner_w
+        };
         if idx < start_line || idx >= end_line {
             continue;
         }
@@ -473,7 +483,11 @@ pub fn render(area: Rect, buf: &mut Buffer, app: &mut crate::app::App) {
         let mut text_byte_offset = 0usize;
         for vi in 0..n_vis {
             let is_first = vi == 0;
-            let max_text_w = if is_first { inner_w.saturating_sub(prompt_width) } else { inner_w };
+            let max_text_w = if is_first {
+                inner_w.saturating_sub(prompt_width)
+            } else {
+                inner_w
+            };
 
             // Find how many bytes of remaining text fit in max_text_w display width
             let remaining = &text[text_byte_offset..];
@@ -481,7 +495,9 @@ pub fn render(area: Rect, buf: &mut Buffer, app: &mut crate::app::App) {
             let mut split_at = 0usize;
             for (bi, ch) in remaining.char_indices() {
                 let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
-                if chunk_w + cw > max_text_w { break; }
+                if chunk_w + cw > max_text_w {
+                    break;
+                }
                 chunk_w += cw;
                 split_at = bi + ch.len_utf8();
             }
@@ -519,12 +535,14 @@ pub fn render(area: Rect, buf: &mut Buffer, app: &mut crate::app::App) {
                 if local_end < chunk_len {
                     spans.push(Span::raw(chunk[local_end..].to_string()));
                 }
-            } else if app.inflight.is_none() && cursor >= chunk_abs_start && cursor <= chunk_abs_end {
+            } else if app.inflight.is_none() && cursor >= chunk_abs_start && cursor <= chunk_abs_end
+            {
                 let local = cursor - chunk_abs_start;
                 if local > 0 {
                     spans.push(Span::raw(chunk[..local].to_string()));
                 }
-                spans.push(Span::styled("\u{2588}", Theme::cursor()));
+                // Hardware cursor (shown via \x1B[?25h) handles the
+                // visual cursor; no block character needed.
                 if local < chunk_len {
                     spans.push(Span::raw(chunk[local..].to_string()));
                 }
@@ -549,23 +567,41 @@ pub fn render(area: Rect, buf: &mut Buffer, app: &mut crate::app::App) {
             let line_start = byte_pos;
             let line_end = line_start + text.len();
             byte_pos = line_end + 1;
-            if cursor < line_start || cursor > line_end { continue; }
+            if cursor < line_start || cursor > line_end {
+                continue;
+            }
             // cursor is in this segment
             let text_width = UnicodeWidthStr::width(*text);
             let seg_total_w = prompt_width + text_width;
-            let n_vis = if seg_total_w <= inner_w { 1 } else { (seg_total_w + inner_w - 1) / inner_w };
+            let n_vis = if seg_total_w <= inner_w {
+                1
+            } else {
+                (seg_total_w + inner_w - 1) / inner_w
+            };
             let text_before = &text[..cursor - line_start];
             let width_before = prompt_width + UnicodeWidthStr::width(text_before);
-            let vi = if n_vis <= 1 { 0 } else { width_before / inner_w };
+            let vi = if n_vis <= 1 {
+                0
+            } else {
+                width_before / inner_w
+            };
             cursor_col = (width_before % inner_w) as u16;
             // Count visual lines from all earlier visible segments
             let mut vis_before = 0usize;
             for (j, t) in all_lines.iter().enumerate() {
-                if j >= idx { break; }
-                if j < start_line || j >= end_line { continue; }
+                if j >= idx {
+                    break;
+                }
+                if j < start_line || j >= end_line {
+                    continue;
+                }
                 let tw = UnicodeWidthStr::width(*t);
                 let stw = prompt_width + tw;
-                let nv = if stw <= inner_w { 1 } else { (stw + inner_w - 1) / inner_w };
+                let nv = if stw <= inner_w {
+                    1
+                } else {
+                    (stw + inner_w - 1) / inner_w
+                };
                 vis_before += nv;
             }
             cursor_vis = vis_before + vi;
