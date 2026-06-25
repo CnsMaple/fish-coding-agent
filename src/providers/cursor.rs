@@ -181,6 +181,8 @@ impl Provider for CursorProvider {
         _client: &reqwest::Client,
         base_url: &str,
         api_key: &str,
+        _access_key: &str,
+        _secret_key: &str,
     ) -> Result<Vec<ModelInfo>> {
         let client = cursor_http2_client()?;
         let url = format!("{}{}", base_url.trim_end_matches('/'), CURSOR_MODELS_PATH);

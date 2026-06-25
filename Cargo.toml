@@ -37,6 +37,7 @@ strip-ansi-escapes = "0.2"
 prost = "0.14.4"
 sha2 = "0.11.0"
 base64 = "0.22.1"
+hex = "0.4"
 uuid = { version = "1.23.3", features = ["v4", "serde"] }
 
 [profile.release]

@@ -300,13 +300,14 @@ fn render_new_provider_picker(
             let id = &s.entries[idx];
             let is_cursor = row == s.cursor;
             let y = list_area.y + (row - start) as u16;
+            let picker_label = s.picker_label(id);
             let line = if is_cursor {
                 Line::from(vec![
                     Span::styled("> ", Theme::bold()),
-                    Span::raw(crate::config::id_display(id)),
+                    Span::raw(picker_label),
                 ])
             } else {
-                Line::from(Span::raw(format!("  {}", crate::config::id_display(id))))
+                Line::from(Span::raw(format!("  {picker_label}")))
             };
             buf.set_line(list_area.x, y, &line, list_area.width);
         }
@@ -463,45 +464,23 @@ fn render_settings(
         }
         SettingsLevel::ConfigForm(form) => {
             use crate::function::ConfigField;
-            let fields = [
-                ConfigField::Name,
-                ConfigField::BaseUrl,
-                ConfigField::KeyOrEnv,
-                ConfigField::Save,
-                ConfigField::Exit,
-            ];
-            // Determine whether the KeyOrEnv field holds an api_key (secret)
-            // or an env name. For the saved api_key we show a placeholder so
-            // the secret is not leaked into the terminal scrollback. The user
-            // can clear-and-retype to change it; if they leave the field
-            // untouched, the original key is preserved on save.
-            let key_is_secret = crate::config::parse_id(&form.id)
-                .map(|(_, m)| m == crate::config::ProviderMode::Key)
-                .unwrap_or(false);
+            let fields = form.active_fields();
             for (_i, f) in fields.iter().enumerate() {
-                // Highlight only the field that is actually focused. Up/Down
-                // keeps `form.focused` in sync with `s.cursor` (see
-                // `sync_form_focus_to_cursor`), and Tab cycles `form.focused`
-                // directly. Using `s.cursor` here as well would make a stale
-                // cursor cause two fields to appear focused at once.
                 let focused = form.focused == *f;
                 let label = form.field_label(*f);
                 let value: Option<String> = match f {
                     ConfigField::Name => Some(form.name.clone()),
                     ConfigField::BaseUrl => Some(form.base_url.clone()),
-                    ConfigField::KeyOrEnv => {
-                        let is_oauth = crate::config::parse_id(&form.id)
-                            .map(|(_, m)| m == crate::config::ProviderMode::Oauth)
-                            .unwrap_or(false);
-                        if is_oauth {
-                            Some("browser auth on save".to_string())
-                        } else if key_is_secret && !form.key_modified && !form.key_or_env.is_empty()
-                        {
+                    ConfigField::Key => {
+                        if !form.key_modified && !form.api_key.is_empty() {
                             Some("(set, hidden)".to_string())
                         } else {
-                            Some(form.key_or_env.clone())
+                            Some(form.api_key.clone())
                         }
                     }
+                    ConfigField::Env => Some(form.api_key_env.clone()),
+                    ConfigField::AccessKey => Some(form.access_key.clone()),
+                    ConfigField::SecretKey => Some(form.secret_key.clone()),
                     _ => None,
                 };
                 body_lines.push(list_item(focused, label, value));

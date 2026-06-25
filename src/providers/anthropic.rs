@@ -20,6 +20,8 @@ impl Provider for AnthropicProvider {
         client: &reqwest::Client,
         base_url: &str,
         api_key: &str,
+        _access_key: &str,
+        _secret_key: &str,
     ) -> Result<Vec<ModelInfo>> {
         // Try the /v1/models endpoint (works for some Anthropic-compatible proxies).
         // For the official Anthropic base URL this returns 404 -> we surface NoModelsEndpoint.

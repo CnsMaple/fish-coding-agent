@@ -11,6 +11,9 @@ pub enum ProviderKind {
     Openai,
     Anthropic,
     Cursor,
+    DeepSeek,
+    MiniMax,
+    Volcengine,
 }
 
 impl ProviderKind {
@@ -19,6 +22,9 @@ impl ProviderKind {
             ProviderKind::Openai => "openai",
             ProviderKind::Anthropic => "anthropic",
             ProviderKind::Cursor => "cursor",
+            ProviderKind::DeepSeek => "deepseek",
+            ProviderKind::MiniMax => "minimax",
+            ProviderKind::Volcengine => "volcengine",
         }
     }
 
@@ -27,6 +33,21 @@ impl ProviderKind {
             ProviderKind::Openai => "OpenAI",
             ProviderKind::Anthropic => "Anthropic",
             ProviderKind::Cursor => "Cursor",
+            ProviderKind::DeepSeek => "DeepSeek",
+            ProviderKind::MiniMax => "MiniMax",
+            ProviderKind::Volcengine => "Volcengine",
+        }
+    }
+
+    /// Label shown in the new-provider picker, e.g. "OpenAI (custom)".
+    pub fn picker_label(&self) -> &'static str {
+        match self {
+            ProviderKind::Openai => "OpenAI (custom)",
+            ProviderKind::Anthropic => "Anthropic (custom)",
+            ProviderKind::Cursor => "Cursor (oauth)",
+            ProviderKind::DeepSeek => "DeepSeek (openai)",
+            ProviderKind::MiniMax => "MiniMax (openai)",
+            ProviderKind::Volcengine => "Volcengine (openai)",
         }
     }
 
@@ -35,15 +56,21 @@ impl ProviderKind {
             "openai" => Some(Self::Openai),
             "anthropic" => Some(Self::Anthropic),
             "cursor" => Some(Self::Cursor),
+            "deepseek" => Some(Self::DeepSeek),
+            "minimax" => Some(Self::MiniMax),
+            "volcengine" => Some(Self::Volcengine),
             _ => None,
         }
     }
 
-    pub fn all() -> [ProviderKind; 3] {
+    pub fn all() -> [ProviderKind; 6] {
         [
             ProviderKind::Openai,
             ProviderKind::Anthropic,
             ProviderKind::Cursor,
+            ProviderKind::DeepSeek,
+            ProviderKind::MiniMax,
+            ProviderKind::Volcengine,
         ]
     }
 }
@@ -81,7 +108,7 @@ impl ProviderMode {
     pub fn for_kind(kind: ProviderKind) -> &'static [ProviderMode] {
         match kind {
             ProviderKind::Cursor => &[ProviderMode::Oauth],
-            _ => &[ProviderMode::Key, ProviderMode::Env],
+            _ => &[ProviderMode::Key],
         }
     }
 }
@@ -103,10 +130,10 @@ pub fn parse_id(id: &str) -> Option<(ProviderKind, ProviderMode)> {
     ))
 }
 
-/// Human-readable label, e.g. "OpenAI (key)".
+/// Human-readable label, e.g. "OpenAI".
 pub fn id_display(id: &str) -> String {
     match parse_id(id) {
-        Some((k, m)) => format!("{} ({})", k.display_name(), m.as_str()),
+        Some((k, _)) => k.display_name().to_string(),
         None => id.to_string(),
     }
 }
@@ -249,6 +276,12 @@ pub struct ProviderConfig {
     /// when empty.
     #[serde(default)]
     pub name: String,
+    /// Volcengine Access Key for model list API (HMAC-SHA256 auth).
+    #[serde(default)]
+    pub access_key: String,
+    /// Volcengine Secret Key for model list API (HMAC-SHA256 auth).
+    #[serde(default)]
+    pub secret_key: String,
 }
 
 impl ProviderConfig {
@@ -260,6 +293,8 @@ impl ProviderConfig {
             model: String::new(),
             model_display: String::new(),
             name: String::new(),
+            access_key: String::new(),
+            secret_key: String::new(),
         }
     }
 }
@@ -269,6 +304,9 @@ pub fn default_base_url(kind: ProviderKind) -> &'static str {
         ProviderKind::Openai => "https://api.openai.com/v1",
         ProviderKind::Anthropic => "https://api.anthropic.com",
         ProviderKind::Cursor => "https://api2.cursor.sh",
+        ProviderKind::DeepSeek => "https://api.deepseek.com",
+        ProviderKind::MiniMax => "https://api.minimaxi.com",
+        ProviderKind::Volcengine => "https://ark.cn-beijing.volces.com/api/plan/v3",
     }
 }
 
@@ -277,15 +315,14 @@ pub fn default_api_key_env(kind: ProviderKind) -> &'static str {
         ProviderKind::Openai => "OPENAI_API_KEY",
         ProviderKind::Anthropic => "ANTHROPIC_API_KEY",
         ProviderKind::Cursor => "",
+        ProviderKind::DeepSeek => "DEEPSEEK_API_KEY",
+        ProviderKind::MiniMax => "MINIMAX_API_KEY",
+        ProviderKind::Volcengine => "VOLCENGINE_API_KEY",
     }
 }
 
-pub fn default_model(kind: ProviderKind) -> &'static str {
-    match kind {
-        ProviderKind::Openai => "gpt-4o-mini",
-        ProviderKind::Anthropic => "claude-3-5-sonnet-latest",
-        ProviderKind::Cursor => "",
-    }
+pub fn default_model(_kind: ProviderKind) -> &'static str {
+    ""
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -346,6 +383,8 @@ impl Config {
                 ProviderConfig {
                     api_key: p.api_key,
                     api_key_env: p.api_key_env,
+                    access_key: String::new(),
+                    secret_key: String::new(),
                     base_url: p.base_url,
                     model: old.active_model.clone(),
                     model_display: String::new(),
@@ -524,13 +563,15 @@ impl Config {
             .collect()
     }
 
-    /// All `(kind, mode)` combinations, used by the "new provider" picker.
+    /// All possible provider kinds, used by the "new provider" picker.
     pub fn all_possible_ids() -> Vec<ProviderId> {
         let mut out = Vec::new();
         for k in ProviderKind::all() {
-            for &m in ProviderMode::for_kind(k) {
-                out.push(make_id(k, m));
-            }
+            let mode = match k {
+                ProviderKind::Cursor => ProviderMode::Oauth,
+                _ => ProviderMode::Key,
+            };
+            out.push(make_id(k, mode));
         }
         out
     }

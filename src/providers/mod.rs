@@ -1,6 +1,7 @@
 pub mod anthropic;
 pub mod cursor;
 pub mod openai;
+pub mod volcengine;
 
 use crate::config::ProviderKind;
 use crate::function::notifications::ModelInfo;
@@ -87,6 +88,8 @@ pub trait Provider: Send + Sync {
         client: &reqwest::Client,
         base_url: &str,
         api_key: &str,
+        access_key: &str,
+        secret_key: &str,
     ) -> Result<Vec<ModelInfo>>;
     async fn chat_stream(
         &self,
@@ -121,13 +124,18 @@ pub async fn list_models(
     kind: ProviderKind,
     base_url: &str,
     api_key: &str,
+    access_key: &str,
+    secret_key: &str,
 ) -> Result<Vec<ModelInfo>> {
     let p: Box<dyn Provider> = match kind {
         ProviderKind::Openai => Box::new(openai::OpenAiProvider),
         ProviderKind::Anthropic => Box::new(anthropic::AnthropicProvider),
         ProviderKind::Cursor => Box::new(cursor::CursorProvider),
+        ProviderKind::DeepSeek => Box::new(openai::OpenAiProvider),
+        ProviderKind::MiniMax => Box::new(openai::OpenAiProvider),
+        ProviderKind::Volcengine => Box::new(volcengine::VolcengineProvider),
     };
-    p.list_models(client, base_url, api_key).await
+    p.list_models(client, base_url, api_key, access_key, secret_key).await
 }
 
 pub fn provider(kind: ProviderKind) -> Box<dyn Provider> {
@@ -135,5 +143,8 @@ pub fn provider(kind: ProviderKind) -> Box<dyn Provider> {
         ProviderKind::Openai => Box::new(openai::OpenAiProvider),
         ProviderKind::Anthropic => Box::new(anthropic::AnthropicProvider),
         ProviderKind::Cursor => Box::new(cursor::CursorProvider),
+        ProviderKind::DeepSeek => Box::new(openai::OpenAiProvider),
+        ProviderKind::MiniMax => Box::new(openai::OpenAiProvider),
+        ProviderKind::Volcengine => Box::new(openai::OpenAiProvider),
     }
 }

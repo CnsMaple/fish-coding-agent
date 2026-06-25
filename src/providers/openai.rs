@@ -19,6 +19,8 @@ impl Provider for OpenAiProvider {
         client: &reqwest::Client,
         base_url: &str,
         api_key: &str,
+        _access_key: &str,
+        _secret_key: &str,
     ) -> Result<Vec<ModelInfo>> {
         let url = format!("{}/models", base_url.trim_end_matches('/'));
         let resp = client

@@ -404,6 +404,14 @@ fn handle_msg(msg: AppMsg, app: &mut App) {
             error,
             no_endpoint,
         } => {
+            let models_path = match provider {
+                crate::config::ProviderKind::Openai => "/models",
+                crate::config::ProviderKind::Anthropic => "/v1/models",
+                crate::config::ProviderKind::Cursor => "",
+                crate::config::ProviderKind::DeepSeek => "/models",
+                crate::config::ProviderKind::MiniMax => "/models",
+                crate::config::ProviderKind::Volcengine => "/models",
+            };
             if let Some(crate::function::SidebarTab::ModelPicker(s)) = app
                 .function
                 .tabs
@@ -412,7 +420,7 @@ fn handle_msg(msg: AppMsg, app: &mut App) {
             {
                 s.fetching = false;
                 s.fetch_error = Some(if no_endpoint {
-                    "[no /v1/models endpoint at this base_url]".to_string()
+                    format!("[no {models_path} endpoint at this base_url]")
                 } else {
                     error.clone()
                 });
@@ -422,7 +430,7 @@ fn handle_msg(msg: AppMsg, app: &mut App) {
             app.notify(
                 ToastLevel::Fail,
                 if no_endpoint {
-                    "base_url has no /v1/models; use Manual id".to_string()
+                    format!("base_url has no {models_path}; use Manual id")
                 } else {
                     format!("fetch models for {}: {}", provider.as_str(), error)
                 },
@@ -2097,9 +2105,19 @@ fn trigger_picker_fetch(app: &mut App, state: &mut crate::function::ModelPickerS
             .map(|c| c.base_url.clone())
             .unwrap_or_default();
         let key = app.config.effective_api_key(&active_id).unwrap_or_default();
+        let access_key = app
+            .config
+            .entry(&active_id)
+            .map(|c| c.access_key.clone())
+            .unwrap_or_default();
+        let secret_key = app
+            .config
+            .entry(&active_id)
+            .map(|c| c.secret_key.clone())
+            .unwrap_or_default();
         let client = app.reqwest.clone();
         tokio::spawn(async move {
-            match crate::providers::list_models(&client, p, &base, &key).await {
+            match crate::providers::list_models(&client, p, &base, &key, &access_key, &secret_key).await {
                 Ok(models) => {
                     let _ = tx.send(AppMsg::ModelsFetched {
                         provider: p,
@@ -2185,14 +2203,12 @@ fn handle_settings_key(
 /// highlight. Otherwise the user navigates with Up/Down but typing still
 /// goes to the previously-Tabbed field.
 fn sync_form_focus_to_cursor(state: &mut crate::function::SettingsState) {
-    use crate::function::{ConfigField, SettingsLevel};
+    use crate::function::SettingsLevel;
     if let SettingsLevel::ConfigForm(form) = &mut state.level {
+        let fields = form.active_fields();
         form.focused = match state.cursor {
-            0 => ConfigField::Name,
-            1 => ConfigField::BaseUrl,
-            2 => ConfigField::KeyOrEnv,
-            3 => ConfigField::Save,
-            _ => ConfigField::Exit,
+            i if i < fields.len() => fields[i],
+            _ => *fields.last().unwrap_or(&crate::function::ConfigField::Exit),
         };
     }
 }
@@ -2422,7 +2438,12 @@ fn handle_settings_enter(app: &mut App, state: &mut crate::function::SettingsSta
         }
         SettingsLevel::ConfigForm(form) => {
             match form.focused {
-                ConfigField::Name | ConfigField::BaseUrl | ConfigField::KeyOrEnv => {
+                ConfigField::Name
+                | ConfigField::BaseUrl
+                | ConfigField::Key
+                | ConfigField::Env
+                | ConfigField::AccessKey
+                | ConfigField::SecretKey => {
                     // No auto-advance. User moves fields with Up/Down/Tab.
                     SettingsLevel::ConfigForm(form)
                 }
@@ -2432,6 +2453,15 @@ fn handle_settings_enter(app: &mut App, state: &mut crate::function::SettingsSta
                         let mut f = form;
                         f.form_error = Some("[!] base_url is required".to_string());
                         app.notify(ToastLevel::Fail, "base_url is required");
+                        SettingsLevel::ConfigForm(f)
+                    } else if !form.is_cursor()
+                        && form.api_key.trim().is_empty()
+                        && form.api_key_env.trim().is_empty()
+                    {
+                        use crate::function::notifications::ToastLevel;
+                        let mut f = form;
+                        f.form_error = Some("[!] api_key or env name is required".to_string());
+                        app.notify(ToastLevel::Fail, "api_key or env name is required");
                         SettingsLevel::ConfigForm(f)
                     } else {
                         settings_save_form(app, form);
@@ -2458,9 +2488,8 @@ fn settings_save_form(app: &mut App, form: crate::function::ConfigFormState) {
     use crate::function::notifications::ToastLevel;
 
     let mut id = form.id.clone();
-    let (_kind, mode) = parse_id(&id).unwrap_or((ProviderKind::Openai, ProviderMode::Key));
+    let (_kind, _mode) = parse_id(&id).unwrap_or((ProviderKind::Openai, ProviderMode::Key));
     let base_url = form.base_url.trim().to_string();
-    let key_or_env = form.key_or_env.clone();
     let was_new = form.is_new;
 
     // Deduplicate: if the base ID already exists, append -2, -3, etc.
@@ -2472,9 +2501,8 @@ fn settings_save_form(app: &mut App, form: crate::function::ConfigFormState) {
         }
     }
 
-    // Preserve existing model and api_key (for Key mode in edit form) if
-    // the user did not touch the corresponding field. We always pull the
-    // current entry from config, then overwrite with form values.
+    // Preserve existing model and api_key if the user did not touch
+    // the corresponding fields.
     let existing = app.config.entry(&id).cloned();
     let model = existing
         .as_ref()
@@ -2494,26 +2522,22 @@ fn settings_save_form(app: &mut App, form: crate::function::ConfigFormState) {
             .as_ref()
             .map(|c| c.api_key_env.clone())
             .unwrap_or_default(),
+        access_key: form.access_key.trim().to_string(),
+        secret_key: form.secret_key.trim().to_string(),
         base_url,
         model,
         model_display,
         name: String::new(),
     };
-    // For new entries, use the form's name directly.
-    // For edit entries, the user may have set a custom name.
     new_cfg.name = form.name.trim().to_string();
-    // For new entries, use the form's key/env directly.
-    // For edit entries, use the form's value only if the user actually
-    // modified it (otherwise the masked placeholder would clobber the
-    // real key on save).
-    let apply_form_value =
-        was_new || (mode == ProviderMode::Key && form.key_modified) || mode == ProviderMode::Env;
-    if apply_form_value {
-        match mode {
-            ProviderMode::Key => new_cfg.api_key = key_or_env,
-            ProviderMode::Env => new_cfg.api_key_env = key_or_env,
-            ProviderMode::Oauth => {}
-        }
+
+    // api_key: for edit, only apply if user modified the field
+    if was_new || form.key_modified {
+        new_cfg.api_key = form.api_key.trim().to_string();
+    }
+    // api_key_env: for edit, only apply if user modified the field
+    if was_new || form.env_modified {
+        new_cfg.api_key_env = form.api_key_env.trim().to_string();
     }
 
     app.config.entries.insert(id.clone(), new_cfg);
@@ -2567,10 +2591,20 @@ fn settings_save_form(app: &mut App, form: crate::function::ConfigFormState) {
                 .map(|c| c.base_url.clone())
                 .unwrap_or_default();
             let key = app.config.effective_api_key(&active_id).unwrap_or_default();
+            let access_key = app
+                .config
+                .entry(&active_id)
+                .map(|c| c.access_key.clone())
+                .unwrap_or_default();
+            let secret_key = app
+                .config
+                .entry(&active_id)
+                .map(|c| c.secret_key.clone())
+                .unwrap_or_default();
             let client = app.reqwest.clone();
             if let Some(tx) = app.msg_tx.clone() {
                 tokio::spawn(async move {
-                    match crate::providers::list_models(&client, k, &base, &key).await {
+                    match crate::providers::list_models(&client, k, &base, &key, &access_key, &secret_key).await {
                         Ok(models) => {
                             let _ = tx.send(AppMsg::ModelsFetched {
                                 provider: k,
@@ -2685,14 +2719,13 @@ fn handle_form_text(
         return false;
     }
     if matches!(k.code, crossterm::event::KeyCode::Tab) {
-        // Tab cycles fields within the form.
-        form.focused = match form.focused {
-            ConfigField::Name => ConfigField::BaseUrl,
-            ConfigField::BaseUrl => ConfigField::KeyOrEnv,
-            ConfigField::KeyOrEnv => ConfigField::Save,
-            ConfigField::Save => ConfigField::Exit,
-            ConfigField::Exit => ConfigField::Name,
-        };
+        // Tab cycles fields within the form using active_fields.
+        let fields = form.active_fields();
+        let idx = fields
+            .iter()
+            .position(|f| *f == form.focused)
+            .unwrap_or(0);
+        form.focused = fields[(idx + 1) % fields.len()];
         return true;
     }
     match form.focused {
@@ -2718,32 +2751,65 @@ fn handle_form_text(
             }
             _ => false,
         },
-        ConfigField::KeyOrEnv => {
-            if crate::config::parse_id(&form.id)
-                .map(|(_, m)| m == crate::config::ProviderMode::Oauth)
-                .unwrap_or(false)
-            {
-                return false;
-            }
-            // First edit on the api_key field clears the saved (masked)
-            // value so the user can type a new key. If they don't touch
-            // the field, the original is preserved on save.
-            if !form.key_modified && !form.key_or_env.is_empty() {
-                form.key_or_env.clear();
+        ConfigField::Key => {
+            // First edit clears the saved (masked) value so the user can
+            // type a new key. If they don't touch the field, the original
+            // is preserved on save.
+            if !form.key_modified && !form.api_key.is_empty() {
+                form.api_key.clear();
             }
             form.key_modified = true;
             match k.code {
                 crossterm::event::KeyCode::Char(c) => {
-                    form.key_or_env.push(c);
+                    form.api_key.push(c);
                     true
                 }
                 crossterm::event::KeyCode::Backspace => {
-                    form.key_or_env.pop();
+                    form.api_key.pop();
                     true
                 }
                 _ => false,
             }
         }
+        ConfigField::Env => {
+            if !form.env_modified && !form.api_key_env.is_empty() {
+                form.api_key_env.clear();
+            }
+            form.env_modified = true;
+            match k.code {
+                crossterm::event::KeyCode::Char(c) => {
+                    form.api_key_env.push(c);
+                    true
+                }
+                crossterm::event::KeyCode::Backspace => {
+                    form.api_key_env.pop();
+                    true
+                }
+                _ => false,
+            }
+        }
+        ConfigField::AccessKey => match k.code {
+            crossterm::event::KeyCode::Char(c) => {
+                form.access_key.push(c);
+                true
+            }
+            crossterm::event::KeyCode::Backspace => {
+                form.access_key.pop();
+                true
+            }
+            _ => false,
+        },
+        ConfigField::SecretKey => match k.code {
+            crossterm::event::KeyCode::Char(c) => {
+                form.secret_key.push(c);
+                true
+            }
+            crossterm::event::KeyCode::Backspace => {
+                form.secret_key.pop();
+                true
+            }
+            _ => false,
+        },
         _ => false,
     }
 }
@@ -2865,6 +2931,8 @@ mod tests {
                 model: String::new(),
                 model_display: String::new(),
                 name: String::new(),
+                access_key: String::new(),
+                secret_key: String::new(),
             });
         }
         cfg.active = Some(make_id(ProviderKind::Openai, ProviderMode::Key));
@@ -2962,6 +3030,8 @@ mod tests {
                 model: "claude-3-5-sonnet-latest".to_string(),
                 model_display: String::new(),
                 name: String::new(),
+                access_key: String::new(),
+                secret_key: String::new(),
             },
         );
         let form = crate::function::ConfigFormState::new_for_edit(
@@ -2972,7 +3042,8 @@ mod tests {
         // modify base_url and env
         let mut form = form;
         form.base_url = "https://custom.example.com".to_string();
-        form.key_or_env = "CUSTOM_ENV".to_string();
+        form.api_key_env = "CUSTOM_ENV".to_string();
+        form.env_modified = true;
         settings_save_form(&mut app, form);
         let entry = app.config.entry(&id).unwrap();
         assert_eq!(entry.base_url, "https://custom.example.com");
@@ -3548,6 +3619,8 @@ mod tests {
                 model: "gpt-4o-mini".to_string(),
                 model_display: String::new(),
                 name: String::new(),
+                access_key: String::new(),
+                secret_key: String::new(),
             },
         );
         app.config.active = Some(id.clone());
@@ -3609,6 +3682,8 @@ mod tests {
                 model: "gpt-4o-mini".to_string(),
                 model_display: String::new(),
                 name: String::new(),
+                access_key: String::new(),
+                secret_key: String::new(),
             },
         );
         // Default anthropic:key is still invalid (empty api_key, env unset).
@@ -4250,11 +4325,11 @@ mod tests {
             panic!("expected ConfigForm level");
         }
 
-        // Press Down again: cursor 1 -> 2, form.focused -> KeyOrEnv.
+        // Press Down again: cursor 1 -> 2, form.focused -> Key.
         handle_settings_key(down, &mut app, &mut state);
         assert_eq!(state.cursor, 2);
         if let SettingsLevel::ConfigForm(f) = &state.level {
-            assert_eq!(f.focused, ConfigField::KeyOrEnv, "Down must move focus");
+            assert_eq!(f.focused, ConfigField::Key, "Down must move focus");
         } else {
             panic!("expected ConfigForm level");
         }
@@ -4295,6 +4370,8 @@ mod tests {
                 model: "gpt-4o-mini".to_string(),
                 model_display: String::new(),
                 name: String::new(),
+                access_key: String::new(),
+                secret_key: String::new(),
             },
         );
         let form = crate::function::ConfigFormState::new_for_edit(
@@ -4303,15 +4380,15 @@ mod tests {
             ProviderMode::Key,
         );
         assert!(!form.key_modified);
-        assert_eq!(form.key_or_env, "sk-saved-key-1234");
+        assert_eq!(form.api_key, "sk-saved-key-1234");
 
         let mut state = crate::function::SettingsState::new(&app.config);
         state.level = SettingsLevel::ConfigForm(form);
         if let SettingsLevel::ConfigForm(ref mut f) = state.level {
-            f.focused = ConfigField::KeyOrEnv;
+            f.focused = ConfigField::Key;
         }
 
-        // Type a single char on KeyOrEnv.
+        // Type a single char on Key.
         let key = crossterm::event::KeyEvent::new(
             crossterm::event::KeyCode::Char('x'),
             crossterm::event::KeyModifiers::NONE,
@@ -4324,7 +4401,7 @@ mod tests {
                 "key_modified must flip to true on first edit"
             );
             assert_eq!(
-                f.key_or_env, "x",
+                f.api_key, "x",
                 "saved key must be cleared before the new char"
             );
         } else {
@@ -4350,6 +4427,8 @@ mod tests {
                 model: "gpt-4o-mini".to_string(),
                 model_display: String::new(),
                 name: String::new(),
+                access_key: String::new(),
+                secret_key: String::new(),
             },
         );
         let form = crate::function::ConfigFormState::new_for_edit(
@@ -4385,6 +4464,8 @@ mod tests {
                 model: "gpt-4o-mini".to_string(),
                 model_display: String::new(),
                 name: String::new(),
+                access_key: String::new(),
+                secret_key: String::new(),
             },
         );
         let mut form = crate::function::ConfigFormState::new_for_edit(
@@ -4393,7 +4474,7 @@ mod tests {
             ProviderMode::Key,
         );
         form.key_modified = true;
-        form.key_or_env = "sk-new".to_string();
+        form.api_key = "sk-new".to_string();
 
         settings_save_form(&mut app, form);
 
@@ -4579,14 +4660,13 @@ mod tests {
             .find(|e| e.id.ends_with(":key") && e.id.starts_with("openai:"))
             .map(|e| e.display.as_str());
         assert_eq!(staging_display, Some("staging-openai"));
-        // The nameless Anthropic entry falls back to the "Kind (mode)"
-        // label so it still reads sensibly.
+        // The nameless Anthropic entry falls back to the kind name.
         let anthro_display = state
             .entries
             .iter()
             .find(|e| e.id.starts_with("anthropic:"))
             .map(|e| e.display.as_str());
-        assert_eq!(anthro_display, Some("Anthropic (key)"));
+        assert_eq!(anthro_display, Some("Anthropic"));
     }
 
     #[test]
@@ -4707,6 +4787,8 @@ mod tests {
                 model: "gpt-4o-mini".to_string(),
                 model_display: String::new(),
                 name: String::new(),
+                access_key: String::new(),
+                secret_key: String::new(),
             },
         );
         app.config.active = Some(id.clone());
@@ -4861,6 +4943,8 @@ mod tests {
                 model: "claude-3-5-sonnet-latest".to_string(),
                 model_display: String::new(),
                 name: "mybot".to_string(),
+                access_key: String::new(),
+                secret_key: String::new(),
             },
         );
         app.config.active = Some(id.clone());
@@ -4882,6 +4966,8 @@ mod tests {
                 model: String::new(),
                 model_display: String::new(),
                 name: "mybot".to_string(),
+                access_key: String::new(),
+                secret_key: String::new(),
             },
         );
         app.config.active = Some(id.clone());

@@ -107,11 +107,14 @@ pub enum SidebarTab {
 /// Configurable field within a [`ConfigFormState`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfigField {
-    Name = 0,
-    BaseUrl = 1,
-    KeyOrEnv = 2,
-    Save = 3,
-    Exit = 4,
+    Name,
+    BaseUrl,
+    Key,
+    Env,
+    AccessKey,
+    SecretKey,
+    Save,
+    Exit,
 }
 
 /// State for the "edit / create provider" form.
@@ -123,17 +126,22 @@ pub struct ConfigFormState {
     /// `anthropic`) is used in the status bar.
     pub name: String,
     pub base_url: String,
-    pub key_or_env: String,
+    pub api_key: String,
+    pub api_key_env: String,
+    pub access_key: String,
+    pub secret_key: String,
     /// The field the user is currently editing.
     pub focused: ConfigField,
     /// Error message to display inline (e.g. base_url is required).
     pub form_error: Option<String>,
-    /// For edit forms in Key mode: whether the user has touched the api_key
-    /// field. Starts false (the saved key is hidden behind a placeholder);
+    /// For edit forms: whether the user has touched the api_key field.
+    /// Starts false (the saved key is hidden behind a placeholder);
     /// flips to true on the first character or backspace, at which point the
     /// value is cleared and the user can type a new key. On save, if this is
     /// still false, the original api_key is preserved.
     pub key_modified: bool,
+    /// Same for api_key_env.
+    pub env_modified: bool,
 }
 
 impl ConfigFormState {
@@ -142,17 +150,20 @@ impl ConfigFormState {
         mode: crate::config::ProviderMode,
     ) -> Self {
         let id = crate::config::make_id(kind, mode);
-        let key_or_env = match mode {
-            crate::config::ProviderMode::Key => String::new(),
-            crate::config::ProviderMode::Env => String::new(),
-            crate::config::ProviderMode::Oauth => String::new(),
-        };
         let name = match kind {
             crate::config::ProviderKind::Cursor => "Cursor".to_string(),
+            crate::config::ProviderKind::DeepSeek => "DeepSeek".to_string(),
+            crate::config::ProviderKind::MiniMax => "MiniMax".to_string(),
+            crate::config::ProviderKind::Volcengine => "Volcengine".to_string(),
             _ => String::new(),
         };
         let base_url = match kind {
-            crate::config::ProviderKind::Cursor => crate::config::default_base_url(kind).to_string(),
+            crate::config::ProviderKind::Cursor
+            | crate::config::ProviderKind::DeepSeek
+            | crate::config::ProviderKind::MiniMax
+            | crate::config::ProviderKind::Volcengine => {
+                crate::config::default_base_url(kind).to_string()
+            }
             _ => String::new(),
         };
         Self {
@@ -160,54 +171,89 @@ impl ConfigFormState {
             id,
             name,
             base_url,
-            key_or_env,
+            api_key: String::new(),
+            api_key_env: String::new(),
+            access_key: String::new(),
+            secret_key: String::new(),
             focused: ConfigField::Name,
             form_error: None,
             key_modified: false,
+            env_modified: false,
         }
     }
 
     pub fn new_for_edit(
         id: String,
         cfg: &crate::config::ProviderConfig,
-        mode: crate::config::ProviderMode,
+        _mode: crate::config::ProviderMode,
     ) -> Self {
-        let key_or_env = match mode {
-            crate::config::ProviderMode::Key => cfg.api_key.clone(),
-            crate::config::ProviderMode::Env => cfg.api_key_env.clone(),
-            crate::config::ProviderMode::Oauth => String::new(),
-        };
         Self {
             is_new: false,
             id,
             name: cfg.name.clone(),
             base_url: cfg.base_url.clone(),
-            key_or_env,
+            api_key: cfg.api_key.clone(),
+            api_key_env: cfg.api_key_env.clone(),
+            access_key: cfg.access_key.clone(),
+            secret_key: cfg.secret_key.clone(),
             focused: ConfigField::Name,
             form_error: None,
             key_modified: false,
+            env_modified: false,
+        }
+    }
+
+    pub fn is_cursor(&self) -> bool {
+        crate::config::parse_id(&self.id)
+            .map(|(k, _)| k == crate::config::ProviderKind::Cursor)
+            .unwrap_or(false)
+    }
+
+    pub fn is_volcengine(&self) -> bool {
+        crate::config::parse_id(&self.id)
+            .map(|(k, _)| k == crate::config::ProviderKind::Volcengine)
+            .unwrap_or(false)
+    }
+
+    pub fn active_fields(&self) -> Vec<ConfigField> {
+        if self.is_cursor() {
+            vec![
+                ConfigField::Name,
+                ConfigField::BaseUrl,
+                ConfigField::Save,
+                ConfigField::Exit,
+            ]
+        } else if self.is_volcengine() {
+            vec![
+                ConfigField::Name,
+                ConfigField::BaseUrl,
+                ConfigField::Key,
+                ConfigField::Env,
+                ConfigField::AccessKey,
+                ConfigField::SecretKey,
+                ConfigField::Save,
+                ConfigField::Exit,
+            ]
+        } else {
+            vec![
+                ConfigField::Name,
+                ConfigField::BaseUrl,
+                ConfigField::Key,
+                ConfigField::Env,
+                ConfigField::Save,
+                ConfigField::Exit,
+            ]
         }
     }
 
     pub fn field_label(&self, f: ConfigField) -> &'static str {
         match f {
             ConfigField::Name => "name",
-            ConfigField::BaseUrl => "base url *",
-            ConfigField::KeyOrEnv => {
-                if crate::config::parse_id(&self.id)
-                    .map(|(_, m)| m == crate::config::ProviderMode::Key)
-                    .unwrap_or(false)
-                {
-                    "api key"
-                } else if crate::config::parse_id(&self.id)
-                    .map(|(_, m)| m == crate::config::ProviderMode::Oauth)
-                    .unwrap_or(false)
-                {
-                    "oauth"
-                } else {
-                    "env name"
-                }
-            }
+            ConfigField::BaseUrl => "base url",
+            ConfigField::Key => "api key",
+            ConfigField::Env => "env name",
+            ConfigField::AccessKey => "access key",
+            ConfigField::SecretKey => "secret key",
             ConfigField::Save => "save",
             ConfigField::Exit => "exit",
         }
@@ -308,6 +354,12 @@ impl NewProviderPickerState {
         s
     }
 
+    pub fn picker_label(&self, id: &str) -> String {
+        crate::config::parse_id(id)
+            .map(|(k, _)| k.picker_label().to_string())
+            .unwrap_or_else(|| crate::config::id_display(id))
+    }
+
     pub fn rebuild_filter(&mut self) {
         let q = self.query.to_lowercase();
         self.filtered = self
@@ -317,7 +369,7 @@ impl NewProviderPickerState {
             .filter(|(_, id)| {
                 q.is_empty()
                     || id.to_lowercase().contains(&q)
-                    || crate::config::id_display(id).to_lowercase().contains(&q)
+                    || self.picker_label(id).to_lowercase().contains(&q)
             })
             .map(|(i, _)| i)
             .collect();
@@ -379,7 +431,7 @@ impl SettingsState {
             SettingsLevel::ProviderList => 1 + cfg.configured_provider_ids().len(), // new + existing
             SettingsLevel::NewProviderKind => self.new_provider.filtered.len(),
             SettingsLevel::ExistingActions(_) => 2, // edit, delete
-            SettingsLevel::ConfigForm(_) => 5,      // name, base url, key/env, save, exit
+            SettingsLevel::ConfigForm(form) => form.active_fields().len(),
             SettingsLevel::ThinkingDisplayList => 3, // show, hide, while streaming
             SettingsLevel::ToolResultDisplayList => 3, // show, hide, while streaming
             SettingsLevel::EnterBehaviorList => 2,  // enter sends, enter newline
