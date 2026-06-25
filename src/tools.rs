@@ -3,6 +3,7 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
+use regex::Regex;
 use serde::Deserialize;
 use serde_json::json;
 
@@ -57,7 +58,8 @@ fn tool_defs() -> Vec<ToolDef> {
                     "start_line": { "type": "integer", "minimum": 1, "description": "Optional 1-based line to start reading." },
                     "end_line": { "type": "integer", "minimum": 1, "description": "Optional 1-based line to stop reading, inclusive." }
                 },
-                "required": ["path"]
+                "required": ["path"],
+                "additionalProperties": false
             }),
         },
         ToolDef {
@@ -71,7 +73,8 @@ fn tool_defs() -> Vec<ToolDef> {
                     "start_line": { "type": "integer", "minimum": 1, "description": "Optional 1-based line to start replacing." },
                     "end_line": { "type": "integer", "minimum": 1, "description": "Optional 1-based line to stop replacing, inclusive." }
                 },
-                "required": ["path", "content"]
+                "required": ["path", "content"],
+                "additionalProperties": false
             }),
         },
         ToolDef {
@@ -85,7 +88,8 @@ fn tool_defs() -> Vec<ToolDef> {
                 "properties": {
                     "command": { "type": "string", "description": "Command line to execute." }
                 },
-                "required": ["command"]
+                "required": ["command"],
+                "additionalProperties": false
             }),
         },
         ToolDef {
@@ -96,19 +100,21 @@ fn tool_defs() -> Vec<ToolDef> {
                 "properties": {
                     "code": { "type": "string", "description": "Python source code to execute." }
                 },
-                "required": ["code"]
+                "required": ["code"],
+                "additionalProperties": false
             }),
         },
         ToolDef {
             name: "grep",
-            description: "Search for literal text in UTF-8 files under a workspace path and return matching file/line snippets.".to_string(),
+            description: "Search for a regex pattern in UTF-8 files under a workspace path and return matching file/line snippets.".to_string(),
             schema: json!({
                 "type": "object",
                 "properties": {
-                    "pattern": { "type": "string", "description": "Literal text to search for." },
+                    "pattern": { "type": "string", "description": "Regex pattern to search for." },
                     "path": { "type": "string", "description": "Optional workspace-relative file or directory. Defaults to current workspace." }
                 },
-                "required": ["pattern"]
+                "required": ["pattern"],
+                "additionalProperties": false
             }),
         },
         ToolDef {
@@ -118,7 +124,9 @@ fn tool_defs() -> Vec<ToolDef> {
                 "type": "object",
                 "properties": {
                     "path": { "type": "string", "description": "Optional workspace-relative directory. Defaults to current workspace." }
-                }
+                },
+                "required": [],
+                "additionalProperties": false
             }),
         },
         ToolDef {
@@ -128,9 +136,10 @@ fn tool_defs() -> Vec<ToolDef> {
                 "type": "object",
                 "properties": {
                     "question": { "type": "string" },
-                    "options": { "type": "array", "items": { "type": "string" } }
+                    "options": { "type": "array", "items": { "type": "string" }, "minItems": 1 }
                 },
-                "required": ["question"]
+                "required": ["question"],
+                "additionalProperties": false
             }),
         },
         ToolDef {
@@ -151,11 +160,13 @@ fn tool_defs() -> Vec<ToolDef> {
                                     "description": "Status of the item. Default: pending."
                                 }
                             },
-                            "required": ["content"]
+                            "required": ["content"],
+                            "additionalProperties": false
                         }
                     }
                 },
-                "required": ["items"]
+                "required": ["items"],
+                "additionalProperties": false
             }),
         },
         ToolDef {
@@ -165,10 +176,11 @@ fn tool_defs() -> Vec<ToolDef> {
                 "type": "object",
                 "properties": {
                     "title": { "type": "string", "description": "Short plan title. Defaults to 'Plan'." },
-                    "content": { "type": "string", "description": "Full plan text. Use this OR steps, not both empty." },
-                    "steps": { "type": "array", "items": { "type": "string" }, "description": "Optional list of step strings, rendered as a numbered list. Used when content is empty." }
+                    "content": { "type": "string", "description": "Full plan text. Provide this or steps." },
+                    "steps": { "type": "array", "items": { "type": "string" }, "description": "Optional list of step strings, rendered as a numbered list. Used when content is not provided." }
                 },
-                "required": ["content"]
+                "required": [],
+                "additionalProperties": false
             }),
         },
     ]
@@ -282,10 +294,12 @@ async fn grep_text(args: &str, cwd: &Path) -> Result<String> {
     if args.pattern.is_empty() {
         return Err(anyhow!("pattern is empty"));
     }
+    let re = Regex::new(&args.pattern)
+        .map_err(|e| anyhow!("invalid regex pattern: {e}"))?;
     let rel = args.path.unwrap_or_else(|| ".".to_string());
     let root = resolve_workspace_path(cwd, &rel)?;
     let mut out = Vec::new();
-    grep_path(&root, &args.pattern, cwd, &mut out, 200)?;
+    grep_path(&root, &re, cwd, &mut out, 200)?;
     if out.is_empty() {
         Ok(format!("no matches for {:?} in {}", args.pattern, rel))
     } else {
@@ -295,7 +309,7 @@ async fn grep_text(args: &str, cwd: &Path) -> Result<String> {
 
 fn grep_path(
     path: &Path,
-    pattern: &str,
+    re: &Regex,
     cwd: &Path,
     out: &mut Vec<String>,
     limit: usize,
@@ -312,7 +326,7 @@ fn grep_path(
             if name == ".git" || name == "target" {
                 continue;
             }
-            grep_path(&p, pattern, cwd, out, limit)?;
+            grep_path(&p, re, cwd, out, limit)?;
             if out.len() >= limit {
                 break;
             }
@@ -321,7 +335,7 @@ fn grep_path(
         if let Ok(text) = std::fs::read_to_string(path) {
             let rel = path.strip_prefix(cwd).unwrap_or(path).display().to_string();
             for (idx, line) in text.lines().enumerate() {
-                if line.contains(pattern) {
+                if re.is_match(line) {
                     out.push(format!("{}:{}:{}", rel, idx + 1, line));
                     if out.len() >= limit {
                         out.push("[match limit reached]".to_string());
