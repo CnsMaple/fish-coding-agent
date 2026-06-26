@@ -76,21 +76,25 @@ pub fn render(f: &mut Frame, app: &mut App) {
         let mut n = 0;
         for m in &app.session.messages {
             n += 1; // role prefix line
-            let think_show = m.role == crate::session::Role::Assistant
+            if m.role == crate::session::Role::Assistant
                 && !m.thinking.trim().is_empty()
-                && app.config.thinking_display != crate::config::ThinkingDisplay::Hide;
-            if think_show {
-                let expanded = (app.config.thinking_display
-                    == crate::config::ThinkingDisplay::Show
-                    && m.thinking_visible)
-                    || (app.config.thinking_display
-                        == crate::config::ThinkingDisplay::ShowWhileStreaming
-                        && (m.streaming || m.thinking_visible));
-                n += crate::session::render::thinking_block_line_count(
-                    &m.thinking,
-                    expanded,
-                    area.width as usize,
-                );
+                && app.config.thinking_display != crate::config::ThinkingDisplay::Hide
+            {
+                // Count thinking segment lines for the total
+                let segments = crate::session::render::get_thinking_segments(m);
+                for seg in &segments {
+                    let expanded = (app.config.thinking_display
+                        == crate::config::ThinkingDisplay::Show
+                        && m.thinking_visible)
+                        || (app.config.thinking_display
+                            == crate::config::ThinkingDisplay::ShowWhileStreaming
+                            && (m.streaming || m.thinking_visible));
+                    n += crate::session::render::thinking_block_line_count(
+                        &seg.content,
+                        expanded,
+                        area.width as usize,
+                    );
+                }
             }
             n += m.content.split('\n').count().max(1);
             if app.config.tool_display != crate::config::ToolResultDisplay::Hide {
@@ -135,20 +139,24 @@ pub fn render(f: &mut Frame, app: &mut App) {
             && !m.thinking.trim().is_empty()
             && app.config.thinking_display != crate::config::ThinkingDisplay::Hide;
         if think_show {
-            if line_idx >= start && line_idx < start + inner_h {
-                let screen_y = area.y + (line_idx - start) as u16;
-                app.thinking_toggle_rows.push((screen_y, msg_idx));
-            }
+            let segments = crate::session::render::get_thinking_segments(m);
             let expanded = (app.config.thinking_display == crate::config::ThinkingDisplay::Show
                 && m.thinking_visible)
                 || (app.config.thinking_display
                     == crate::config::ThinkingDisplay::ShowWhileStreaming
                     && (m.streaming || m.thinking_visible));
-            line_idx += crate::session::render::thinking_block_line_count(
-                &m.thinking,
-                expanded,
-                area.width as usize,
-            );
+            for seg in &segments {
+                // Record the first line of each thinking segment as a toggle row
+                if line_idx >= start && line_idx < start + inner_h {
+                    let screen_y = area.y + (line_idx - start) as u16;
+                    app.thinking_toggle_rows.push((screen_y, msg_idx));
+                }
+                line_idx += crate::session::render::thinking_block_line_count(
+                    &seg.content,
+                    expanded,
+                    area.width as usize,
+                );
+            }
         }
         // Content (tool markers stripped by render.rs)
         let content_lines = m.content.split('\n').count().max(1);

@@ -1,4 +1,4 @@
-use super::{Role, Session, SkillRef, ToolResultBlock};
+use super::{Role, Session, SkillRef, ThinkingSegment, ToolResultBlock};
 use crate::config::{ThinkingDisplay, ToolResultDisplay};
 use crate::theme::{active_colors, Theme};
 use ratatui::buffer::Buffer;
@@ -86,46 +86,100 @@ pub fn build_lines(
             msg_lines.push(Line::from(""));
         }
 
-        let show_thinking = m.role == Role::Assistant
-            && !m.thinking.trim().is_empty()
-            && match session.display {
-                ThinkingDisplay::Hide => false,
-                ThinkingDisplay::Show => true,
-                ThinkingDisplay::ShowWhileStreaming => true,
-            };
-        if show_thinking {
-            let visible = match session.display {
-                ThinkingDisplay::Show => m.thinking_visible,
-                ThinkingDisplay::ShowWhileStreaming => m.streaming || m.thinking_visible,
-                _ => false,
-            };
-            let colors = active_colors();
-            let bg = if m.streaming { colors.thinking_streaming_bg } else { colors.thinking_done_bg };
-            let rows = build_thinking_block_rows(&m.thinking, visible, width, bg);
-            push_block_rows(&mut msg_lines, rows);
-            msg_lines.push(Line::from(""));
+        let raw = if m.streaming { m.visible_content() } else { &m.content };
+
+        // Build sorted items (thinking segments + tools) for interleaved rendering
+        enum RenderItemKind {
+            Thinking(String),
+            Tool(usize), // index into m.tool_results
+        }
+        struct RenderItem {
+            offset: usize,
+            kind: RenderItemKind,
         }
 
-        let raw = if m.streaming { m.visible_content() } else { &m.content };
-        let mut cursor = 0usize;
-        let mut tools: Vec<&ToolResultBlock> = m.tool_results.iter().collect();
-        tools.sort_by_key(|tool| tool.content_offset);
-        for tool in tools {
-            let offset = clamp_char_boundary(raw, tool.content_offset.min(raw.len()));
-            if offset < cursor { continue; }
-            render_content_segment(&strip_legacy_markers(&raw[cursor..offset]), width, &mut msg_lines);
-            cursor = offset;
-            if session.tool_display != ToolResultDisplay::Hide {
-                let t_vis = match session.tool_display {
-                    ToolResultDisplay::Show => tool.visible || tool.running,
-                    ToolResultDisplay::ShowWhileStreaming => m.streaming || tool.visible || tool.running,
-                    _ => false,
+        let mut items: Vec<RenderItem> = Vec::new();
+
+        // Add thinking segments (only when display allows)
+        if m.role == Role::Assistant {
+            let show_thinking = !m.thinking.trim().is_empty()
+                && match session.display {
+                    ThinkingDisplay::Hide => false,
+                    _ => true,
                 };
-                let rows = build_tool_block_rows(tool, t_vis, width);
-                push_block_rows(&mut msg_lines, rows);
-                msg_lines.push(Line::from(""));
+            if show_thinking {
+                let segments = get_thinking_segments(m);
+                for seg in &segments {
+                    let offset = clamp_char_boundary(raw, seg.offset.min(raw.len()));
+                    items.push(RenderItem {
+                        offset,
+                        kind: RenderItemKind::Thinking(seg.content.clone()),
+                    });
+                }
             }
         }
+
+        // Add tool results
+        for (ti, tool) in m.tool_results.iter().enumerate() {
+            let offset = clamp_char_boundary(raw, tool.content_offset.min(raw.len()));
+            items.push(RenderItem {
+                offset,
+                kind: RenderItemKind::Tool(ti),
+            });
+        }
+
+        // Sort by offset; at same offset, tools before thinking
+        items.sort_by(|a, b| {
+            a.offset.cmp(&b.offset).then_with(|| {
+                match (&a.kind, &b.kind) {
+                    (RenderItemKind::Tool(_), RenderItemKind::Thinking(_)) => std::cmp::Ordering::Less,
+                    (RenderItemKind::Thinking(_), RenderItemKind::Tool(_)) => std::cmp::Ordering::Greater,
+                    _ => std::cmp::Ordering::Equal,
+                }
+            })
+        });
+
+        let mut cursor = 0usize;
+        for item in items {
+            let offset = item.offset;
+            if offset < cursor { continue; }
+
+            // Render content before this item
+            if offset > cursor {
+                render_content_segment(&strip_legacy_markers(&raw[cursor..offset]), width, &mut msg_lines);
+                cursor = offset;
+            }
+
+            match item.kind {
+                RenderItemKind::Thinking(content) => {
+                    let visible = match session.display {
+                        ThinkingDisplay::Show => m.thinking_visible,
+                        ThinkingDisplay::ShowWhileStreaming => m.streaming || m.thinking_visible,
+                        _ => false,
+                    };
+                    let colors = active_colors();
+                    let bg = if m.streaming { colors.thinking_streaming_bg } else { colors.thinking_done_bg };
+                    let rows = build_thinking_block_rows(&content, visible, width, bg);
+                    push_block_rows(&mut msg_lines, rows);
+                    msg_lines.push(Line::from(""));
+                }
+                RenderItemKind::Tool(ti) => {
+                    if let Some(tool) = m.tool_results.get(ti) {
+                        if session.tool_display != ToolResultDisplay::Hide {
+                            let t_vis = match session.tool_display {
+                                ToolResultDisplay::Show => tool.visible || tool.running,
+                                ToolResultDisplay::ShowWhileStreaming => m.streaming || tool.visible || tool.running,
+                                _ => false,
+                            };
+                            let rows = build_tool_block_rows(tool, t_vis, width);
+                            push_block_rows(&mut msg_lines, rows);
+                            msg_lines.push(Line::from(""));
+                        }
+                    }
+                }
+            }
+        }
+        // Render remaining content
         render_content_segment(&strip_legacy_markers(&raw[cursor..]), width, &mut msg_lines);
 
         if m.streaming {
@@ -213,7 +267,31 @@ fn render_content_segment(text: &str, width: usize, out: &mut Vec<Line<'static>>
 }
 
 pub fn thinking_block_line_count(content: &str, visible: bool, width: usize) -> usize {
+    if content.is_empty() {
+        return 0;
+    }
     build_thinking_block_rows(content, visible, width, active_colors().thinking_done_bg).len()
+}
+
+/// Count total thinking lines across all segments.
+pub fn total_thinking_line_count(m: &super::Message, session: &Session, width: usize) -> usize {
+    let show = m.role == super::Role::Assistant
+        && !m.thinking.trim().is_empty()
+        && session.display != crate::config::ThinkingDisplay::Hide;
+    if !show {
+        return 0;
+    }
+    let segments = get_thinking_segments(m);
+    let mut total = 0;
+    for seg in &segments {
+        let visible = match session.display {
+            crate::config::ThinkingDisplay::Show => m.thinking_visible,
+            crate::config::ThinkingDisplay::ShowWhileStreaming => m.streaming || m.thinking_visible,
+            _ => false,
+        };
+        total += thinking_block_line_count(&seg.content, visible, width);
+    }
+    total
 }
 
 pub fn tool_block_line_count(tool: &ToolResultBlock, visible: bool, width: usize) -> usize {
@@ -285,6 +363,21 @@ fn python_command_failed(content: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Get thinking segments from a message, with backward compatibility
+/// for the old single-string `thinking` field.
+pub fn get_thinking_segments(m: &super::Message) -> Vec<ThinkingSegment> {
+    if !m.thinking_segments.is_empty() {
+        return m.thinking_segments.clone();
+    }
+    if !m.thinking.is_empty() {
+        return vec![super::ThinkingSegment {
+            offset: 0,
+            content: m.thinking.clone(),
+        }];
+    }
+    vec![]
+}
+
 fn build_thinking_block_rows(content: &str, visible: bool, width: usize, bg: Color) -> Vec<Line<'static>> {
     build_output_block_rows(
         "thinking",
@@ -293,7 +386,6 @@ fn build_thinking_block_rows(content: &str, visible: bool, width: usize, bg: Col
         "",
         visible,
         width,
-        "",
         bg,
     )
 }
@@ -338,7 +430,7 @@ fn build_tool_block_rows(tool: &ToolResultBlock, visible: bool, width: usize) ->
         let title_highlighted = tool.name == "shell_command"
             || tool.name == "command";
         if title_highlighted {
-            build_shell_command_rows(&tool.title, &output, &footer, visible, width, "ctrl+o to expand", bg)
+            build_shell_command_rows(&tool.title, &output, &footer, visible, width, bg)
         } else {
             build_output_block_rows(
                 &tool.title,
@@ -347,7 +439,6 @@ fn build_tool_block_rows(tool: &ToolResultBlock, visible: bool, width: usize) ->
                 &footer,
                 visible,
                 width,
-                "ctrl+o to expand",
                 bg,
             )
         }
@@ -370,7 +461,6 @@ fn build_shell_command_rows(
     footer: &str,
     visible: bool,
     width: usize,
-    collapsed_hint: &str,
     bg: Color,
 ) -> Vec<Line<'static>> {
     let width = width.max(4);
@@ -401,7 +491,8 @@ fn build_shell_command_rows(
             rows.extend(box_row_lines(footer, width, bg));
         }
     } else {
-        rows.extend(collapsed_output_lines(output, width, collapsed_hint, bg));
+        rows.extend(collapsed_output_lines(output, width, bg));
+        // Show footer info even when collapsed for shell commands
         if !footer.is_empty() {
             rows.extend(box_row_lines(footer, width, bg));
         }
@@ -418,7 +509,6 @@ fn build_output_block_rows(
     footer: &str,
     visible: bool,
     width: usize,
-    collapsed_hint: &str,
     bg: Color,
 ) -> Vec<Line<'static>> {
     let width = width.max(4);
@@ -438,10 +528,7 @@ fn build_output_block_rows(
             rows.extend(box_row_lines(footer, width, bg));
         }
     } else {
-        rows.extend(collapsed_output_lines(output, width, collapsed_hint, bg));
-        if !footer.is_empty() {
-            rows.extend(box_row_lines(footer, width, bg));
-        }
+        rows.extend(collapsed_output_lines(output, width, bg));
     }
 
     rows.push(border_line(width, bg));
@@ -458,38 +545,27 @@ fn output_row_lines(output: &str, width: usize, bg: Color) -> Vec<Line<'static>>
     rows
 }
 
-fn collapsed_output_lines(output: &str, width: usize, hint: &str, bg: Color) -> Vec<Line<'static>> {
+fn collapsed_output_lines(output: &str, width: usize, bg: Color) -> Vec<Line<'static>> {
     let lines: Vec<&str> = output.lines().collect();
     if lines.is_empty() {
-        let mut rows = box_row_lines("[no output]", width, bg);
-        rows.extend(box_row_lines(&format!("[collapsed; {hint}]"), width, bg));
-        return rows;
+        return box_row_lines("[no output]", width, bg);
     }
 
     let total = lines.len();
     let shown = total.min(COLLAPSED_PREVIEW_LINES);
     let skipped = total.saturating_sub(shown);
     let mut rows = Vec::new();
-    let hint_suffix = if hint.is_empty() {
-        String::new()
-    } else {
-        format!(" ({hint})")
-    };
-    if skipped > 0 {
-        rows.extend(box_row_lines(
-            &format!("... ({skipped} earlier lines, showing {shown} of {total}){hint_suffix}"),
-            width,
-            bg,
-        ));
-    } else {
-        rows.extend(box_row_lines(
-            &format!("... (showing {shown} of {total}){hint_suffix}"),
-            width,
-            bg,
-        ));
-    }
+    // Show preview lines
     for line in lines.iter().skip(skipped) {
         rows.extend(box_row_lines(line, width, bg));
+    }
+    // Show collapse hint at the bottom if there are hidden lines
+    if skipped > 0 {
+        rows.extend(box_row_lines(
+            &format!("[Ctrl+O to collapse/expand {skipped} lines]"),
+            width,
+            bg,
+        ));
     }
     rows
 }
@@ -614,7 +690,7 @@ fn build_python_command_rows(
             rows.extend(body_rows);
         }
     } else {
-        rows.extend(collapsed_output_lines(&output, width, "ctrl+o to expand", bg));
+        rows.extend(collapsed_output_lines(&output, width, bg));
     }
     if !footer.is_empty() {
         rows.extend(box_row_lines(&footer, width, bg));
@@ -635,7 +711,7 @@ fn tool_display_content(tool: &ToolResultBlock) -> (String, String) {
 
     (
         tool.content.trim_end().to_string(),
-        "[Ctrl+O to collapse/expand]".to_string(),
+        String::new(),
     )
 }
 
@@ -707,7 +783,7 @@ fn build_write_file_diff_rows(
             }
         }
     } else {
-        rows.extend(collapsed_output_lines(&body, width, "ctrl+o to expand", bg));
+        rows.extend(collapsed_output_lines(&body, width, bg));
     }
     rows.push(border_line(width, bg));
     Some(rows)
@@ -949,6 +1025,7 @@ mod tests {
             role: Role::Assistant,
             content: "| 列 1 | 列 2 |\n|---|---|\n| A | B |".into(),
             thinking: String::new(),
+            thinking_segments: Vec::new(),
             thinking_visible: false,
             tool_results: Vec::new(),
             display_cursor: usize::MAX,

@@ -6,6 +6,12 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThinkingSegment {
+    pub offset: usize,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolResultBlock {
     pub name: String,
     pub title: String,
@@ -52,6 +58,10 @@ pub struct Message {
     /// Thinking content (Anthropic "thinking_delta"), shown in dim and
     /// optionally collapsed.
     pub thinking: String,
+    /// Thinking segments with content offsets for interleaved rendering.
+    /// Each segment represents thinking received when content was at that offset.
+    #[serde(default)]
+    pub thinking_segments: Vec<ThinkingSegment>,
     /// Whether the thinking block is currently expanded.
     pub thinking_visible: bool,
     /// Tool result blocks, each with its own visibility,
@@ -84,6 +94,7 @@ impl Message {
             role,
             content,
             thinking: String::new(),
+            thinking_segments: Vec::new(),
             thinking_visible: false,
             tool_results: Vec::new(),
             ts: Utc::now(),
@@ -232,6 +243,7 @@ impl Session {
             role: Role::Assistant,
             content: String::new(),
             thinking: String::new(),
+            thinking_segments: Vec::new(),
             thinking_visible: false,
             tool_results: vec![ToolResultBlock {
                 name,
@@ -268,6 +280,24 @@ impl Session {
         if let Some(id) = self.streaming_id {
             if let Some(m) = self.messages.get_mut(id) {
                 m.thinking.push_str(chunk);
+                let content_len = m.content.len();
+                if let Some(last) = m.thinking_segments.last_mut() {
+                    if last.offset == content_len {
+                        // Same phase (content hasn't grown since last thinking) → extend
+                        last.content.push_str(chunk);
+                    } else {
+                        // Content has grown → new phase, new segment
+                        m.thinking_segments.push(ThinkingSegment {
+                            offset: content_len,
+                            content: chunk.to_string(),
+                        });
+                    }
+                } else {
+                    m.thinking_segments.push(ThinkingSegment {
+                        offset: content_len,
+                        content: chunk.to_string(),
+                    });
+                }
             }
         }
     }
@@ -314,9 +344,12 @@ impl Session {
 
     pub fn clear(&mut self) {
         self.messages.clear();
-self.streaming_id = None;
+        self.streaming_id = None;
         self.scroll = 0;
         self.todo_items.clear();
+        if let Ok(mut c) = self.line_cache.lock() {
+            c.clear();
+        }
     }
 
     /// Rough count of rendered lines up to (but not including) `msg_idx`,
@@ -350,8 +383,11 @@ self.streaming_id = None;
                     && m.thinking_visible)
                     || (self.display == crate::config::ThinkingDisplay::ShowWhileStreaming
                         && (m.streaming || m.thinking_visible));
-                n += crate::session::render::thinking_block_line_count(&m.thinking, expanded, width)
-                    as u16;
+                let segments = crate::session::render::get_thinking_segments(m);
+                for seg in &segments {
+                    n += crate::session::render::thinking_block_line_count(&seg.content, expanded, width)
+                        as u16;
+                }
             }
             n += m.line_count;
             if self.tool_display != crate::config::ToolResultDisplay::Hide {
@@ -428,8 +464,11 @@ self.streaming_id = None;
                     && m.thinking_visible)
                     || (self.display == crate::config::ThinkingDisplay::ShowWhileStreaming
                         && (m.streaming || m.thinking_visible));
-                n += crate::session::render::thinking_block_line_count(&m.thinking, expanded, 120)
-                    as u16;
+                let segments = crate::session::render::get_thinking_segments(m);
+                for seg in &segments {
+                    n += crate::session::render::thinking_block_line_count(&seg.content, expanded, 120)
+                        as u16;
+                }
             }
             n += m.line_count;
             if self.tool_display != crate::config::ToolResultDisplay::Hide {

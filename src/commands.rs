@@ -58,7 +58,7 @@ pub fn dispatch(app: &mut App, cmd: &str, arg: &str) {
         }
         "fork" => app.fork_session(None),
         "retry" => retry_last_prompt(app),
-        "continue" => continue_response(app),
+        "continue" => continue_response(app, &arg),
         "plan" => {
             let arg = arg.trim().to_lowercase();
             if matches!(arg.as_str(), "exit" | "off" | "yolo") {
@@ -240,12 +240,17 @@ fn retry_last_prompt(app: &mut App) {
     crate::commands::send_chat(app, prompt);
 }
 
-fn continue_response(app: &mut App) {
+fn continue_response(app: &mut App, arg: &str) {
     if app.inflight.is_some() {
         app.notify(ToastLevel::Warn, "request in flight, please wait");
         return;
     }
-    crate::commands::send_chat(app, "Continue from where you left off.".to_string());
+    let prompt = if arg.is_empty() {
+        "Continue from where you left off.".to_string()
+    } else {
+        format!("Continue from where you left off.\n\n{arg}")
+    };
+    crate::commands::send_chat(app, prompt);
     // Remove the user message from session (kept in API request)
     if app.inflight.is_some() && app.session.messages.len() >= 2 {
         let idx = app.session.messages.len() - 2;
@@ -549,6 +554,7 @@ pub fn send_message(app: &mut App, user_msg: Message) {
         role: Role::Assistant,
         content: String::new(),
         thinking: String::new(),
+        thinking_segments: Vec::new(),
         thinking_visible: false,
         tool_results: Vec::new(),
         display_cursor: 0,

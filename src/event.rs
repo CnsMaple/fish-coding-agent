@@ -1439,6 +1439,7 @@ fn submit_direct_tool_input(app: &mut App, raw: &str) -> bool {
         role: crate::session::Role::Assistant,
         content: String::new(),
         thinking: String::new(),
+        thinking_segments: Vec::new(),
         thinking_visible: false,
         tool_results: Vec::new(),
         display_cursor: 0,
