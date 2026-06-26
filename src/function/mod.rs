@@ -281,6 +281,8 @@ pub enum SettingsLevel {
     EnterBehaviorList,
     /// Border type chooser.
     BorderTypeList,
+    /// Theme chooser.
+    ThemeList,
 }
 
 impl SettingsLevel {
@@ -308,6 +310,7 @@ impl SettingsLevel {
             SettingsLevel::ToolResultDisplayList => "settings / tool display".to_string(),
             SettingsLevel::EnterBehaviorList => "settings / enter behavior".to_string(),
             SettingsLevel::BorderTypeList => "settings / border type".to_string(),
+            SettingsLevel::ThemeList => "settings / theme".to_string(),
         }
     }
 
@@ -324,7 +327,8 @@ impl SettingsLevel {
             SettingsLevel::ThinkingDisplayList
             | SettingsLevel::ToolResultDisplayList
             | SettingsLevel::EnterBehaviorList
-            | SettingsLevel::BorderTypeList => "Up/Down: nav | Enter: select | Esc: back",
+            | SettingsLevel::BorderTypeList
+            | SettingsLevel::ThemeList => "Up/Down: nav | Enter: select | Esc: back",
         }
     }
 }
@@ -427,7 +431,7 @@ impl SettingsState {
     /// Number of items in the current list view (used to clamp cursor).
     pub fn list_len(&self, cfg: &Config) -> usize {
         match &self.level {
-            SettingsLevel::TopLevel => 5, // set provider, thinking display, tool display, enter behavior, border type
+            SettingsLevel::TopLevel => 6, // set provider, thinking display, tool display, enter behavior, border type, theme
             SettingsLevel::ProviderList => 1 + cfg.configured_provider_ids().len(), // new + existing
             SettingsLevel::NewProviderKind => self.new_provider.filtered.len(),
             SettingsLevel::ExistingActions(_) => 2, // edit, delete
@@ -436,6 +440,7 @@ impl SettingsState {
             SettingsLevel::ToolResultDisplayList => 3, // show, hide, while streaming
             SettingsLevel::EnterBehaviorList => 2,   // enter sends, enter newline
             SettingsLevel::BorderTypeList => 2,      // ascii, rounded
+            SettingsLevel::ThemeList => crate::theme::ThemeVariant::all().len(),
         }
     }
 
@@ -692,6 +697,9 @@ pub struct TimelineEntry {
     /// Short single-line preview of the message content.
     pub preview: String,
     pub ts: DateTime<Utc>,
+    /// If this entry represents a tool call within the message,
+    /// this is the index into the message's tool_results.
+    pub tool_idx: Option<usize>,
 }
 
 /// Sidebar picker that lists session messages (user prompts +
@@ -753,12 +761,13 @@ impl TimelinePickerState {
         }
     }
 
-    /// Returns the `session.messages` index of the currently focused
-    /// entry, if any.
-    pub fn selected_msg_idx(&self) -> Option<usize> {
-        self.filtered
-            .get(self.cursor)
-            .map(|&i| self.entries[i].msg_idx)
+    /// Returns the `session.messages` index and optional tool index
+    /// of the currently focused entry, if any.
+    pub fn selected_entry(&self) -> Option<(usize, Option<usize>)> {
+        self.filtered.get(self.cursor).map(|&i| {
+            let e = &self.entries[i];
+            (e.msg_idx, e.tool_idx)
+        })
     }
 }
 
@@ -785,7 +794,30 @@ fn snapshot_session(session: &Session) -> Vec<TimelineEntry> {
             role: m.role,
             preview,
             ts: m.ts,
+            tool_idx: None,
         });
+        // Add tool call entries for this message.
+        for (ti, t) in m.tool_results.iter().enumerate() {
+            let tool_preview = if t.title.is_empty() {
+                t.name.clone()
+            } else {
+                t.title.clone()
+            };
+            let preview = if tool_preview.chars().count() > 60 {
+                let mut s: String = tool_preview.chars().take(60).collect();
+                s.push('\u{2026}');
+                s
+            } else {
+                tool_preview
+            };
+            out.push(TimelineEntry {
+                msg_idx: i,
+                role: m.role,
+                preview,
+                ts: m.ts,
+                tool_idx: Some(ti),
+            });
+        }
     }
     out
 }

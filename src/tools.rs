@@ -6,6 +6,9 @@ use anyhow::{anyhow, Result};
 use regex::Regex;
 use serde::Deserialize;
 use serde_json::json;
+use tokio::sync::mpsc::UnboundedSender;
+
+use crate::event::AppMsg;
 
 const COMMAND_TIMEOUT_SECS: u64 = 300;
 const COMMAND_OUTPUT_LIMIT: usize = 16_000;
@@ -204,6 +207,228 @@ pub async fn execute_tool(name: &str, args: &str, cwd: &Path) -> String {
         Ok(value) => json!({ "ok": true, "result": value }).to_string(),
         Err(err) => json!({ "ok": false, "error": err.to_string() }).to_string(),
     }
+}
+
+/// Execute a tool with streaming output support.
+/// For shell/python commands, output is streamed via ToolDelta messages.
+/// For other tools, falls back to non-streaming execution.
+pub async fn execute_tool_streaming(
+    name: &str,
+    args: &str,
+    cwd: &Path,
+    tx: UnboundedSender<AppMsg>,
+) -> String {
+    let result = match name {
+        "shell_command" | "command" => {
+            run_command_streaming(args, cwd, tx).await
+                .unwrap_or_else(|e| json!({ "ok": false, "error": e.to_string() }).to_string())
+        }
+        "python_command" => {
+            run_python_streaming(args, cwd, tx).await
+                .unwrap_or_else(|e| json!({ "ok": false, "error": e.to_string() }).to_string())
+        }
+        _ => execute_tool(name, args, cwd).await,
+    };
+
+    // Result is already a JSON-wrapped string at this point
+    result
+}
+
+async fn run_command_streaming(
+    args: &str,
+    cwd: &Path,
+    tx: UnboundedSender<AppMsg>,
+) -> Result<String> {
+    let cmd_args: CommandArgs = serde_json::from_str(args)?;
+    if cmd_args.command.trim().is_empty() {
+        return Err(anyhow!("command is empty"));
+    }
+
+    let output = tokio::time::timeout(
+        Duration::from_secs(COMMAND_TIMEOUT_SECS),
+        run_shell_streaming(&cmd_args.command, cwd, tx),
+    )
+    .await
+    .map_err(|_| anyhow!("command timed out after {COMMAND_TIMEOUT_SECS}s"))??;
+
+    Ok(truncate(output, COMMAND_OUTPUT_LIMIT))
+}
+
+async fn run_python_streaming(
+    args: &str,
+    cwd: &Path,
+    tx: UnboundedSender<AppMsg>,
+) -> Result<String> {
+    let py_args: PythonArgs = serde_json::from_str(args)?;
+    if py_args.code.trim().is_empty() {
+        return Err(anyhow!("python code is empty"));
+    }
+    let output = tokio::time::timeout(
+        Duration::from_secs(COMMAND_TIMEOUT_SECS),
+        run_python_streaming_inner(&py_args.code, cwd, tx),
+    )
+    .await
+    .map_err(|_| anyhow!("python command timed out after {COMMAND_TIMEOUT_SECS}s"))??;
+
+    Ok(json!({
+        "kind": "python_command_result",
+        "code": py_args.code,
+        "output": truncate(output, COMMAND_OUTPUT_LIMIT),
+    })
+    .to_string())
+}
+
+async fn run_shell_streaming(
+    command: &str,
+    cwd: &Path,
+    tx: UnboundedSender<AppMsg>,
+) -> Result<String> {
+    #[cfg(windows)]
+    {
+        let utf8_preamble = "\
+$OutputEncoding = [Console]::OutputEncoding = \
+[System.Text.UTF8Encoding]::UTF8; \
+$env:PYTHONIOENCODING='utf-8'; ";
+        let full_cmd = format!("{utf8_preamble}{command}");
+        let shell = windows_shell_program();
+        run_shell_streaming_impl(shell, &["-NoLogo", "-NoProfile", "-Command", &full_cmd], cwd, tx)
+            .await
+    }
+
+    #[cfg(not(windows))]
+    {
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "sh".to_string());
+        run_shell_streaming_impl(&shell, &["-lc", command], cwd, tx).await
+    }
+}
+
+async fn run_python_streaming_inner(
+    code: &str,
+    cwd: &Path,
+    tx: UnboundedSender<AppMsg>,
+) -> Result<String> {
+    #[cfg(windows)]
+    {
+        match run_shell_streaming_impl(
+            "python",
+            &["-X", "utf8", "-c", code],
+            cwd,
+            tx.clone(),
+        )
+        .await
+        {
+            Ok(output) => Ok(output),
+            Err(_) => {
+                run_shell_streaming_impl("py", &["-3", "-X", "utf8", "-c", code], cwd, tx).await
+            }
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        match run_shell_streaming_impl(
+            "python3",
+            &["-c", code],
+            cwd,
+            tx.clone(),
+        )
+        .await
+        {
+            Ok(output) => Ok(output),
+            Err(_) => {
+                run_shell_streaming_impl("python", &["-c", code], cwd, tx).await
+            }
+        }
+    }
+}
+
+/// Core streaming shell implementation.
+/// Spawns a process with piped stdout/stderr, reads lines as they arrive,
+/// sends them via ToolDelta, and returns the full accumulated output.
+async fn run_shell_streaming_impl(
+    program: &str,
+    args: &[&str],
+    cwd: &Path,
+    tx: UnboundedSender<AppMsg>,
+) -> Result<String> {
+    use std::process::Stdio;
+    use tokio::io::AsyncBufReadExt;
+
+    let started = Instant::now();
+    let mut child = tokio::process::Command::new(program)
+        .args(args)
+        .current_dir(cwd)
+        .env("PYTHONIOENCODING", "utf-8")
+        .env("PYTHONUTF8", "1")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+
+    let mut stdout_buf = String::new();
+    let mut stderr_buf = String::new();
+
+    // Take stdout/stderr handles
+    let stdout_reader = child.stdout.take()
+        .map(|out| tokio::io::BufReader::new(out));
+    let stderr_reader = child.stderr.take()
+        .map(|err| tokio::io::BufReader::new(err));
+
+    // Read stdout and stderr concurrently
+    let stdout_task = async {
+        let mut buf = String::new();
+        if let Some(mut reader) = stdout_reader {
+            let mut line = String::new();
+            loop {
+                line.clear();
+                match reader.read_line(&mut line).await {
+                    Ok(0) => break,
+                    Ok(_) => {
+                        buf.push_str(&line);
+                        let _ = tx.send(AppMsg::ToolDelta { content: line.clone() });
+                    }
+                    Err(_) => break,
+                }
+            }
+        }
+        buf
+    };
+
+    let stderr_task = async {
+        let mut buf = String::new();
+        if let Some(mut reader) = stderr_reader {
+            let mut line = String::new();
+            loop {
+                line.clear();
+                match reader.read_line(&mut line).await {
+                    Ok(0) => break,
+                    Ok(_) => {
+                        let tag = "stderr: ";
+                        buf.push_str(&line);
+                        let _ = tx.send(AppMsg::ToolDelta { content: format!("{tag}{line}") });
+                    }
+                    Err(_) => break,
+                }
+            }
+        }
+        buf
+    };
+
+    let (stdout, stderr) = tokio::join!(stdout_task, stderr_task);
+    stdout_buf.push_str(&stdout);
+    stderr_buf.push_str(&stderr);
+
+    let status = child.wait().await?;
+    let stdout = strip_ansi(&stdout_buf);
+    let stderr = strip_ansi(&stderr_buf);
+
+    Ok(format!(
+        "exit_code: {}\nwall_secs: {:.2}\ntimeout_secs: {}\nstdout:\n{}\nstderr:\n{}",
+        status.code().map(|c| c.to_string()).unwrap_or_else(|| "terminated".to_string()),
+        started.elapsed().as_secs_f64(),
+        COMMAND_TIMEOUT_SECS,
+        stdout,
+        stderr
+    ))
 }
 
 #[derive(Deserialize)]

@@ -41,6 +41,8 @@ async fn main() -> Result<()> {
     terminal.hide_cursor()?;
 
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    // Initialize theme from config
+    fish_coding_agent::theme::init_theme(cfg.theme);
     let mut app = App::new(cfg, config_path, cwd);
 
     let res = event::run(&mut terminal, &mut app).await;

@@ -723,15 +723,24 @@ pub fn send_message(app: &mut App, user_msg: Message) {
                     return;
                 }
                 for call in tool_calls {
-                    let result =
-                        crate::tools::execute_tool(&call.name, &call.arguments, &cwd).await;
+                    let title = tool_result_title(&call);
+                    let _ = tx.send(crate::event::AppMsg::ToolStarted {
+                        name: call.name.clone(),
+                        title: title.clone(),
+                    });
+                    let result = crate::tools::execute_tool_streaming(
+                        &call.name,
+                        &call.arguments,
+                        &cwd,
+                        tx.clone(),
+                    )
+                    .await;
                     req.messages.push(ChatMessage {
                         role: "tool".to_string(),
                         content: result.clone(),
                         tool_call_id: Some(call.id.clone()),
                         tool_calls: Vec::new(),
                     });
-                    let title = tool_result_title(&call);
                     let display_text = parse_tool_result_display(&result);
                     let _ = tx.send(crate::event::AppMsg::ChatToolResult {
                         name: call.name.clone(),

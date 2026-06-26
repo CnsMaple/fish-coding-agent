@@ -86,6 +86,15 @@ pub enum AppMsg {
     ChatTimerPause,
     /// Resume the model-output timer (after tool calls).
     ChatTimerResume,
+    /// A tool has started executing (creates a placeholder block).
+    ToolStarted {
+        name: String,
+        title: String,
+    },
+    /// Incremental output from a running tool.
+    ToolDelta {
+        content: String,
+    },
 }
 
 pub struct EventChannels {
@@ -163,13 +172,18 @@ where
                 if let Some(m) = msg { handle_msg(m, app); }
             }
             _ = tick.tick() => {
+                // Always render on tick while inflight so the spinner
+                // animates smoothly and the display cursor advances
+                // even when no new data arrives between API chunks.
+                if app.inflight.is_some() {
+                    needs_draw = true;
+                }
                 // Advance the streaming display cursor so characters
                 // appear one-by-one rather than in API-chunk bursts.
                 if let Some(id) = app.session.streaming_id {
                     if let Some(m) = app.session.messages.get_mut(id) {
                         if m.streaming && m.display_cursor < m.content.len() {
                             m.display_cursor = (m.display_cursor + 15).min(m.content.len());
-                            needs_draw = true;
                         }
                     }
                 }
@@ -472,7 +486,7 @@ fn handle_msg(msg: AppMsg, app: &mut App) {
             content,
         } => {
             open_tool_function_panel(app, &name, &content);
-            app.session.append_tool_to_last(name, title, content);
+            app.session.update_last_tool_content(name, title, content);
         }
         AppMsg::LocalToolResult {
             name,
@@ -653,6 +667,12 @@ fn handle_msg(msg: AppMsg, app: &mut App) {
         }
         AppMsg::ChatTimerResume => {
             app.response_started_at = Some(std::time::Instant::now());
+        }
+        AppMsg::ToolStarted { name, title } => {
+            app.session.start_tool_in_last(name, title);
+        }
+        AppMsg::ToolDelta { content } => {
+            app.session.append_tool_delta_to_last(&content);
         }
     }
 }
@@ -1140,33 +1160,17 @@ fn handle_mouse(m: MouseEvent, app: &mut App) {
         3
     };
     if matches!(m.kind, MouseEventKind::ScrollUp) {
-        // Edge: already at top, ignore.
-        if let Some(area) = app.session_area {
-            let inner_h = area.height.saturating_sub(2);
-            let total = app.session.count_all_lines();
-            let max_scroll = total.saturating_sub(inner_h);
-            if app.session.scroll >= max_scroll {
-                return;
-            }
-        }
         app.session.scroll = app.session.scroll.saturating_add(step as u16);
-        if let Some(area) = app.session_area {
-            let inner_h = area.height.saturating_sub(2);
-            let total = app.session.count_all_lines();
-            let max_scroll = total.saturating_sub(inner_h);
-            app.session.scroll = app.session.scroll.min(max_scroll);
-        }
         return;
     }
     if matches!(m.kind, MouseEventKind::ScrollDown) {
-        if app.session.scroll == 0 {
-            return;
-        } // edge: already at bottom
-          // Clamp to max_scroll first so runaway ScrollUp values are
-          // recovered in one step rather than needing dozens of scroll-downs.
+        // Clamp overscroll so the user doesn't hit a dead zone where
+        // scroll-down events decrease session.scroll but the view
+        // doesn't change (because session.scroll is clamped to
+        // max_scroll in the render function).
         if let Some(area) = app.session_area {
             let inner_h = area.height.saturating_sub(2);
-            let total = app.session.count_all_lines();
+            let total = app.session.count_all_lines_with_width(area.width as usize);
             let max_scroll = total.saturating_sub(inner_h);
             if app.session.scroll > max_scroll {
                 app.session.scroll = max_scroll;
@@ -1423,27 +1427,55 @@ fn submit_direct_tool_input(app: &mut App, raw: &str) -> bool {
         return false;
     };
 
+    use crate::session::Message;
     app.maybe_title_from_first_prompt(raw);
-    app.session.push(crate::session::Message::new(
+    app.session.push(Message::new(
         crate::session::Role::User,
         raw.to_string(),
     ));
+
+    // Create an empty streaming assistant message for tool output
+    let assistant = Message {
+        role: crate::session::Role::Assistant,
+        content: String::new(),
+        thinking: String::new(),
+        thinking_visible: false,
+        tool_results: Vec::new(),
+        display_cursor: 0,
+        line_count: 0,
+        ts: chrono::Utc::now(),
+        streaming: true,
+        skill_ref: None,
+    };
+    let id = app.session.push(assistant);
+    app.session.streaming_id = Some(id);
+
     if let Some(tx) = app.msg_tx.clone() {
         let cwd = app.cwd.clone();
+        let n = name.clone();
+        let t = title.clone();
         tokio::spawn(async move {
-            let result = crate::tools::execute_tool(&name, &args, &cwd).await;
-            let content = tool_result_display(&result);
+            let _ = tx.send(AppMsg::ToolStarted {
+                name: n.clone(),
+                title: t.clone(),
+            });
+            let result =
+                crate::tools::execute_tool_streaming(&n, &args, &cwd, tx.clone()).await;
+            let display = tool_result_display(&result);
             let context = if include_context {
-                Some(local_tool_context(&name, &title, &content))
+                Some(local_tool_context(&n, &t, &display))
             } else {
                 None
             };
-            let _ = tx.send(AppMsg::LocalToolResult {
-                name,
-                title,
-                content,
-                context,
+            let _ = tx.send(AppMsg::ChatToolResult {
+                name: n,
+                title: t,
+                content: display,
             });
+            let _ = tx.send(AppMsg::ChatDone);
+            if let Some(ctx) = context {
+                let _ = tx.send(AppMsg::ChatDebug(ctx));
+            }
         });
     } else {
         app.notify(
@@ -2392,15 +2424,20 @@ fn handle_timeline_key(
     }
 }
 
-/// Jump the session scroll to the focused message and close the
+/// Jump the session scroll to the focused entry and close the
 /// timeline picker tab.
 fn commit_timeline_jump(app: &mut App, state: &crate::function::TimelinePickerState) {
     use crate::function::notifications::ToastLevel;
-    let Some(msg_idx) = state.selected_msg_idx() else {
+    let Some((msg_idx, tool_idx)) = state.selected_entry() else {
         return;
     };
     let viewport_h = app.session_area.map(|r| r.height).unwrap_or(20);
     app.session.jump_to_message(msg_idx, viewport_h);
+    if tool_idx.is_some() {
+        // Nudge scroll up a bit so the tool block is more visible.
+        let nudge = 3u16.min(app.session.scroll);
+        app.session.scroll = app.session.scroll.saturating_sub(nudge);
+    }
     let active = app.function.active;
     if active < app.function.tabs.len() {
         app.function.tabs.remove(active);
@@ -2409,10 +2446,12 @@ fn commit_timeline_jump(app: &mut App, state: &crate::function::TimelinePickerSt
         }
     }
     app.maybe_hide_panel();
-    app.notify(
-        ToastLevel::Info,
-        format!("jumped to message #{}", msg_idx + 1),
-    );
+    let label = if tool_idx.is_some() {
+        "jumped to tool call"
+    } else {
+        &format!("jumped to message #{}", msg_idx + 1)
+    };
+    app.notify(ToastLevel::Info, label);
 }
 
 fn trigger_picker_fetch(app: &mut App, state: &mut crate::function::ModelPickerState) {
@@ -2616,7 +2655,8 @@ fn handle_settings_back(app: &mut App, state: &mut crate::function::SettingsStat
         SettingsLevel::ThinkingDisplayList
         | SettingsLevel::ToolResultDisplayList
         | SettingsLevel::EnterBehaviorList
-        | SettingsLevel::BorderTypeList => {
+        | SettingsLevel::BorderTypeList
+        | SettingsLevel::ThemeList => {
             state.level = SettingsLevel::TopLevel;
             state.cursor = 0;
             state.clamp_cursor(&app.config);
@@ -2661,7 +2701,8 @@ fn handle_settings_enter(app: &mut App, state: &mut crate::function::SettingsSta
             1 => SettingsLevel::ThinkingDisplayList,
             2 => SettingsLevel::ToolResultDisplayList,
             3 => SettingsLevel::EnterBehaviorList,
-            _ => SettingsLevel::BorderTypeList,
+            4 => SettingsLevel::BorderTypeList,
+            _ => SettingsLevel::ThemeList,
         },
         SettingsLevel::ProviderList => {
             if cursor == 0 {
@@ -2776,6 +2817,22 @@ fn handle_settings_enter(app: &mut App, state: &mut crate::function::SettingsSta
                 app.config.border_type = mode;
                 app.save_config();
                 app.notify(ToastLevel::Ok, format!("border type: {}", mode.as_str()));
+            }
+            SettingsLevel::TopLevel
+        }
+        SettingsLevel::ThemeList => {
+            use crate::function::notifications::ToastLevel;
+            use crate::theme::ThemeVariant;
+            let themes = ThemeVariant::all();
+            if let Some(variant) = themes.get(cursor) {
+                app.config.theme = *variant;
+                app.save_config();
+                crate::theme::init_theme(*variant);
+                app.notify(ToastLevel::Ok, format!("theme: {}", variant.as_str()));
+                // Clear line cache so blocks re-render with new colors
+                if let Ok(mut c) = app.session.line_cache.lock() {
+                    c.clear();
+                }
             }
             SettingsLevel::TopLevel
         }

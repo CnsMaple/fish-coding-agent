@@ -9,13 +9,13 @@ use unicode_width::UnicodeWidthStr;
 /// Renders a picker-style search row with focus-aware styling.
 ///
 /// When the search field is focused (`focus == Search`), the label uses
-/// bold style, the query text is followed by a block cursor symbol,
-/// and the function returns the screen coordinate of the text cursor
-/// so the caller can pass it to `App::function_panel_cursor` for IME
-/// composition window positioning.
+/// bold style and a blank span at cursor position.
+/// The actual terminal cursor is positioned at the end of the query text
+/// (or at the label end when empty), so the terminal cursor color is used
+/// instead of a drawn `█` character.
 ///
 /// When unfocused, the label is dimmed and the placeholder
-/// `"(type to filter)"` is shown instead of the cursor.
+/// `"(type to filter)"` is shown instead.
 pub fn render_search_row(
     area: Rect,
     buf: &mut Buffer,
@@ -30,22 +30,17 @@ pub fn render_search_row(
     };
     let mut spans: Vec<Span<'static>> = vec![prefix];
     if query.is_empty() {
-        spans.push(Span::styled(
-            if focused {
-                "\u{2588}"
-            } else {
-                "(type to filter)"
-            },
-            if focused {
-                Theme::cursor()
-            } else {
-                Theme::dim()
-            },
-        ));
+        if focused {
+            // Show a visible empty-input indicator
+            spans.push(Span::styled("\u{200B}", Theme::cursor()));
+        } else {
+            spans.push(Span::styled("(type to filter)", Theme::dim()));
+        }
     } else {
         spans.push(Span::raw(query.to_string()));
         if focused {
-            spans.push(Span::styled("\u{2588}", Theme::cursor()));
+            // Use a thin zero-width space so the terminal cursor is visible
+            spans.push(Span::styled("\u{200B}", Theme::cursor()));
         }
     }
     Paragraph::new(Line::from(spans)).render(area, buf);

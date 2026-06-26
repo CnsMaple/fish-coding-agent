@@ -1,9 +1,9 @@
 use super::{Role, Session, SkillRef, ToolResultBlock};
 use crate::config::{ThinkingDisplay, ToolResultDisplay};
-use crate::theme::Theme;
+use crate::theme::{active_colors, Theme};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::Style;
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::widgets::Widget;
@@ -28,8 +28,13 @@ pub fn render(
     let total = lines.len() as u16;
     let max_scroll = total.saturating_sub(inner_h as u16);
     let scroll = session.scroll.min(max_scroll);
-    let start = total.saturating_sub(inner_h as u16 + scroll);
-    let end = total.saturating_sub(scroll);
+    // scroll=n  means "skip n lines from the bottom", so offset_from_top
+    // is max_scroll - scroll (clamped to 0).  At scroll=max_scroll the
+    // offset is 0 → top of session.  At scroll=0 the offset is max_scroll
+    // → bottom of session.
+    let offset_from_top = max_scroll.saturating_sub(scroll);
+    let start = offset_from_top;
+    let end = (offset_from_top + inner_h as u16).min(total);
 
     tool_toggle_rows.clear();
 
@@ -39,6 +44,16 @@ pub fn render(
         vec![]
     };
 
+    // Clear the entire area first to prevent background artifacts from
+    // previous frames leaking into cells that are no longer covered by content.
+    for y in area.top()..area.bottom() {
+        for x in area.left()..area.right() {
+            if let Some(cell) = buf.cell_mut((x, y)) {
+                cell.set_symbol(" ");
+                cell.set_style(Style::reset());
+            }
+        }
+    }
     let p = Paragraph::new(visible);
     p.render(area, buf);
 }
@@ -65,18 +80,10 @@ pub fn build_lines(
             }
         }
         let mut msg_lines: Vec<Line<'static>> = Vec::new();
-        let role_style = match m.role {
-            Role::User => Theme::role_user(),
-            Role::Assistant => Theme::role_assistant(),
-            Role::System => Theme::role_system(),
-        };
-        let arrow = Span::styled(" › ", role_style);
-        let prefix = Span::styled(m.role.prefix(), role_style);
-
-        msg_lines.push(Line::from(vec![prefix.clone(), arrow.clone()]));
         if let Some(skill_ref) = &m.skill_ref {
             let rows = build_skill_block_rows(skill_ref, width);
-            push_block_rows(&mut msg_lines, rows, Theme::block_done());
+            push_block_rows(&mut msg_lines, rows);
+            msg_lines.push(Line::from(""));
         }
 
         let show_thinking = m.role == Role::Assistant
@@ -92,8 +99,11 @@ pub fn build_lines(
                 ThinkingDisplay::ShowWhileStreaming => m.streaming || m.thinking_visible,
                 _ => false,
             };
-            let rows = build_thinking_block_rows(&m.thinking, visible, width);
-            push_block_rows(&mut msg_lines, rows, block_style(m.streaming));
+            let colors = active_colors();
+            let bg = if m.streaming { colors.thinking_streaming_bg } else { colors.thinking_done_bg };
+            let rows = build_thinking_block_rows(&m.thinking, visible, width, bg);
+            push_block_rows(&mut msg_lines, rows);
+            msg_lines.push(Line::from(""));
         }
 
         let raw = if m.streaming { m.visible_content() } else { &m.content };
@@ -107,12 +117,13 @@ pub fn build_lines(
             cursor = offset;
             if session.tool_display != ToolResultDisplay::Hide {
                 let t_vis = match session.tool_display {
-                    ToolResultDisplay::Show => tool.visible,
-                    ToolResultDisplay::ShowWhileStreaming => m.streaming || tool.visible,
+                    ToolResultDisplay::Show => tool.visible || tool.running,
+                    ToolResultDisplay::ShowWhileStreaming => m.streaming || tool.visible || tool.running,
                     _ => false,
                 };
                 let rows = build_tool_block_rows(tool, t_vis, width);
-                push_block_rows(&mut msg_lines, rows, block_style_for_tool(tool));
+                push_block_rows(&mut msg_lines, rows);
+                msg_lines.push(Line::from(""));
             }
         }
         render_content_segment(&strip_legacy_markers(&raw[cursor..]), width, &mut msg_lines);
@@ -127,6 +138,32 @@ pub fn build_lines(
             }
         }
         msg_lines.push(Line::from(""));
+
+        if m.role == Role::User {
+            let user_bg = Color::Rgb(224, 247, 250);
+            // Pop the trailing spacer; we'll re-add it after the background block.
+            let spacer = msg_lines.pop();
+            // Apply background and full-width padding to content lines.
+            for line in &mut msg_lines {
+                for span in &mut line.spans {
+                    span.style = span.style.bg(user_bg);
+                }
+                let content_len: usize = line.spans.iter().map(|s| UnicodeWidthStr::width(s.content.as_ref())).sum();
+                let pad = width.saturating_sub(content_len);
+                if pad > 0 {
+                    line.spans.push(Span::styled(" ".repeat(pad), Style::default().bg(user_bg)));
+                }
+            }
+            // Blank line with background above content.
+            msg_lines.insert(0, Line::from(Span::styled(" ".repeat(width), Style::default().bg(user_bg))));
+            // Blank line with background below content.
+            msg_lines.push(Line::from(Span::styled(" ".repeat(width), Style::default().bg(user_bg))));
+            // Re-add the spacer (no background) so there's a gap to the next message.
+            if let Some(s) = spacer {
+                msg_lines.push(s);
+            }
+        }
+
         if !m.streaming {
             cache[cache_idx] = Some(msg_lines.clone());
         }
@@ -176,38 +213,40 @@ fn render_content_segment(text: &str, width: usize, out: &mut Vec<Line<'static>>
 }
 
 pub fn thinking_block_line_count(content: &str, visible: bool, width: usize) -> usize {
-    build_thinking_block_rows(content, visible, width).len()
+    build_thinking_block_rows(content, visible, width, active_colors().thinking_done_bg).len()
 }
 
 pub fn tool_block_line_count(tool: &ToolResultBlock, visible: bool, width: usize) -> usize {
     build_tool_block_rows(tool, visible, width).len()
 }
 
-fn push_block_rows(out: &mut Vec<Line<'static>>, rows: Vec<String>, style: Style) {
-    for row in rows {
-        out.push(Line::from(Span::styled(row, style)));
-    }
+fn push_block_rows(out: &mut Vec<Line<'static>>, rows: Vec<Line<'static>>) {
+    out.extend(rows);
 }
 
-fn block_style(running: bool) -> Style {
-    if running {
-        Theme::block_running()
-    } else {
-        Theme::block_done()
+fn block_colors_for_tool(tool: &ToolResultBlock) -> (Color, Option<Color>) {
+    let colors = active_colors();
+    if tool.running {
+        return (colors.tool_pending_bg, None);
     }
-}
-
-fn block_style_for_tool(tool: &ToolResultBlock) -> Style {
     let failed = match tool.name.as_str() {
         "shell_command" | "command" => command_failed(&tool.content),
         "python_command" => python_command_failed(&tool.content),
         _ => false,
     };
     if failed {
-        Theme::block_failed()
+        (colors.tool_error_bg, Some(colors.tool_error_fg))
     } else {
-        Theme::block_done()
+        (colors.tool_success_bg, None)
     }
+}
+
+fn bg_style(bg: Color) -> Style {
+    Style::default().bg(bg)
+}
+
+fn dim_bg_style(bg: Color) -> Style {
+    Style::default().add_modifier(Modifier::DIM).bg(bg)
 }
 
 fn command_failed(content: &str) -> bool {
@@ -246,7 +285,7 @@ fn python_command_failed(content: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn build_thinking_block_rows(content: &str, visible: bool, width: usize) -> Vec<String> {
+fn build_thinking_block_rows(content: &str, visible: bool, width: usize, bg: Color) -> Vec<Line<'static>> {
     build_output_block_rows(
         "thinking",
         " Thinking ",
@@ -255,6 +294,7 @@ fn build_thinking_block_rows(content: &str, visible: bool, width: usize) -> Vec<
         visible,
         width,
         "",
+        bg,
     )
 }
 
@@ -263,42 +303,112 @@ fn build_thinking_block_rows(content: &str, visible: bool, width: usize) -> Vec<
 /// user has a stable visual identifier for the skill they invoked.
 /// The actual skill body lives in `Message::content` and is rendered
 /// below the block as ordinary markdown.
-fn build_skill_block_rows(skill: &SkillRef, width: usize) -> Vec<String> {
+fn build_skill_block_rows(skill: &SkillRef, width: usize) -> Vec<Line<'static>> {
+    let bg = active_colors().tool_success_bg;
     let width = width.max(8);
     let mut rows = Vec::new();
-    rows.push(border(width));
-    rows.extend(box_rows("[skill]", width));
-    rows.extend(box_rows(&format!("name: {}", skill.name), width));
+    rows.push(border_line(width, bg));
+    rows.extend(box_row_lines("[skill]", width, bg));
+    rows.extend(box_row_lines(&format!("name: {}", skill.name), width, bg));
     if let Some(args) = skill.args.as_deref().filter(|a| !a.trim().is_empty()) {
-        rows.extend(box_rows(&format!("args: {args}"), width));
+        rows.extend(box_row_lines(&format!("args: {args}"), width, bg));
     }
-    rows.extend(box_rows(&format!("context: {}", skill.context_path), width));
-    rows.push(border(width));
+    rows.extend(box_row_lines(&format!("context: {}", skill.context_path), width, bg));
+    rows.push(border_line(width, bg));
     rows
 }
 
-fn build_tool_block_rows(tool: &ToolResultBlock, visible: bool, width: usize) -> Vec<String> {
-    if tool.name == "write_file" {
-        if let Some(rows) = build_write_file_diff_rows(tool, visible, width) {
-            return rows;
+fn build_tool_block_rows(tool: &ToolResultBlock, visible: bool, width: usize) -> Vec<Line<'static>> {
+    let (bg, fg) = block_colors_for_tool(tool);
+
+    let mut rows: Vec<Line<'static>> = if tool.name == "write_file" {
+        if let Some(r) = build_write_file_diff_rows(tool, visible, width, bg) {
+            r
+        } else {
+            return vec![];
         }
-    }
-    if tool.name == "python_command" {
-        if let Some(rows) = build_python_command_rows(tool, visible, width) {
-            return rows;
+    } else if tool.name == "python_command" {
+        if let Some(r) = build_python_command_rows(tool, visible, width, bg) {
+            r
+        } else {
+            return vec![];
+        }
+    } else {
+        let (output, footer) = tool_display_content(tool);
+        let title_highlighted = tool.name == "shell_command"
+            || tool.name == "command";
+        if title_highlighted {
+            build_shell_command_rows(&tool.title, &output, &footer, visible, width, "ctrl+o to expand", bg)
+        } else {
+            build_output_block_rows(
+                &tool.title,
+                " Output ",
+                &output,
+                &footer,
+                visible,
+                width,
+                "ctrl+o to expand",
+                bg,
+            )
+        }
+    };
+
+    if let Some(fg) = fg {
+        for line in &mut rows {
+            for span in &mut line.spans {
+                span.style = span.style.fg(fg);
+            }
         }
     }
 
-    let (output, footer) = tool_display_content(tool);
-    build_output_block_rows(
-        &tool.title,
-        " Output ",
-        &output,
-        &footer,
-        visible,
-        width,
-        "ctrl+o to expand",
-    )
+    rows
+}
+
+fn build_shell_command_rows(
+    title: &str,
+    output: &str,
+    footer: &str,
+    visible: bool,
+    width: usize,
+    collapsed_hint: &str,
+    bg: Color,
+) -> Vec<Line<'static>> {
+    let width = width.max(4);
+    let mut rows = Vec::new();
+    rows.push(border_line(width, bg));
+
+    // Highlight the shell command in the title row
+    if let Some(cmd) = title.strip_prefix("$ ") {
+        let cmd_spans = crate::session::markdown::highlight_line(cmd, "sh");
+        let cmd_spans = spans_with_bg(&cmd_spans, bg);
+        let mut label_spans = vec![Span::styled("$ ", bg_style(bg))];
+        label_spans.extend(cmd_spans);
+        rows.push(box_row_line_spans(label_spans, width, bg));
+    } else {
+        rows.extend(box_row_lines(title, width, bg));
+    }
+
+    rows.push(border_with_label_line(width, " Output ", bg));
+
+    if visible {
+        let body_rows = output_row_lines(output, width, bg);
+        if body_rows.is_empty() {
+            rows.extend(box_row_lines("[no output]", width, bg));
+        } else {
+            rows.extend(body_rows);
+        }
+        if !footer.is_empty() {
+            rows.extend(box_row_lines(footer, width, bg));
+        }
+    } else {
+        rows.extend(collapsed_output_lines(output, width, collapsed_hint, bg));
+        if !footer.is_empty() {
+            rows.extend(box_row_lines(footer, width, bg));
+        }
+    }
+
+    rows.push(border_line(width, bg));
+    rows
 }
 
 fn build_output_block_rows(
@@ -309,48 +419,50 @@ fn build_output_block_rows(
     visible: bool,
     width: usize,
     collapsed_hint: &str,
-) -> Vec<String> {
+    bg: Color,
+) -> Vec<Line<'static>> {
     let width = width.max(4);
     let mut rows = Vec::new();
-    rows.push(border(width));
-    rows.extend(box_rows(title, width));
-    rows.push(border_with_label(width, label));
+    rows.push(border_line(width, bg));
+    rows.extend(box_row_lines(title, width, bg));
+    rows.push(border_with_label_line(width, label, bg));
 
     if visible {
-        let mut body_rows = output_rows(output, width);
+        let body_rows = output_row_lines(output, width, bg);
         if body_rows.is_empty() {
-            body_rows.extend(box_rows("[no output]", width));
+            rows.extend(box_row_lines("[no output]", width, bg));
+        } else {
+            rows.extend(body_rows);
         }
-        rows.extend(body_rows);
         if !footer.is_empty() {
-            rows.extend(box_rows(footer, width));
+            rows.extend(box_row_lines(footer, width, bg));
         }
     } else {
-        rows.extend(collapsed_output_rows(output, width, collapsed_hint));
+        rows.extend(collapsed_output_lines(output, width, collapsed_hint, bg));
         if !footer.is_empty() {
-            rows.extend(box_rows(footer, width));
+            rows.extend(box_row_lines(footer, width, bg));
         }
     }
 
-    rows.push(border(width));
+    rows.push(border_line(width, bg));
     rows
 }
 
-fn output_rows(output: &str, width: usize) -> Vec<String> {
+fn output_row_lines(output: &str, width: usize, bg: Color) -> Vec<Line<'static>> {
     let mut rows = Vec::new();
     for line in output.lines() {
         for wrapped in wrap_line(line, width.saturating_sub(4)) {
-            rows.extend(box_rows(&wrapped, width));
+            rows.push(box_row_line(&wrapped, width, bg));
         }
     }
     rows
 }
 
-fn collapsed_output_rows(output: &str, width: usize, hint: &str) -> Vec<String> {
+fn collapsed_output_lines(output: &str, width: usize, hint: &str, bg: Color) -> Vec<Line<'static>> {
     let lines: Vec<&str> = output.lines().collect();
     if lines.is_empty() {
-        let mut rows = box_rows("[no output]", width);
-        rows.extend(box_rows(&format!("[collapsed; {hint}]"), width));
+        let mut rows = box_row_lines("[no output]", width, bg);
+        rows.extend(box_row_lines(&format!("[collapsed; {hint}]"), width, bg));
         return rows;
     }
 
@@ -364,27 +476,113 @@ fn collapsed_output_rows(output: &str, width: usize, hint: &str) -> Vec<String> 
         format!(" ({hint})")
     };
     if skipped > 0 {
-        rows.extend(box_rows(
+        rows.extend(box_row_lines(
             &format!("... ({skipped} earlier lines, showing {shown} of {total}){hint_suffix}"),
             width,
+            bg,
         ));
     } else {
-        rows.extend(box_rows(
+        rows.extend(box_row_lines(
             &format!("... (showing {shown} of {total}){hint_suffix}"),
             width,
+            bg,
         ));
     }
     for line in lines.iter().skip(skipped) {
-        rows.extend(box_rows(line, width));
+        rows.extend(box_row_lines(line, width, bg));
     }
     rows
+}
+
+// ── Line-based helper functions for styled block rendering ──
+
+/// Override the background color on all spans to match the block bg.
+/// This ensures syntax-highlighted spans don't reset bg to terminal default.
+fn spans_with_bg(spans: &[Span<'static>], bg: Color) -> Vec<Span<'static>> {
+    spans.iter().map(|s| {
+        let style = s.style.clone().bg(bg);
+        Span::styled(s.content.clone(), style)
+    }).collect()
+}
+
+fn border_line(width: usize, bg: Color) -> Line<'static> {
+    Line::from(Span::styled(border_str(width), dim_bg_style(bg)))
+}
+
+fn border_with_label_line(width: usize, label: &str, bg: Color) -> Line<'static> {
+    Line::from(Span::styled(border_with_label_str(width, label), dim_bg_style(bg)))
+}
+
+fn box_row_line(text: &str, width: usize, bg: Color) -> Line<'static> {
+    let pad = width.saturating_sub(4).saturating_sub(visible_width(text));
+    let mut spans = vec![
+        Span::styled("| ", dim_bg_style(bg)),
+        Span::styled(text.to_string(), bg_style(bg)),
+    ];
+    if pad > 0 {
+        spans.push(Span::styled(" ".repeat(pad), bg_style(bg)));
+    }
+    spans.push(Span::styled(" |", dim_bg_style(bg)));
+    Line::from(spans)
+}
+
+fn box_row_line_spans(spans: Vec<Span<'static>>, width: usize, bg: Color) -> Line<'static> {
+    let content_width: usize = spans
+        .iter()
+        .map(|s| unicode_width::UnicodeWidthStr::width(s.content.as_ref()))
+        .sum();
+    let pad = width.saturating_sub(4).saturating_sub(content_width);
+    let mut all_spans = vec![
+        Span::styled("| ", dim_bg_style(bg)),
+    ];
+    all_spans.extend(spans);
+    if pad > 0 {
+        all_spans.push(Span::styled(" ".repeat(pad), bg_style(bg)));
+    }
+    all_spans.push(Span::styled(" |", dim_bg_style(bg)));
+    Line::from(all_spans)
+}
+
+fn box_row_lines(text: &str, width: usize, bg: Color) -> Vec<Line<'static>> {
+    wrap_line(text, width.saturating_sub(4))
+        .into_iter()
+        .map(|line| box_row_line(&line, width, bg))
+        .collect()
+}
+
+// ── Old string-based helpers (kept for backwards-compat in counting) ──
+
+fn border_str(width: usize) -> String {
+    if width <= 1 {
+        return "+".to_string();
+    }
+    format!("+{}+", "-".repeat(width.saturating_sub(2)))
+}
+
+fn border_with_label_str(width: usize, label: &str) -> String {
+    if width <= 4 {
+        return border_str(width);
+    }
+    let label_width = visible_width(label);
+    let left = 3.min(width.saturating_sub(2));
+    let used = 2 + left + label_width;
+    if used >= width {
+        return border_str(width);
+    }
+    format!(
+        "+{}{}{}+",
+        "-".repeat(left),
+        label,
+        "-".repeat(width - used)
+    )
 }
 
 fn build_python_command_rows(
     tool: &ToolResultBlock,
     visible: bool,
     width: usize,
-) -> Option<Vec<String>> {
+    bg: Color,
+) -> Option<Vec<Line<'static>>> {
     let value: serde_json::Value = serde_json::from_str(&tool.content).ok()?;
     if value.get("kind").and_then(|v| v.as_str()) != Some("python_command_result") {
         return None;
@@ -394,22 +592,34 @@ fn build_python_command_rows(
     let (output, footer) = command_display_content(output_raw);
     let width = width.max(4);
     let mut rows = Vec::new();
-    rows.push(border_with_label(width, " python "));
-    rows.extend(output_rows(code, width));
-    rows.push(border_with_label(width, " Output "));
-    if visible {
-        let mut body_rows = output_rows(&output, width);
-        if body_rows.is_empty() {
-            body_rows.extend(box_rows("[no output]", width));
+    rows.push(border_with_label_line(width, " python ", bg));
+    // Highlight Python code lines
+    for line in code.lines() {
+        let spans = crate::session::markdown::highlight_line(line, "python");
+        let spans = spans_with_bg(&spans, bg);
+        for wrapped in wrap_line(line, width.saturating_sub(4)) {
+            if wrapped == line {
+                rows.push(box_row_line_spans(spans.clone(), width, bg));
+            } else {
+                rows.extend(box_row_lines(&wrapped, width, bg));
+            }
         }
-        rows.extend(body_rows);
+    }
+    rows.push(border_with_label_line(width, " Output ", bg));
+    if visible {
+        let body_rows = output_row_lines(&output, width, bg);
+        if body_rows.is_empty() {
+            rows.extend(box_row_lines("[no output]", width, bg));
+        } else {
+            rows.extend(body_rows);
+        }
     } else {
-        rows.extend(collapsed_output_rows(&output, width, "ctrl+o to expand"));
+        rows.extend(collapsed_output_lines(&output, width, "ctrl+o to expand", bg));
     }
     if !footer.is_empty() {
-        rows.extend(box_rows(&footer, width));
+        rows.extend(box_row_lines(&footer, width, bg));
     }
-    rows.push(border(width));
+    rows.push(border_line(width, bg));
     Some(rows)
 }
 
@@ -470,12 +680,13 @@ fn build_write_file_diff_rows(
     tool: &ToolResultBlock,
     visible: bool,
     width: usize,
-) -> Option<Vec<String>> {
+    bg: Color,
+) -> Option<Vec<Line<'static>>> {
     let (path, old, new) = parse_write_file_diff(&tool.content)?;
     let diff = unified_diff_rows(&old, &new);
     let added = diff
         .iter()
-        .filter(|line| line.starts_with(" ") && line.contains("+│"))
+        .filter(|line| line.starts_with(" ") && is_diff_added(line))
         .count();
     let removed = diff.iter().filter(|line| line.starts_with('-')).count();
     let ext = std::path::Path::new(&path)
@@ -485,21 +696,49 @@ fn build_write_file_diff_rows(
     let title = format!(" ~ Edit: {ext} {path} [+{added}/-{removed}] ");
 
     let width = width.max(4);
-    let mut rows = vec![border_with_label(width, &title)];
+    let mut rows = vec![border_with_label_line(width, &title, bg)];
     let body = diff.join("\n");
     if visible {
         if diff.is_empty() {
-            rows.extend(box_rows("[no changes]", width));
+            rows.extend(box_row_lines("[no changes]", width, bg));
         } else {
-            for line in diff {
-                rows.extend(box_rows(&line, width));
+            for line in &diff {
+                rows.push(diff_box_row_line(line, width, bg));
             }
         }
     } else {
-        rows.extend(collapsed_output_rows(&body, width, "ctrl+o to expand"));
+        rows.extend(collapsed_output_lines(&body, width, "ctrl+o to expand", bg));
     }
-    rows.push(border(width));
+    rows.push(border_line(width, bg));
     Some(rows)
+}
+
+fn is_diff_added(line: &str) -> bool {
+    line.find('│')
+        .and_then(|pos| line[..pos].chars().last())
+        .map(|c| c == '+')
+        .unwrap_or(false)
+}
+
+fn diff_box_row_line(diff_line: &str, width: usize, bg: Color) -> Line<'static> {
+    let fg = if diff_line.starts_with('-') {
+        Color::Red
+    } else if is_diff_added(diff_line) {
+        Color::Green
+    } else {
+        Color::Reset
+    };
+
+    let pad = width.saturating_sub(4).saturating_sub(visible_width(diff_line));
+    let mut spans = vec![
+        Span::styled("| ", dim_bg_style(bg)),
+        Span::styled(diff_line.to_string(), Style::default().fg(fg).bg(bg)),
+    ];
+    if pad > 0 {
+        spans.push(Span::styled(" ".repeat(pad), Style::default().bg(bg)));
+    }
+    spans.push(Span::styled(" |", dim_bg_style(bg)));
+    Line::from(spans)
 }
 
 fn parse_write_file_diff(content: &str) -> Option<(String, String, String)> {
@@ -656,41 +895,6 @@ fn section_after(content: &str, marker: &str) -> Option<String> {
     Some(content[idx..].to_string())
 }
 
-fn border(width: usize) -> String {
-    if width <= 1 {
-        return "+".to_string();
-    }
-    format!("+{}+", "-".repeat(width.saturating_sub(2)))
-}
-
-fn border_with_label(width: usize, label: &str) -> String {
-    if width <= 4 {
-        return border(width);
-    }
-    let label_width = visible_width(label);
-    let left = 3.min(width.saturating_sub(2));
-    let used = 2 + left + label_width;
-    if used >= width {
-        return border(width);
-    }
-    format!(
-        "+{}{}{}+",
-        "-".repeat(left),
-        label,
-        "-".repeat(width - used)
-    )
-}
-
-fn box_rows(text: &str, width: usize) -> Vec<String> {
-    wrap_line(text, width.saturating_sub(4))
-        .into_iter()
-        .map(|line| {
-            let pad = width.saturating_sub(4).saturating_sub(visible_width(&line));
-            format!("| {}{} |", line, " ".repeat(pad))
-        })
-        .collect()
-}
-
 fn wrap_line(line: &str, max_width: usize) -> Vec<String> {
     if max_width == 0 {
         return vec![String::new()];
@@ -724,6 +928,19 @@ mod tests {
     use crate::config::ThinkingDisplay;
     use crate::session::{Message, Role, Session};
 
+    fn lines_to_text(lines: &[Line<'static>]) -> String {
+        lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     fn session_with_table_table() -> Session {
         let mut s = Session::default();
         s.display = ThinkingDisplay::Show;
@@ -747,22 +964,7 @@ mod tests {
     fn build_lines_renders_table() {
         let session = session_with_table_table();
         let (lines, _toggles) = build_lines(&session, 100);
-        // Join each line's spans into a string first, then join lines
-        // with a space. This is the same shape the markdown tests use
-        // and avoids inserting a space between every single-char span
-        // (cells get wrapped into one span per char so the column
-        // widths line up; flat-map+join would put phantom spaces
-        // between "列" and "1" inside a cell).
-        let text: String = lines
-            .iter()
-            .map(|l| {
-                l.spans
-                    .iter()
-                    .map(|s| s.content.as_ref())
-                    .collect::<String>()
-            })
-            .collect::<Vec<_>>()
-            .join(" ");
+        let text = lines_to_text(&lines);
         assert!(text.contains("列 1"), "header missing:\n{text}");
         assert!(text.contains("列 2"), "header missing:\n{text}");
         assert!(text.contains("A"), "cell A missing:\n{text}");
@@ -785,9 +987,10 @@ mod tests {
             .to_string(),
             content_offset: 0,
             visible: true,
+            running: false,
         };
         let rows = build_tool_block_rows(&tool, true, 100);
-        let text = rows.join("\n");
+        let text = lines_to_text(&rows);
         assert!(
             text.contains("Get-ChildItem: bad flag"),
             "stderr missing:\n{text}"
@@ -813,9 +1016,10 @@ mod tests {
             .to_string(),
             content_offset: 0,
             visible: true,
+            running: false,
         };
         let rows = build_tool_block_rows(&tool, true, 80);
-        let text = rows.join("\n");
+        let text = lines_to_text(&rows);
         assert!(
             text.contains("~ Edit: py src/demo.py [+1/-1]"),
             "title missing:\n{text}"

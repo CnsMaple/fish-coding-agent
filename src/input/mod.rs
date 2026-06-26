@@ -8,6 +8,7 @@ use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 use ratatui::widgets::{Block, Borders, Paragraph};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 #[derive(Debug)]
@@ -642,13 +643,11 @@ fn input_mode_preview<'a>(buffer: &'a str, fallback: &'a str) -> &'a str {
     }
 }
 
+static SPINNER_FRAME: AtomicUsize = AtomicUsize::new(0);
+
 fn spinner_prompt() -> String {
     const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-    let idx = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| (d.as_millis() / 80) as usize)
-        .unwrap_or(0)
-        % FRAMES.len();
+    let idx = SPINNER_FRAME.fetch_add(1, Ordering::Relaxed) % FRAMES.len();
     format!(" {} ", FRAMES[idx])
 }
 

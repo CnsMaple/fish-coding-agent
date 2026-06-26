@@ -341,6 +341,9 @@ pub struct Config {
     /// Border style for markdown tables and code blocks.
     #[serde(default)]
     pub border_type: crate::ui::border_type::BorderType,
+    /// Color theme for the TUI.
+    #[serde(default)]
+    pub theme: crate::theme::ThemeVariant,
     #[serde(default)]
     pub entries: HashMap<ProviderId, ProviderConfig>,
 }
@@ -404,6 +407,7 @@ impl Config {
             tool_display: ToolResultDisplay::Show,
             enter_behavior: EnterBehavior::EnterSends,
             border_type: crate::ui::border_type::BorderType::default(),
+            theme: crate::theme::ThemeVariant::default(),
             entries,
         }
     }
@@ -586,6 +590,7 @@ impl Default for Config {
             tool_display: ToolResultDisplay::Show,
             enter_behavior: EnterBehavior::EnterSends,
             border_type: crate::ui::border_type::BorderType::default(),
+            theme: crate::theme::ThemeVariant::default(),
             entries: HashMap::new(),
         }
     }

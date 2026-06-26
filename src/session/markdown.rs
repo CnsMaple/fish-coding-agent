@@ -502,6 +502,30 @@ fn highlight_code_lines(lines: &[&str], lang: Option<&str>) -> Vec<TableCell> {
         .collect()
 }
 
+/// Highlight a single line of code in the given language.
+/// Returns styled spans with syntax coloring.
+/// Falls back to a plain span if the language is unknown.
+pub(crate) fn highlight_line(line: &str, lang: &str) -> Vec<Span<'static>> {
+    let ps = syntax_set();
+    let Some(syntax) = ps
+        .find_syntax_by_token(lang)
+        .or_else(|| find_syntax(ps, lang))
+    else {
+        return vec![Span::raw(line.to_string())];
+    };
+    let Some(theme) = theme_set().themes.get("base16-ocean.dark") else {
+        return vec![Span::raw(line.to_string())];
+    };
+    let mut highlighter = HighlightLines::new(syntax, theme);
+    match highlighter.highlight_line(line, ps) {
+        Ok(ranges) => ranges
+            .into_iter()
+            .map(|(style, text)| Span::styled(text.to_string(), syntect_style(style)))
+            .collect(),
+        Err(_) => vec![Span::raw(line.to_string())],
+    }
+}
+
 fn plain_code_lines(lines: &[&str]) -> Vec<TableCell> {
     lines
         .iter()

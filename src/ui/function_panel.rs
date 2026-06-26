@@ -3,6 +3,7 @@ use crate::function::SidebarTab;
 use crate::theme::Theme;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Tabs, Wrap};
@@ -378,6 +379,11 @@ fn render_settings(
                 "border type",
                 Some(cfg.border_type.as_str().to_string()),
             ));
+            body_lines.push(list_item(
+                5 == s.cursor,
+                "theme",
+                Some(cfg.theme.as_str().to_string()),
+            ));
         }
         SettingsLevel::ProviderList => {
             body_lines.push(list_item(0 == s.cursor, "+ new provider", None));
@@ -462,6 +468,18 @@ fn render_settings(
                 body_lines.push(list_item(s.cursor == i, &label, None));
             }
         }
+        SettingsLevel::ThemeList => {
+            use crate::theme::ThemeVariant;
+            let themes = ThemeVariant::all();
+            for (i, variant) in themes.iter().enumerate() {
+                let is_current = *variant == cfg.theme;
+                let mut label = variant.as_str().to_string();
+                if is_current {
+                    label.push_str("  [current]");
+                }
+                body_lines.push(list_item(s.cursor == i, &label, None));
+            }
+        }
         SettingsLevel::ConfigForm(form) => {
             use crate::function::ConfigField;
             let fields = form.active_fields();
@@ -527,13 +545,13 @@ fn list_item(focused: bool, label: &str, value: Option<String>) -> Line<'static>
         if v.is_empty() {
             if focused {
                 spans.push(Span::styled("<empty>", Theme::dim()));
-                spans.push(Span::styled("|", Theme::cursor_visible()));
+                // Terminal cursor is positioned here, no drawn cursor needed
             } else {
                 spans.push(Span::styled("<empty>".to_string(), Theme::dim()));
             }
         } else if focused {
             spans.push(Span::raw(v));
-            spans.push(Span::styled("|", Theme::cursor_visible()));
+            // Terminal cursor is positioned at end of value
         } else {
             spans.push(Span::raw(v));
         }
@@ -820,12 +838,23 @@ fn render_timeline_picker(
             let entry = &s.entries[entry_idx];
             let is_cursor = row == s.cursor;
             let y = list_area.y + (row - start) as u16;
-            let tag = match entry.role {
-                crate::session::Role::User => "user",
-                crate::session::Role::Assistant => "asst",
-                crate::session::Role::System => "sys ",
+            let tag = if entry.tool_idx.is_some() {
+                "tool"
+            } else {
+                match entry.role {
+                    crate::session::Role::User => "user",
+                    crate::session::Role::Assistant => "asst",
+                    crate::session::Role::System => "sys ",
+                }
             };
-            let tag_span = Span::styled(format!("{tag} "), Theme::dim());
+            let tag_span = Span::styled(
+                format!("{tag} "),
+                if entry.tool_idx.is_some() {
+                    Theme::dim().add_modifier(Modifier::ITALIC)
+                } else {
+                    Theme::dim()
+                },
+            );
             if is_cursor {
                 let line = Line::from(vec![
                     Span::styled("> ", Theme::bold()),

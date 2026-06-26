@@ -12,7 +12,8 @@ pub struct ToolResultBlock {
     pub content: String,
     pub content_offset: usize,
     pub visible: bool,
-
+    #[serde(default)]
+    pub running: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -149,11 +150,34 @@ impl Session {
                 if let Ok(mut c) = self.line_cache.lock() {
                     if id < c.len() { c[id] = None; }
                 }
-                // Reveal streamed content immediately; providers already
-                // deliver deltas in small chunks, so no artificial delay.
-                m.display_cursor = m.content.len();
+                // Keep cursor ~30 chars behind content for a progressive
+                // streaming reveal effect.  The tick handler advances it
+                // by 30 per 100ms tick so it steadily catches up.
+                if m.display_cursor < m.content.len() {
+                    m.display_cursor = m.content.len().saturating_sub(30);
+                }
             }
         }
+    }
+
+    /// Update the last tool block's content (for streaming: replace placeholder with final content).
+    /// If no tool block exists yet (non-streaming path), falls back to appending.
+    pub fn update_last_tool_content(&mut self, name: String, title: String, content: String) {
+        if let Some(id) = self.streaming_id {
+            if let Some(m) = self.messages.get_mut(id) {
+                if let Some(tool) = m.tool_results.last_mut() {
+                    tool.content = content;
+                    tool.running = false;
+                    tool.title = title;
+                    if let Ok(mut c) = self.line_cache.lock() {
+                        if id < c.len() { c[id] = None; }
+                    }
+                    return;
+                }
+            }
+        }
+        // Fallback: no existing block → append as normal
+        self.append_tool_to_last(name, title, content);
     }
 
     pub fn append_tool_to_last(&mut self, name: String, title: String, content: String) {
@@ -167,7 +191,37 @@ impl Session {
                     content,
                     content_offset,
                     visible,
+                    running: false,
                 });
+            }
+        }
+    }
+
+    pub fn start_tool_in_last(&mut self, name: String, title: String) {
+        if let Some(id) = self.streaming_id {
+            if let Some(m) = self.messages.get_mut(id) {
+                let content_offset = m.content.len();
+                m.tool_results.push(ToolResultBlock {
+                    name,
+                    title,
+                    content: String::new(),
+                    content_offset,
+                    visible: true,
+                    running: true,
+                });
+            }
+        }
+    }
+
+    pub fn append_tool_delta_to_last(&mut self, delta: &str) {
+        if let Some(id) = self.streaming_id {
+            if let Some(m) = self.messages.get_mut(id) {
+                if let Some(tool) = m.tool_results.last_mut() {
+                    tool.content.push_str(delta);
+                    if let Ok(mut c) = self.line_cache.lock() {
+                        if id < c.len() { c[id] = None; }
+                    }
+                }
             }
         }
     }
@@ -185,6 +239,7 @@ impl Session {
                 content,
                 content_offset: 0,
                 visible,
+                running: false,
             }],
             ts: Utc::now(),
             streaming: false,
@@ -221,6 +276,10 @@ impl Session {
         if let Some(id) = self.streaming_id {
             if let Some(m) = self.messages.get_mut(id) {
                 m.streaming = false;
+                // Mark any still-running tools as finished.
+                for t in &mut m.tool_results {
+                    t.running = false;
+                }
                 // Strip text-based tool call JSON fallback lines from
                 // content so they don't appear in the rendered chat.
                 m.content = strip_text_tool_calls(&m.content);
@@ -278,11 +337,11 @@ self.streaming_id = None;
     }
 
     /// Count rendered lines for every message (content + thinking toggle +
-    /// thinking expanded + spacer) using the same rules as `build_lines`.
-    pub fn count_all_lines(&self) -> u16 {
+    /// thinking expanded + spacer) using the same rules as `build_lines`,
+    /// estimating block line counts at the given `width`.
+    pub fn count_all_lines_with_width(&self, width: usize) -> u16 {
         let mut n = 0u16;
         for m in &self.messages {
-            n += 1; // role prefix line
             let show = m.role == Role::Assistant
                 && !m.thinking.trim().is_empty()
                 && self.display != crate::config::ThinkingDisplay::Hide;
@@ -291,20 +350,20 @@ self.streaming_id = None;
                     && m.thinking_visible)
                     || (self.display == crate::config::ThinkingDisplay::ShowWhileStreaming
                         && (m.streaming || m.thinking_visible));
-                n += crate::session::render::thinking_block_line_count(&m.thinking, expanded, 120)
+                n += crate::session::render::thinking_block_line_count(&m.thinking, expanded, width)
                     as u16;
             }
             n += m.line_count;
             if self.tool_display != crate::config::ToolResultDisplay::Hide {
                 for t in &m.tool_results {
                     let t_vis = match self.tool_display {
-                        crate::config::ToolResultDisplay::Show => t.visible,
+                        crate::config::ToolResultDisplay::Show => t.visible || t.running,
                         crate::config::ToolResultDisplay::ShowWhileStreaming => {
-                            m.streaming || t.visible
+                            m.streaming || t.visible || t.running
                         }
                         _ => false,
                     };
-                    n += crate::session::render::tool_block_line_count(t, t_vis, 120) as u16;
+                    n += crate::session::render::tool_block_line_count(t, t_vis, width) as u16;
                 }
             }
             n += 1; // spacer
@@ -313,6 +372,12 @@ self.streaming_id = None;
             n += 1; // trailing gap line at the bottom
         }
         n
+    }
+
+    /// Count rendered lines estimating block widths at 120 columns
+    /// (less accurate but doesn't require the viewport width).
+    pub fn count_all_lines(&self) -> u16 {
+        self.count_all_lines_with_width(120)
     }
 
     /// Set `scroll` so that the last `user` message appears at the top
@@ -355,7 +420,6 @@ self.streaming_id = None;
             if i >= msg_idx {
                 break;
             }
-            n += 1; // role prefix line
             let show = m.role == Role::Assistant
                 && !m.thinking.trim().is_empty()
                 && self.display != crate::config::ThinkingDisplay::Hide;
@@ -371,9 +435,9 @@ self.streaming_id = None;
             if self.tool_display != crate::config::ToolResultDisplay::Hide {
                 for t in &m.tool_results {
                     let t_vis = match self.tool_display {
-                        crate::config::ToolResultDisplay::Show => t.visible,
+                        crate::config::ToolResultDisplay::Show => t.visible || t.running,
                         crate::config::ToolResultDisplay::ShowWhileStreaming => {
-                            m.streaming || t.visible
+                            m.streaming || t.visible || t.running
                         }
                         _ => false,
                     };
