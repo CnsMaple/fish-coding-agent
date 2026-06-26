@@ -1169,9 +1169,9 @@ fn handle_mouse(m: MouseEvent, app: &mut App) {
         // doesn't change (because session.scroll is clamped to
         // max_scroll in the render function).
         if let Some(area) = app.session_area {
-            let inner_h = area.height.saturating_sub(2);
+            let inner_h = area.height.saturating_sub(2) as u32;
             let total = app.session.count_all_lines_with_width(area.width as usize);
-            let max_scroll = total.saturating_sub(inner_h);
+            let max_scroll = total.saturating_sub(inner_h).min(u16::MAX as u32) as u16;
             if app.session.scroll > max_scroll {
                 app.session.scroll = max_scroll;
             }
@@ -1447,6 +1447,7 @@ fn submit_direct_tool_input(app: &mut App, raw: &str) -> bool {
         ts: chrono::Utc::now(),
         streaming: true,
         skill_ref: None,
+        content_version: 0,
     };
     let id = app.session.push(assistant);
     app.session.streaming_id = Some(id);
@@ -1761,15 +1762,10 @@ async fn handle_ask_key(
             };
             state.answered = Some(answer.clone());
             let prompt = format!("Answer: {answer}");
-            app.session.push(crate::session::Message::new(
-                crate::session::Role::User,
-                prompt.clone(),
-            ));
             // Close the tab BEFORE dispatching the follow-up chat so
             // the user sees a clean panel when the new response
-            // starts streaming. The "Answer: …" message is now part
-            // of the conversation history and will be sent to the
-            // model by send_chat.
+            // starts streaming. The message is added to the session
+            // and sent to the model by send_chat below.
             close_active_function_tab(app);
             app.set_mode(crate::function::AppMode::Yolo);
             app.notify(

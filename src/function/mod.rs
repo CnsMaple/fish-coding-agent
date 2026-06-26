@@ -1452,7 +1452,12 @@ impl App {
                     display: self.config.thinking_display,
                     tool_display: self.config.tool_display,
                     line_cache: Default::default(),
+                    message_lines_cache: Default::default(),
+                    cached_total_lines: None,
+                    layout_version: 0,
+                    render_cache: Default::default(),
                 };
+                self.session.invalidate_layout_cache();
                 if !stored.todo_items.is_empty() {
                     self.open_todo(stored.todo_items);
                 }
@@ -1522,7 +1527,12 @@ impl App {
                     display: self.config.thinking_display,
                     tool_display: self.config.tool_display,
                     line_cache: Default::default(),
+                    message_lines_cache: Default::default(),
+                    cached_total_lines: None,
+                    layout_version: 0,
+                    render_cache: Default::default(),
                 };
+                self.session.invalidate_layout_cache();
                 self.notify(
                     crate::function::notifications::ToastLevel::Ok,
                     format!("forked session: {}", self.session_title),

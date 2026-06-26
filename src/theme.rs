@@ -12,6 +12,7 @@ static ACTIVE_COLORS: RwLock<ThemeColors> = RwLock::new(ThemeColors {
     cursor_fg: Color::Reset,
     thinking_streaming_bg: Color::Yellow,
     thinking_done_bg: Color::Green,
+    user_bg: Color::Rgb(224, 247, 250),
 });
 
 /// Get the currently active theme colors.
@@ -70,6 +71,8 @@ pub struct ThemeColors {
     pub thinking_streaming_bg: Color,
     /// Background color for the thinking block when done.
     pub thinking_done_bg: Color,
+    /// Background color for user message blocks.
+    pub user_bg: Color,
 }
 
 impl Default for ThemeColors {
@@ -88,6 +91,7 @@ impl ThemeColors {
             cursor_fg: Color::Reset,
             thinking_streaming_bg: Color::Yellow,
             thinking_done_bg: Color::Green,
+            user_bg: Color::Rgb(224, 247, 250),
         }
     }
 
@@ -101,6 +105,7 @@ impl ThemeColors {
             cursor_fg: Color::Rgb(5, 150, 105),              // emerald-600
             thinking_streaming_bg: Color::Rgb(230, 245, 243), // #E6F5F3
             thinking_done_bg: Color::Rgb(232, 245, 233),     // #E8F5E9
+            user_bg: Color::Rgb(224, 247, 250),              // #E0F7FA (matches default)
         }
     }
 
@@ -201,5 +206,10 @@ impl Theme {
 
     pub fn block_failed() -> Style {
         Self::base().fg(active_colors().tool_error_fg).bg(active_colors().tool_error_bg).add_modifier(Modifier::BOLD)
+    }
+
+    /// Background for user message blocks.
+    pub fn user_block() -> Style {
+        Self::base().bg(active_colors().user_bg)
     }
 }

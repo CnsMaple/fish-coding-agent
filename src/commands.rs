@@ -246,9 +246,9 @@ fn continue_response(app: &mut App, arg: &str) {
         return;
     }
     let prompt = if arg.is_empty() {
-        "Continue from where you left off.".to_string()
+        String::new()
     } else {
-        format!("Continue from where you left off.\n\n{arg}")
+        arg.to_string()
     };
     crate::commands::send_chat(app, prompt);
     // Remove the user message from session (kept in API request)
@@ -562,6 +562,7 @@ pub fn send_message(app: &mut App, user_msg: Message) {
         ts: chrono::Utc::now(),
         streaming: true,
         skill_ref: None,
+        content_version: 0,
     };
     let id = app.session.push(assistant);
     app.session.streaming_id = Some(id);
@@ -723,12 +724,7 @@ pub fn send_message(app: &mut App, user_msg: Message) {
                 });
 
                 let _ = tx.send(crate::event::AppMsg::ChatTimerPause);
-                // If any tool was "ask" or "plan", stop auto-continue and wait for user input
-                let has_interaction_tool = tool_calls.iter().any(|c| c.name == "ask" || c.name == "plan");
-                if has_interaction_tool {
-                    return;
-                }
-                for call in tool_calls {
+                for call in &tool_calls {
                     let title = tool_result_title(&call);
                     let _ = tx.send(crate::event::AppMsg::ToolStarted {
                         name: call.name.clone(),
@@ -753,6 +749,12 @@ pub fn send_message(app: &mut App, user_msg: Message) {
                         title,
                         content: display_text,
                     });
+                }
+                // If any tool was "ask" or "plan", stop auto-continue and wait for user input
+                let has_interaction_tool = tool_calls.iter().any(|c| c.name == "ask" || c.name == "plan");
+                if has_interaction_tool {
+                    let _ = tx.send(crate::event::AppMsg::ChatDone);
+                    return;
                 }
                 let _ = tx.send(crate::event::AppMsg::ChatTimerResume);
             }
@@ -852,3 +854,4 @@ fn parse_text_tool_calls(content: &str) -> Vec<ToolCall> {
     }
     calls
 }
+

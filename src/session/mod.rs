@@ -1,3 +1,4 @@
+pub mod lru;
 pub mod markdown;
 pub mod render;
 pub mod store;
@@ -9,6 +10,14 @@ use serde::{Deserialize, Serialize};
 pub struct ThinkingSegment {
     pub offset: usize,
     pub content: String,
+    /// Cached rendered line count for the expanded thinking block.
+    /// `None` means "needs (re)compute"; populated on first render
+    /// or by `Session::recompute_layout_caches`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_line_count_expanded: Option<u32>,
+    /// Cached rendered line count for the collapsed (single toggle) line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_line_count_collapsed: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -20,6 +29,12 @@ pub struct ToolResultBlock {
     pub visible: bool,
     #[serde(default)]
     pub running: bool,
+    /// Cached rendered line count for the expanded tool block.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_line_count_visible: Option<u32>,
+    /// Cached rendered line count for the collapsed preview form.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_line_count_collapsed: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -82,14 +97,21 @@ pub struct Message {
     pub skill_ref: Option<SkillRef>,
     /// Pre-computed line count (content.split('\n').count()).
     /// Updated when content changes to avoid re-scanning on every frame.
-    pub line_count: u16,
+    /// `u32` to support 10M+ token sessions.
+    pub line_count: u32,
+    /// Per-message version counter. Bumped whenever this message's
+    /// content, thinking, or tool results change. The render LRU is
+    /// keyed on this so changing one message does not invalidate
+    /// cached render output for the others.
+    #[serde(default)]
+    pub content_version: u64,
 }
 
 impl Message {
     pub fn new(role: Role, content: impl Into<String>) -> Self {
         let content = content.into();
         let len = content.len();
-        let line_count = content.matches('\n').count() as u16 + 1;
+        let line_count = content.matches('\n').count() as u32 + 1;
         Self {
             role,
             content,
@@ -102,7 +124,15 @@ impl Message {
             display_cursor: len, // non-streaming → fully visible
             skill_ref: None,
             line_count,
+            content_version: 0,
         }
+    }
+
+    /// Bump the per-message version counter. Call this whenever the
+    /// message's content, thinking, or tool blocks change so the
+    /// render LRU can detect staleness.
+    pub fn bump_version(&mut self) {
+        self.content_version = self.content_version.wrapping_add(1);
     }
 
     /// The portion of `content` that should be displayed this frame.
@@ -141,25 +171,86 @@ pub struct Session {
     /// `None` = uncached; `Some(lines)` = cached until content changes.
     #[serde(skip)]
     pub line_cache: std::sync::Mutex<Vec<Option<Vec<ratatui::text::Line<'static>>>>>,
+    /// Bounded LRU of fully-rendered `Vec<Line>` per message, keyed by
+    /// `msg_idx` and validated against `Message.content_version`. Used
+    /// by the viewport-aware render path so we only re-parse Markdown
+    /// for messages that actually intersect the visible window.
+    #[serde(skip)]
+    pub message_lines_cache:
+        std::sync::Mutex<crate::session::lru::BoundedCache<crate::session::render::CachedMessageLines>>,
+    /// Cached total rendered line count across all messages. Width
+    /// dependent — the cache is keyed by the viewport width and the
+    /// per-block visibility state in `display` / `tool_display`. We
+    /// store the most recently computed value plus the version of the
+    /// session state it was computed against. `None` means "needs
+    /// compute on next read".
+    #[serde(skip)]
+    pub cached_total_lines: Option<(u16, u32)>,
+    /// Monotonically increasing version counter. Bumped on every write
+    /// so callers can detect stale cached values.
+    #[serde(skip)]
+    pub layout_version: u64,
+    /// Cache of the last rendered viewport buffer. When nothing changed,
+    /// `render()` skips all work and just blits this buffer.
+    #[serde(skip)]
+    pub render_cache: std::sync::Mutex<Option<crate::session::render::RenderCache>>,
 }
 
 impl Session {
+    /// Mark the layout-derived caches as dirty. Cheap O(1) call. All
+    /// write paths (`push`, `append_to_last`, `append_thinking_to_last`,
+    /// `start_tool_in_last`, `append_tool_to_last`, `append_tool_delta_to_last`,
+    /// `update_last_tool_content`, `finish_streaming`, `toggle_all_tool_results`,
+    /// `clear`, resume/fork) MUST call this.
+    pub fn invalidate_layout_cache(&mut self) {
+        self.cached_total_lines = None;
+        self.layout_version = self.layout_version.wrapping_add(1);
+        // Clear the viewport render cache too so the next frame
+        // re-renders from scratch.
+        if let Ok(mut c) = self.render_cache.lock() {
+            *c = None;
+        }
+    }
+
+    /// Read the cached total line count for a specific width, if
+    /// available. `None` means the caller must compute it first via
+    /// `count_all_lines_with_width(width)` (which needs `&mut self`).
+    /// Read-only renderers (those that already have a `&mut App` in
+    /// the caller) should call `count_all_lines_with_width` to warm
+    /// the cache, then use this for cheap lookups.
+    pub fn cached_total_lines_for(&self, width: usize) -> Option<u32> {
+        let w = width.min(u16::MAX as usize) as u16;
+        self.cached_total_lines
+            .as_ref()
+            .filter(|(cw, _)| *cw == w)
+            .map(|(_, n)| *n)
+    }
+
     pub fn push(&mut self, msg: Message) -> usize {
         let id = self.messages.len();
         self.messages.push(msg);
-        // Keep user's scroll offset if they manually scrolled away from
-        // the bottom. Only auto-scroll (scroll = 0) when they were
-        // already at the bottom.
+        self.invalidate_layout_cache();
         id
     }
 
     pub fn append_to_last(&mut self, chunk: &str) {
         if let Some(id) = self.streaming_id {
-            if let Some(m) = self.messages.get_mut(id) {
+            let needs_invalidate = if let Some(m) = self.messages.get_mut(id) {
                 m.content.push_str(chunk);
-                m.line_count = m.content.split('\n').count().max(1) as u16;
+                m.line_count = m.content.split('\n').count().max(1) as u32;
+                m.bump_version();
                 if let Ok(mut c) = self.line_cache.lock() {
                     if id < c.len() { c[id] = None; }
+                }
+                // Streaming: invalidate any pre-computed block counts
+                // for this message so count_all_lines_* stays accurate.
+                for seg in m.thinking_segments.iter_mut() {
+                    seg.cached_line_count_expanded = None;
+                    seg.cached_line_count_collapsed = None;
+                }
+                for t in m.tool_results.iter_mut() {
+                    t.cached_line_count_visible = None;
+                    t.cached_line_count_collapsed = None;
                 }
                 // Keep cursor ~30 chars behind content for a progressive
                 // streaming reveal effect.  The tick handler advances it
@@ -167,6 +258,12 @@ impl Session {
                 if m.display_cursor < m.content.len() {
                     m.display_cursor = m.content.len().saturating_sub(30);
                 }
+                true
+            } else {
+                false
+            };
+            if needs_invalidate {
+                self.invalidate_layout_cache();
             }
         }
     }
@@ -180,9 +277,13 @@ impl Session {
                     tool.content = content;
                     tool.running = false;
                     tool.title = title;
+                    tool.cached_line_count_visible = None;
+                    tool.cached_line_count_collapsed = None;
+                    m.bump_version();
                     if let Ok(mut c) = self.line_cache.lock() {
                         if id < c.len() { c[id] = None; }
                     }
+                    self.invalidate_layout_cache();
                     return;
                 }
             }
@@ -203,7 +304,11 @@ impl Session {
                     content_offset,
                     visible,
                     running: false,
+                    cached_line_count_visible: None,
+                    cached_line_count_collapsed: None,
                 });
+                m.bump_version();
+                self.invalidate_layout_cache();
             }
         }
     }
@@ -219,7 +324,11 @@ impl Session {
                     content_offset,
                     visible: true,
                     running: true,
+                    cached_line_count_visible: None,
+                    cached_line_count_collapsed: None,
                 });
+                m.bump_version();
+                self.invalidate_layout_cache();
             }
         }
     }
@@ -229,9 +338,13 @@ impl Session {
             if let Some(m) = self.messages.get_mut(id) {
                 if let Some(tool) = m.tool_results.last_mut() {
                     tool.content.push_str(delta);
+                    tool.cached_line_count_visible = None;
+                    tool.cached_line_count_collapsed = None;
+                    m.bump_version();
                     if let Ok(mut c) = self.line_cache.lock() {
                         if id < c.len() { c[id] = None; }
                     }
+                    self.invalidate_layout_cache();
                 }
             }
         }
@@ -252,12 +365,15 @@ impl Session {
                 content_offset: 0,
                 visible,
                 running: false,
+                cached_line_count_visible: None,
+                cached_line_count_collapsed: None,
             }],
             ts: Utc::now(),
             streaming: false,
             display_cursor: 0,
             skill_ref: None,
             line_count: 0,
+            content_version: 0,
         };
         self.push(msg);
     }
@@ -270,10 +386,18 @@ impl Session {
             .any(|tool| !tool.visible);
 
         for msg in &mut self.messages {
+            let mut changed = false;
             for tool in &mut msg.tool_results {
-                tool.visible = should_expand;
+                if tool.visible != should_expand {
+                    tool.visible = should_expand;
+                    changed = true;
+                }
+            }
+            if changed {
+                msg.bump_version();
             }
         }
+        self.invalidate_layout_cache();
     }
 
     pub fn append_thinking_to_last(&mut self, chunk: &str) {
@@ -285,19 +409,27 @@ impl Session {
                     if last.offset == content_len {
                         // Same phase (content hasn't grown since last thinking) → extend
                         last.content.push_str(chunk);
+                        last.cached_line_count_expanded = None;
+                        last.cached_line_count_collapsed = None;
                     } else {
                         // Content has grown → new phase, new segment
                         m.thinking_segments.push(ThinkingSegment {
                             offset: content_len,
                             content: chunk.to_string(),
+                            cached_line_count_expanded: None,
+                            cached_line_count_collapsed: None,
                         });
                     }
                 } else {
                     m.thinking_segments.push(ThinkingSegment {
                         offset: content_len,
                         content: chunk.to_string(),
+                        cached_line_count_expanded: None,
+                        cached_line_count_collapsed: None,
                     });
                 }
+                m.bump_version();
+                self.invalidate_layout_cache();
             }
         }
     }
@@ -313,9 +445,19 @@ impl Session {
                 // Strip text-based tool call JSON fallback lines from
                 // content so they don't appear in the rendered chat.
                 m.content = strip_text_tool_calls(&m.content);
-                m.line_count = m.content.split('\n').count().max(1) as u16;
+                m.line_count = m.content.split('\n').count().max(1) as u32;
+                m.bump_version();
                 if let Ok(mut c) = self.line_cache.lock() {
                     if id < c.len() { c[id] = None; }
+                }
+                // Invalidate any per-segment / per-tool counts.
+                for seg in m.thinking_segments.iter_mut() {
+                    seg.cached_line_count_expanded = None;
+                    seg.cached_line_count_collapsed = None;
+                }
+                for t in m.tool_results.iter_mut() {
+                    t.cached_line_count_visible = None;
+                    t.cached_line_count_collapsed = None;
                 }
                 // Reveal all remaining content immediately.
                 m.display_cursor = m.content.len();
@@ -350,48 +492,97 @@ impl Session {
         if let Ok(mut c) = self.line_cache.lock() {
             c.clear();
         }
+        self.invalidate_layout_cache();
     }
 
     /// Rough count of rendered lines up to (but not including) `msg_idx`,
     /// mirroring the same logic used by `build_lines` in `render.rs`.
     /// Only thinking-mode `Show` counts expanded blocks; `Hide` and
     /// `ShowWhileStreaming` count collapsed toggles.
-    pub fn count_lines_before(&self, _msg_idx: usize, viewport: u16) -> u16 {
+    pub fn count_lines_before(&mut self, _msg_idx: usize, viewport: u16) -> u32 {
         if self.messages.is_empty() {
             return 0;
         }
-        let inner_h = viewport.saturating_sub(2);
+        let inner_h = viewport.saturating_sub(2) as u32;
 
         // Compute total lines the same way render.rs does.
         let total = self.count_all_lines();
-        let scroll = self.scroll.min(total.saturating_sub(inner_h));
-        let offset_from_bottom = inner_h as u16 + scroll;
+        let scroll = (self.scroll as u32).min(total.saturating_sub(inner_h));
+        let offset_from_bottom = inner_h + scroll;
         total.saturating_sub(offset_from_bottom)
     }
 
-    /// Count rendered lines for every message (content + thinking toggle +
-    /// thinking expanded + spacer) using the same rules as `build_lines`,
-    /// estimating block line counts at the given `width`.
-    pub fn count_all_lines_with_width(&self, width: usize) -> u16 {
-        let mut n = 0u16;
-        for m in &self.messages {
-            let show = m.role == Role::Assistant
+    /// Count rendered lines for every message using pre-cached per-block
+    /// counts. O(N) over messages, but each message is O(1) (sum of
+    /// already-cached thinking / tool block counts). The cache is
+    /// populated lazily on first call and invalidated by every write
+    /// path (see `invalidate_layout_cache`).
+    ///
+    /// Returns `u32` because 10M-token sessions can easily exceed `u16`.
+    /// `width` is the viewport width used for the original cached values.
+    pub fn count_all_lines_with_width(&mut self, width: usize) -> u32 {
+        let w = width.min(u16::MAX as usize) as u16;
+        if let Some((cached_w, n)) = self.cached_total_lines {
+            if cached_w == w {
+                return n;
+            }
+        }
+        let n = self.compute_total_lines(w);
+        self.cached_total_lines = Some((w, n));
+        n
+    }
+
+    /// Internal: walks the session, populates per-block line caches, and
+    /// returns the total. Called by `count_all_lines_with_width` only
+    /// when the cached value is stale.
+    fn compute_total_lines(&mut self, width: u16) -> u32 {
+        let mut n: u32 = 0;
+        for m in &mut self.messages {
+            // Role prefix line.
+            n += 1;
+
+            // Thinking blocks.
+            let show_thinking = m.role == Role::Assistant
                 && !m.thinking.trim().is_empty()
                 && self.display != crate::config::ThinkingDisplay::Hide;
-            if show {
+            if show_thinking {
                 let expanded = (self.display == crate::config::ThinkingDisplay::Show
                     && m.thinking_visible)
                     || (self.display == crate::config::ThinkingDisplay::ShowWhileStreaming
                         && (m.streaming || m.thinking_visible));
-                let segments = crate::session::render::get_thinking_segments(m);
-                for seg in &segments {
-                    n += crate::session::render::thinking_block_line_count(&seg.content, expanded, width)
-                        as u16;
+                for seg in m.thinking_segments.iter_mut() {
+                    if expanded {
+                        if seg.cached_line_count_expanded.is_none() {
+                            seg.cached_line_count_expanded = Some(
+                                crate::session::render::thinking_block_line_count(
+                                    &seg.content,
+                                    true,
+                                    width as usize,
+                                ) as u32,
+                            );
+                        }
+                        n += seg.cached_line_count_expanded.unwrap_or(0);
+                    } else {
+                        if seg.cached_line_count_collapsed.is_none() {
+                            seg.cached_line_count_collapsed = Some(
+                                crate::session::render::thinking_block_line_count(
+                                    &seg.content,
+                                    false,
+                                    width as usize,
+                                ) as u32,
+                            );
+                        }
+                        n += seg.cached_line_count_collapsed.unwrap_or(0);
+                    }
                 }
             }
+
+            // Content lines (raw newline count from `line_count`).
             n += m.line_count;
+
+            // Tool result blocks.
             if self.tool_display != crate::config::ToolResultDisplay::Hide {
-                for t in &m.tool_results {
+                for t in m.tool_results.iter_mut() {
                     let t_vis = match self.tool_display {
                         crate::config::ToolResultDisplay::Show => t.visible || t.running,
                         crate::config::ToolResultDisplay::ShowWhileStreaming => {
@@ -399,10 +590,34 @@ impl Session {
                         }
                         _ => false,
                     };
-                    n += crate::session::render::tool_block_line_count(t, t_vis, width) as u16;
+                    if t_vis {
+                        if t.cached_line_count_visible.is_none() {
+                            t.cached_line_count_visible = Some(
+                                crate::session::render::tool_block_line_count(
+                                    t,
+                                    true,
+                                    width as usize,
+                                ) as u32,
+                            );
+                        }
+                        n += t.cached_line_count_visible.unwrap_or(0);
+                    } else {
+                        if t.cached_line_count_collapsed.is_none() {
+                            t.cached_line_count_collapsed = Some(
+                                crate::session::render::tool_block_line_count(
+                                    t,
+                                    false,
+                                    width as usize,
+                                ) as u32,
+                            );
+                        }
+                        n += t.cached_line_count_collapsed.unwrap_or(0);
+                    }
                 }
             }
-            n += 1; // spacer
+
+            // Spacer.
+            n += 1;
         }
         if !self.messages.is_empty() {
             n += 1; // trailing gap line at the bottom
@@ -412,14 +627,14 @@ impl Session {
 
     /// Count rendered lines estimating block widths at 120 columns
     /// (less accurate but doesn't require the viewport width).
-    pub fn count_all_lines(&self) -> u16 {
+    pub fn count_all_lines(&mut self) -> u32 {
         self.count_all_lines_with_width(120)
     }
 
     /// Set `scroll` so that the last `user` message appears at the top
     /// of the viewport.  Lines after the message will fill the viewport.
     pub fn timeline(&mut self, viewport_height: u16) {
-        let inner_h = viewport_height.saturating_sub(2) as u16;
+        let inner_h = viewport_height.saturating_sub(2) as u32;
         if inner_h == 0 {
             return;
         }
@@ -433,7 +648,7 @@ impl Session {
         let lines_before = self.lines_before(last_user);
         let total = self.count_all_lines();
         let target = total.saturating_sub(lines_before + inner_h);
-        self.scroll = target;
+        self.scroll = target.min(u16::MAX as u32) as u16;
     }
 
     /// Set `scroll` so the message at index `msg_idx` appears at the
@@ -442,20 +657,27 @@ impl Session {
         if msg_idx >= self.messages.len() {
             return;
         }
-        let inner_h = viewport_height.max(1);
+        let inner_h = viewport_height.max(1) as u32;
         let lines_before = self.lines_before(msg_idx);
         let total = self.count_all_lines();
-        self.scroll = total.saturating_sub(inner_h).saturating_sub(lines_before);
+        self.scroll = total.saturating_sub(inner_h).saturating_sub(lines_before).min(u16::MAX as u32) as u16;
     }
 
     /// Number of rendered lines from the top of the buffer up to (but
-    /// not including) the message at `msg_idx`.
-    fn lines_before(&self, msg_idx: usize) -> u16 {
-        let mut n = 0u16;
+    /// not including) the message at `msg_idx`. Uses a fixed width of
+    /// 120 columns to match the previous (pre-cache) behavior.
+    pub fn lines_before(&mut self, msg_idx: usize) -> u32 {
+        // Make sure the per-block caches are populated so we can sum
+        // without re-rendering.
+        let _ = self.count_all_lines_with_width(120);
+        let mut n: u32 = 0;
         for (i, m) in self.messages.iter().enumerate() {
             if i >= msg_idx {
                 break;
             }
+            // Role prefix.
+            n += 1;
+            // Thinking blocks.
             let show = m.role == Role::Assistant
                 && !m.thinking.trim().is_empty()
                 && self.display != crate::config::ThinkingDisplay::Hide;
@@ -464,10 +686,13 @@ impl Session {
                     && m.thinking_visible)
                     || (self.display == crate::config::ThinkingDisplay::ShowWhileStreaming
                         && (m.streaming || m.thinking_visible));
-                let segments = crate::session::render::get_thinking_segments(m);
-                for seg in &segments {
-                    n += crate::session::render::thinking_block_line_count(&seg.content, expanded, 120)
-                        as u16;
+                for seg in &m.thinking_segments {
+                    let v = if expanded {
+                        seg.cached_line_count_expanded.unwrap_or(0)
+                    } else {
+                        seg.cached_line_count_collapsed.unwrap_or(0)
+                    };
+                    n += v;
                 }
             }
             n += m.line_count;
@@ -480,7 +705,12 @@ impl Session {
                         }
                         _ => false,
                     };
-                    n += crate::session::render::tool_block_line_count(t, t_vis, 120) as u16;
+                    let v = if t_vis {
+                        t.cached_line_count_visible.unwrap_or(0)
+                    } else {
+                        t.cached_line_count_collapsed.unwrap_or(0)
+                    };
+                    n += v;
                 }
             }
             n += 1; // spacer
@@ -559,5 +789,5 @@ fn is_text_tool_call_normalized(line: &str) -> bool {
 }
 
 fn is_long_tool_content(content: &str) -> bool {
-    content.lines().count() > 12 || content.len() > 2_000
+    content.lines().count() > 200 || content.len() > 10_000
 }

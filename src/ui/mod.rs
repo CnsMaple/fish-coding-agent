@@ -46,6 +46,14 @@ pub fn render(f: &mut Frame, app: &mut App) {
     let session_frame_area = chunks[0];
     let area = session_content_area(session_frame_area);
     app.session_area = Some(session_frame_area);
+
+    // Pre-warm the layout cache before any render call, so that
+    // `session::render::render` can read `cached_total_lines_for` cheaply
+    // and `build_lines_viewport` knows which messages intersect the viewport.
+    let width_u16 = area.width.min(u16::MAX as u16);
+    app.session
+        .count_all_lines_with_width(width_u16 as usize);
+
     if app.function_visible {
         crate::session::render::render(
             area,
@@ -69,57 +77,31 @@ pub fn render(f: &mut Frame, app: &mut App) {
 
     // Re-derive which line of the scroll window each screen row maps to
     // and record the screen y of each thinking toggle for mouse hit-testing.
+    //
+    // This is now a SINGLE pass that:
+    //   1. Computes `total_lines` (delegating to the cached
+    //      `Session::count_all_lines_with_width`, which populates
+    //      per-block line counts on first miss and is O(N) thereafter).
+    //   2. Walks the session in lockstep with the cached counts to
+    //      derive `start`, `thinking_toggle_rows`, and `tool_toggle_rows`.
+    //   3. Renders the scrollbar.
+    //
+    // Before this refactor we did three full passes per frame and called
+    // `thinking_block_line_count` / `tool_block_line_count` (which
+    // invoke the full block renderer just to count lines). The caches
+    // turn those into O(1) reads.
     app.thinking_toggle_rows.clear();
+    app.tool_toggle_rows.clear();
     let area = session_content_area(session_frame_area);
     let inner_h = area.height as usize;
-    let total_lines: usize = {
-        let mut n = 0;
-        for m in &app.session.messages {
-            n += 1; // role prefix line
-            if m.role == crate::session::Role::Assistant
-                && !m.thinking.trim().is_empty()
-                && app.config.thinking_display != crate::config::ThinkingDisplay::Hide
-            {
-                // Count thinking segment lines for the total
-                let segments = crate::session::render::get_thinking_segments(m);
-                for seg in &segments {
-                    let expanded = (app.config.thinking_display
-                        == crate::config::ThinkingDisplay::Show
-                        && m.thinking_visible)
-                        || (app.config.thinking_display
-                            == crate::config::ThinkingDisplay::ShowWhileStreaming
-                            && (m.streaming || m.thinking_visible));
-                    n += crate::session::render::thinking_block_line_count(
-                        &seg.content,
-                        expanded,
-                        area.width as usize,
-                    );
-                }
-            }
-            n += m.content.split('\n').count().max(1);
-            if app.config.tool_display != crate::config::ToolResultDisplay::Hide {
-                for t in &m.tool_results {
-                    let t_vis = match app.config.tool_display {
-                        crate::config::ToolResultDisplay::Show => t.visible,
-                        crate::config::ToolResultDisplay::ShowWhileStreaming => {
-                            m.streaming || t.visible
-                        }
-                        _ => false,
-                    };
-                    n += crate::session::render::tool_block_line_count(
-                        t,
-                        t_vis,
-                        area.width as usize,
-                    );
-                }
-            }
-            n += 1; // spacer
-        }
-        if !app.session.messages.is_empty() {
-            n += 1;
-        }
-        n
-    };
+    let width_u16 = area.width.min(u16::MAX as u16);
+
+    // Compute total lines. This populates the per-block caches inside
+    // `Session` on the first call per invalidation.
+    let total_lines: usize = app
+        .session
+        .count_all_lines_with_width(width_u16 as usize) as usize;
+
     let scroll = app
         .session
         .scroll
@@ -132,49 +114,75 @@ pub fn render(f: &mut Frame, app: &mut App) {
         scroll as usize,
     );
     let start = total_lines.saturating_sub(inner_h + scroll as usize);
-    let mut line_idx = start;
+    let end = start + inner_h;
+
+    // Walk the session in lockstep with the cached counts to record
+    // toggle rows for messages whose first visible row is on-screen.
+    // Re-uses the per-block cache populated above.
+    let mut line_idx: usize = 0;
     for (msg_idx, m) in app.session.messages.iter().enumerate() {
-        line_idx += 1; // role prefix line
+        // Role prefix line.
+        if line_idx >= start && line_idx < end {
+            let screen_y = area.y + (line_idx - start) as u16;
+            // The first line of each message is reserved for the role
+            // prefix, not a thinking toggle; skip the record.
+            let _ = (screen_y, msg_idx);
+        }
+        line_idx += 1;
+
+        // Thinking segments.
         let think_show = m.role == crate::session::Role::Assistant
             && !m.thinking.trim().is_empty()
             && app.config.thinking_display != crate::config::ThinkingDisplay::Hide;
         if think_show {
-            let segments = crate::session::render::get_thinking_segments(m);
-            let expanded = (app.config.thinking_display == crate::config::ThinkingDisplay::Show
+            let expanded = (app.config.thinking_display
+                == crate::config::ThinkingDisplay::Show
                 && m.thinking_visible)
                 || (app.config.thinking_display
                     == crate::config::ThinkingDisplay::ShowWhileStreaming
                     && (m.streaming || m.thinking_visible));
-            for seg in &segments {
-                // Record the first line of each thinking segment as a toggle row
-                if line_idx >= start && line_idx < start + inner_h {
+            for seg in &m.thinking_segments {
+                if line_idx >= start && line_idx < end {
                     let screen_y = area.y + (line_idx - start) as u16;
                     app.thinking_toggle_rows.push((screen_y, msg_idx));
                 }
-                line_idx += crate::session::render::thinking_block_line_count(
-                    &seg.content,
-                    expanded,
-                    area.width as usize,
-                );
+                let lines = if expanded {
+                    seg.cached_line_count_expanded.unwrap_or(0) as usize
+                } else {
+                    seg.cached_line_count_collapsed.unwrap_or(0) as usize
+                };
+                line_idx += lines;
             }
         }
-        // Content (tool markers stripped by render.rs)
-        let content_lines = m.content.split('\n').count().max(1);
-        line_idx += content_lines;
+
+        // Content (raw newline count from `line_count`).
+        line_idx += m.line_count as usize;
+
+        // Tool result blocks.
         if app.config.tool_display != crate::config::ToolResultDisplay::Hide {
-            for t in &m.tool_results {
+            for (tool_idx, t) in m.tool_results.iter().enumerate() {
                 let t_vis = match app.config.tool_display {
-                    crate::config::ToolResultDisplay::Show => t.visible,
+                    crate::config::ToolResultDisplay::Show => t.visible || t.running,
                     crate::config::ToolResultDisplay::ShowWhileStreaming => {
-                        m.streaming || t.visible
+                        m.streaming || t.visible || t.running
                     }
                     _ => false,
                 };
-                line_idx +=
-                    crate::session::render::tool_block_line_count(t, t_vis, area.width as usize);
+                let lines = if t_vis {
+                    t.cached_line_count_visible.unwrap_or(0) as usize
+                } else {
+                    t.cached_line_count_collapsed.unwrap_or(0) as usize
+                };
+                if lines > 0 && line_idx >= start && line_idx < end {
+                    let screen_y = area.y + (line_idx - start) as u16;
+                    app.tool_toggle_rows.push((screen_y, msg_idx, tool_idx));
+                }
+                line_idx += lines;
             }
         }
-        line_idx += 1; // spacer
+
+        // Spacer.
+        line_idx += 1;
     }
 
     // Post-render: highlight the mouse-driven TUI selection and refresh

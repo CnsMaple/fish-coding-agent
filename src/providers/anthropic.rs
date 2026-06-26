@@ -1,6 +1,7 @@
 use super::{ChatEvent, ChatRequest, Provider, ProviderError, ToolCall, Usage};
 use crate::config::ProviderKind;
 use crate::function::notifications::ModelInfo;
+use crate::net::stream::{drive_sse_stream, SseControl, STREAM_IDLE_TIMEOUT};
 use anyhow::Result;
 use async_trait::async_trait;
 
@@ -86,14 +87,7 @@ impl Provider for AnthropicProvider {
             body["thinking"] = serde_json::Value::Object(thinking);
         }
 
-let body_bytes: Vec<u8> = {
-    let mut last_err = String::new();
-    let mut body_result: Option<Vec<u8>> = None;
-    for attempt in 0..3 {
-        if attempt > 0 {
-            let _ = tx.send(ChatEvent::Debug(format!("retry {attempt}/3 after: {last_err}")));
-        }
-        let resp = match client
+        let resp = client
             .post(&url)
             .header("x-api-key", api_key)
             .header("anthropic-version", "2023-06-01")
@@ -101,103 +95,104 @@ let body_bytes: Vec<u8> = {
             .json(&body)
             .send()
             .await
-        {
-            Ok(r) => r,
-            Err(e) => { last_err = format!("{e}"); continue; }
-        };
+            .map_err(ProviderError::Http)?;
         let resp_status = resp.status();
-        let resp_ct = resp.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
-        let resp_cl = resp.headers().get("content-length").and_then(|v| v.to_str().ok()).unwrap_or("?").to_string();
+        let resp_ct = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
         if !resp_status.is_success() {
+            let status = resp_status;
             let text = resp.text().await.unwrap_or_default();
-            last_err = format!("status {} ct={} cl={} body={}", resp_status, resp_ct, resp_cl, text);
-            continue;
+            return Err(ProviderError::Other(format!(
+                "status {} ct={} body={}",
+                status, resp_ct, text
+            ))
+            .into());
         }
-        match resp.bytes().await {
-            Ok(b) => { body_result = Some(b.to_vec()); break; }
-            Err(e) => { last_err = format!("bytes fail status={} ct={} cl={}: {}", resp_status, resp_ct, resp_cl, e); continue; }
-        }
-    }
-    match body_result {
-        Some(b) => b,
-        None => return Err(ProviderError::Other(format!("request failed after 3 retries: {last_err}")).into()),
-    }
-};
-let mut buf = body_bytes;
-if buf.is_empty() {
-    let _ = tx.send(ChatEvent::Debug("empty response body from server".to_string()));
-}
-let mut final_usage: Option<Usage> = None;
-let mut tool_calls: Vec<ToolCall> = Vec::new();
-                    while let Some(pos) = find_sse_boundary(&buf) {
-                let raw: Vec<u8> = buf.drain(..pos + 1).collect();
-                if let Ok(text) = std::str::from_utf8(&raw) {
-                    for line in text.lines() {
-                        let line = line.trim_end_matches('\r');
-                        if let Some(rest) = line.strip_prefix("data:") {
-                            let data = rest.trim();
-                            if data.is_empty() {
-                                continue;
-                            }
-                            if let Ok(v) = serde_json::from_str::<serde_json::Value>(data) {
-                                match v.get("type").and_then(|t| t.as_str()) {
-                                    Some("content_block_start") => {
-                                        if v.pointer("/content_block/type").and_then(|t| t.as_str())
-                                            == Some("tool_use")
-                                        {
-                                            merge_tool_use_start(&mut tool_calls, &v);
-                                        }
-                                    }
-                                    Some("content_block_delta") => {
-                                        if let Some(delta) = v.pointer("/delta/text") {
-                                            if let Some(s) = delta.as_str() {
-                                                if !s.is_empty() {
-                                                    let _ =
-                                                        tx.send(ChatEvent::Delta(s.to_string()));
-                                                }
-                                            }
-                                        }
-                                        if let Some(delta) = v.pointer("/delta/thinking") {
-                                            if let Some(s) = delta.as_str() {
-                                                if !s.is_empty() {
-                                                    let _ = tx.send(ChatEvent::ThinkingDelta(
-                                                        s.to_string(),
-                                                    ));
-                                                }
-                                            }
-                                        }
-                                        if let Some(partial) = v
-                                            .pointer("/delta/partial_json")
-                                            .and_then(|p| p.as_str())
-                                        {
-                                            merge_tool_use_delta(&mut tool_calls, &v, partial);
-                                        }
-                                    }
-                                    Some("message_delta") => {
-                                        if let Some(u) = v.get("usage") {
-                                            if let Some(parsed) = parse_anthropic_usage(u) {
-                                                final_usage = Some(parsed);
-                                            }
-                                        }
-                                    }
-                                    Some("message_stop") => {
-                                        if let Some(u) = final_usage.take() {
-                                            let _ = tx.send(ChatEvent::Usage(u));
-                                        }
-                                        let calls = valid_tool_calls(&tool_calls);
-                                        if !calls.is_empty() {
-                                            let _ = tx.send(ChatEvent::ToolCalls(calls));
-                                        }
-                                        let _ = tx.send(ChatEvent::Done);
-                                        return Ok(());
-                                    }
-                                    _ => {}
-                                }
+
+        let mut final_usage: Option<Usage> = None;
+        let mut tool_calls: Vec<ToolCall> = Vec::new();
+
+        let stream_result = drive_sse_stream(resp, STREAM_IDLE_TIMEOUT, |ev| {
+            if ev.data.is_empty() {
+                return Ok(SseControl::Continue);
+            }
+            let v: serde_json::Value = match serde_json::from_str(ev.data) {
+                Ok(v) => v,
+                Err(e) => {
+                    let _ = tx.send(ChatEvent::Debug(format!(
+                        "anthropic: malformed SSE json ({}): {}",
+                        e,
+                        &ev.data[..ev.data.len().min(120)]
+                    )));
+                    return Ok(SseControl::Continue);
+                }
+            };
+            let kind = if !ev.event.is_empty() {
+                ev.event
+            } else {
+                v.get("type").and_then(|t| t.as_str()).unwrap_or("")
+            };
+            match kind {
+                "content_block_start" => {
+                    if v.pointer("/content_block/type").and_then(|t| t.as_str())
+                        == Some("tool_use")
+                    {
+                        merge_tool_use_start(&mut tool_calls, &v);
+                    }
+                }
+                "content_block_delta" => {
+                    if let Some(delta) = v.pointer("/delta/text") {
+                        if let Some(s) = delta.as_str() {
+                            if !s.is_empty() {
+                                let _ = tx.send(ChatEvent::Delta(s.to_string()));
                             }
                         }
                     }
+                    if let Some(delta) = v.pointer("/delta/thinking") {
+                        if let Some(s) = delta.as_str() {
+                            if !s.is_empty() {
+                                let _ = tx.send(ChatEvent::ThinkingDelta(s.to_string()));
+                            }
+                        }
+                    }
+                    if let Some(partial) = v
+                        .pointer("/delta/partial_json")
+                        .and_then(|p| p.as_str())
+                    {
+                        merge_tool_use_delta(&mut tool_calls, &v, partial);
+                    }
                 }
+                "message_delta" => {
+                    if let Some(u) = v.get("usage") {
+                        if let Some(parsed) = parse_anthropic_usage(u) {
+                            final_usage = Some(parsed);
+                        }
+                    }
+                }
+                "message_stop" => {
+                    if let Some(u) = final_usage.take() {
+                        let _ = tx.send(ChatEvent::Usage(u));
+                    }
+                    let calls = valid_tool_calls(&tool_calls);
+                    if !calls.is_empty() {
+                        let _ = tx.send(ChatEvent::ToolCalls(calls));
+                    }
+                    let _ = tx.send(ChatEvent::Done);
+                    return Ok(SseControl::Stop);
+                }
+                _ => {}
             }
+            Ok(SseControl::Continue)
+        })
+        .await;
+
+        if let Err(e) = stream_result {
+            return Err(e);
+        }
         if let Some(u) = final_usage {
             let _ = tx.send(ChatEvent::Usage(u));
         }
@@ -313,20 +308,6 @@ fn parse_anthropic_usage(v: &serde_json::Value) -> Option<Usage> {
         u.cache_creation_tokens = n;
     }
     Some(u)
-}
-
-fn find_sse_boundary(buf: &[u8]) -> Option<usize> {
-    for i in 0..buf.len().saturating_sub(1) {
-        if buf[i] == b'\n' && buf[i + 1] == b'\n' {
-            return Some(i);
-        }
-    }
-    for i in 0..buf.len().saturating_sub(3) {
-        if &buf[i..i + 4] == b"\r\n\r\n" {
-            return Some(i + 2);
-        }
-    }
-    None
 }
 
 #[derive(Debug, Deserialize)]

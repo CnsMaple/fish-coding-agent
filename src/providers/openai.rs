@@ -1,6 +1,7 @@
 use super::{ChatEvent, ChatRequest, Provider, ProviderError, ToolCall, Usage};
 use crate::config::ProviderKind;
 use crate::function::notifications::ModelInfo;
+use crate::net::stream::{drive_sse_stream, SseControl, STREAM_IDLE_TIMEOUT};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -79,99 +80,92 @@ impl Provider for OpenAiProvider {
         if let Some(effort) = req.thinking.openai_effort() {
             body["reasoning_effort"] = serde_json::Value::String(effort.to_string());
         }
-        let body_bytes: Vec<u8> = {
-            let mut last_err = String::new();
-            let mut body_result: Option<Vec<u8>> = None;
-            for attempt in 0..3 {
-                if attempt > 0 {
-                    let _ = tx.send(ChatEvent::Debug(format!(
-                        "retry {attempt}/3 after: {last_err}"
-                    )));
-                }
-                let resp: reqwest::Response = match client
-                    .post(&url)
-                    .bearer_auth(api_key)
-                    .json(&body)
-                    .send()
-                    .await
-                {
-                    Ok(r) => r,
-                    Err(e) => { last_err = format!("{e}"); continue; }
-                };
-                let resp_status = resp.status();
-                let resp_ct = resp.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
-                let resp_cl = resp.headers().get("content-length").and_then(|v| v.to_str().ok()).unwrap_or("?").to_string();
-                if !resp_status.is_success() {
-                    let text = resp.text().await.unwrap_or_default();
-                    last_err = format!("status {} ct={} cl={} body={}", resp_status, resp_ct, resp_cl, text);
-                    continue;
-                }
-                if !resp_ct.contains("text/event-stream") && !resp_ct.contains("application/json") && !resp_ct.is_empty() {
-                    let body = resp.text().await.unwrap_or_default();
-                    last_err = format!("unexpected ct={} cl={} body={}", resp_ct, resp_cl, body);
-                    continue;
-                }
-                match resp.bytes().await {
-                    Ok(b) => { body_result = Some(b.to_vec()); break; }
-                    Err(e) => { last_err = format!("bytes fail status={} ct={} cl={}: {}", resp_status, resp_ct, resp_cl, e); continue; }
-                }
-            }
-            match body_result {
-                Some(b) => b,
-                None => return Err(ProviderError::Other(format!("request failed after 3 retries: {last_err}")).into()),
-            }
-        };
-        let mut buf = body_bytes;
-        if buf.is_empty() {
-            let _ = tx.send(ChatEvent::Debug("empty response body from server".to_string()));
+        let resp = client
+            .post(&url)
+            .bearer_auth(api_key)
+            .json(&body)
+            .send()
+            .await
+            .map_err(ProviderError::Http)?;
+        let resp_status = resp.status();
+        let resp_ct = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        if !resp_status.is_success() {
+            let status = resp_status;
+            let text = resp.text().await.unwrap_or_default();
+            return Err(ProviderError::Other(format!(
+                "status {} ct={} body={}",
+                status, resp_ct, text
+            ))
+            .into());
         }
-        let mut done = false;
+        if !resp_ct.is_empty()
+            && !resp_ct.contains("text/event-stream")
+            && !resp_ct.contains("application/json")
+        {
+            let text = resp.text().await.unwrap_or_default();
+            return Err(ProviderError::Other(format!(
+                "unexpected ct={} body={}",
+                resp_ct, text
+            ))
+            .into());
+        }
+
         let mut final_usage: Option<Usage> = None;
         let mut tool_calls: Vec<ToolCall> = Vec::new();
-        // process complete SSE lines
-        while let Some(pos) = find_sse_boundary(&buf) {
-            let raw: Vec<u8> = buf.drain(..pos + 1).collect();
-            if let Ok(text) = std::str::from_utf8(&raw) {
-                for line in text.lines() {
-                    let line = line.trim_end_matches('\r');
-                    if let Some(rest) = line.strip_prefix("data:") {
-                        let data = rest.trim();
-                        if data == "[DONE]" {
-                            done = true;
-                        } else if !data.is_empty() {
-                            if let Ok(v) = serde_json::from_str::<serde_json::Value>(data) {
-                                if let Some(delta) = v.pointer("/choices/0/delta/content") {
-                                    if let Some(s) = delta.as_str() {
-                                        if !s.is_empty() {
-                                            let _ = tx.send(ChatEvent::Delta(s.to_string()));
-                                        }
-                                    }
-                                }
-                                if let Some(calls) = v
-                                    .pointer("/choices/0/delta/tool_calls")
-                                    .and_then(|v| v.as_array())
-                                {
-                                    merge_tool_call_deltas(&mut tool_calls, calls);
-                                }
-                                if let Some(u) = v.get("usage") {
-                                    if let Some(parsed) = parse_openai_usage(u) {
-                                        final_usage = Some(parsed);
-                                    }
-                                }
-                            }
-                        }
+
+        let stream_result = drive_sse_stream(resp, STREAM_IDLE_TIMEOUT, |ev| {
+            if ev.data == "[DONE]" {
+                return Ok(SseControl::Stop);
+            }
+            if ev.data.is_empty() {
+                return Ok(SseControl::Continue);
+            }
+            let v: serde_json::Value = match serde_json::from_str(ev.data) {
+                Ok(v) => v,
+                Err(e) => {
+                    let _ = tx.send(ChatEvent::Debug(format!(
+                        "openai: malformed SSE json ({}): {}",
+                        e,
+                        &ev.data[..ev.data.len().min(120)]
+                    )));
+                    return Ok(SseControl::Continue);
+                }
+            };
+            if let Some(delta) = v.pointer("/choices/0/delta/content") {
+                if let Some(s) = delta.as_str() {
+                    if !s.is_empty() {
+                        let _ = tx.send(ChatEvent::Delta(s.to_string()));
                     }
                 }
             }
+            if let Some(calls) = v
+                .pointer("/choices/0/delta/tool_calls")
+                .and_then(|v| v.as_array())
+            {
+                merge_tool_call_deltas(&mut tool_calls, calls);
+            }
+            if let Some(u) = v.get("usage") {
+                if let Some(parsed) = parse_openai_usage(u) {
+                    final_usage = Some(parsed);
+                }
+            }
+            Ok(SseControl::Continue)
+        })
+        .await;
+
+        if let Err(e) = stream_result {
+            return Err(e);
         }
         if let Some(u) = final_usage {
             let _ = tx.send(ChatEvent::Usage(u));
         }
         if !tool_calls.is_empty() {
             let _ = tx.send(ChatEvent::ToolCalls(tool_calls));
-        }
-        if !done {
-            // stream closed without [DONE] marker; still treat as done
         }
         let _ = tx.send(ChatEvent::Done);
         Ok(())
@@ -247,22 +241,6 @@ fn parse_openai_usage(v: &serde_json::Value) -> Option<Usage> {
         u.cache_read_tokens = n;
     }
     Some(u)
-}
-
-fn find_sse_boundary(buf: &[u8]) -> Option<usize> {
-    // SSE messages are separated by a blank line: \n\n
-    for i in 0..buf.len().saturating_sub(1) {
-        if buf[i] == b'\n' && buf[i + 1] == b'\n' {
-            return Some(i);
-        }
-    }
-    // also accept \r\n\r\n
-    for i in 0..buf.len().saturating_sub(3) {
-        if &buf[i..i + 4] == b"\r\n\r\n" {
-            return Some(i + 2);
-        }
-    }
-    None
 }
 
 #[derive(Debug, Deserialize)]
