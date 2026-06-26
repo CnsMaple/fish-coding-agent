@@ -6,6 +6,15 @@ pub mod store;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+/// Width-keyed cached line count. Used to cache the rendered line count
+/// of message content (markdown + wrapping) per viewport width, since the
+/// exact number of display lines depends on the terminal width.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct CachedLineCount {
+    pub width: u16,
+    pub count: u32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThinkingSegment {
     pub offset: usize,
@@ -99,6 +108,17 @@ pub struct Message {
     /// Updated when content changes to avoid re-scanning on every frame.
     /// `u32` to support 10M+ token sessions.
     pub line_count: u32,
+    /// Cached rendered line count for the content portion (after
+    /// markdown rendering and wrapping), keyed by the viewport width.
+    /// `None` means "needs (re)compute". Used by
+    /// `Session::compute_total_lines` / `lines_before` /
+    /// `build_lines_viewport` so the viewport math reflects the actual
+    /// number of display lines, not just the raw newline count.
+    /// Critical for content with markdown tables / fenced code blocks /
+    /// long lines that wrap — `line_count` alone is a strict
+    /// undercount and causes the bottom of such messages to be hidden.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_content_line_count: Option<CachedLineCount>,
     /// Per-message version counter. Bumped whenever this message's
     /// content, thinking, or tool results change. The render LRU is
     /// keyed on this so changing one message does not invalidate
@@ -124,6 +144,7 @@ impl Message {
             display_cursor: len, // non-streaming → fully visible
             skill_ref: None,
             line_count,
+            cached_content_line_count: None,
             content_version: 0,
         }
     }
@@ -239,6 +260,7 @@ impl Session {
             let needs_invalidate = if let Some(m) = self.messages.get_mut(id) {
                 m.content.push_str(chunk);
                 m.line_count = m.content.split('\n').count().max(1) as u32;
+                m.cached_content_line_count = None;
                 m.bump_version();
                 if let Ok(mut c) = self.line_cache.lock() {
                     if id < c.len() {
@@ -376,6 +398,7 @@ impl Session {
             display_cursor: 0,
             skill_ref: None,
             line_count: 0,
+            cached_content_line_count: None,
             content_version: 0,
         };
         self.push(msg);
@@ -449,6 +472,7 @@ impl Session {
                 // content so they don't appear in the rendered chat.
                 m.content = strip_text_tool_calls(&m.content);
                 m.line_count = m.content.split('\n').count().max(1) as u32;
+                m.cached_content_line_count = None;
                 m.bump_version();
                 if let Ok(mut c) = self.line_cache.lock() {
                     if id < c.len() {
@@ -580,8 +604,12 @@ impl Session {
                 }
             }
 
-            // Content lines (raw newline count from `line_count`).
-            n += m.line_count;
+            // Content lines (post-markdown rendered count, cached by width).
+            // `m.line_count` is the raw newline count and would undercount
+            // anything that expands during markdown rendering (tables, fenced
+            // code blocks, long lines that wrap), which made the viewport
+            // scroll position land above the true bottom of such messages.
+            n += render_cached_content_lines(m, width);
 
             // Tool result blocks.
             if self.tool_display != crate::config::ToolResultDisplay::Hide {
@@ -699,7 +727,7 @@ impl Session {
                     n += v;
                 }
             }
-            n += m.line_count;
+            n += read_cached_content_lines(m, 120);
             if self.tool_display != crate::config::ToolResultDisplay::Hide {
                 for t in &m.tool_results {
                     let t_vis = match self.tool_display {
@@ -721,6 +749,35 @@ impl Session {
         }
         n
     }
+}
+
+/// Read or compute the rendered content line count for `m` at `width`,
+/// writing the result back to `m.cached_content_line_count`. Used by
+/// the `&mut self` paths (`compute_total_lines`) that have write access
+/// to the message and want to amortize the markdown-rendering cost
+/// across frames.
+fn render_cached_content_lines(m: &mut Message, width: u16) -> u32 {
+    if let Some(c) = m.cached_content_line_count {
+        if c.width == width {
+            return c.count;
+        }
+    }
+    let n = crate::session::render::content_line_count(&m.content, width as usize);
+    m.cached_content_line_count = Some(CachedLineCount { width, count: n });
+    n
+}
+
+/// Read-only variant used by callers that only have `&Message` (e.g.
+/// `Session::lines_before`). Falls back to a live compute when the
+/// cache is missing or stale, but does not write back — the next
+/// `&mut` pass will populate the cache.
+fn read_cached_content_lines(m: &Message, width: u16) -> u32 {
+    if let Some(c) = m.cached_content_line_count {
+        if c.width == width {
+            return c.count;
+        }
+    }
+    crate::session::render::content_line_count(&m.content, width as usize)
 }
 
 /// Remove text-based tool call JSON fallback lines from content.

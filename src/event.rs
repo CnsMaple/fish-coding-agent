@@ -1445,6 +1445,7 @@ fn submit_direct_tool_input(app: &mut App, raw: &str) -> bool {
         tool_results: Vec::new(),
         display_cursor: 0,
         line_count: 0,
+        cached_content_line_count: None,
         ts: chrono::Utc::now(),
         streaming: true,
         skill_ref: None,

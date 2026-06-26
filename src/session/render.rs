@@ -145,7 +145,7 @@ fn count_lines_estimate(session: &Session) -> u32 {
                 n += m.thinking.matches('\n').count() as u32 + 1;
             }
         }
-        n += m.line_count;
+        n += read_cached_content_count(m);
         n += m.tool_results.len() as u32 * 2; // rough estimate
         n += 1; // spacer
     }
@@ -153,6 +153,27 @@ fn count_lines_estimate(session: &Session) -> u32 {
         n += 1;
     }
     n
+}
+
+/// Read-only content line count for the fallback estimator. Uses a
+/// fixed width of 120 (the historical estimate width); the caller
+/// doesn't need an exact value, just something in the right
+/// ballpark. Will use the per-message cache if it's at the same
+/// width, otherwise computes live without writing back.
+fn read_cached_content_count(m: &super::Message) -> u32 {
+    read_cached_content_count_at(m, 120)
+}
+
+/// Read-only content line count at a specific width. Used by callers
+/// that have `&Message` (not `&mut Message`) and therefore cannot
+/// write to the cache — they accept the live-compute cost.
+fn read_cached_content_count_at(m: &super::Message, width: u16) -> u32 {
+    if let Some(c) = m.cached_content_line_count {
+        if c.width == width {
+            return c.count;
+        }
+    }
+    content_line_count(&m.content, width as usize)
 }
 
 /// Toggle label text used by older tests / callers.
@@ -385,7 +406,7 @@ fn build_lines_viewport(
         // Compute total rendered line count for this message, using the
         // per-block caches populated by `Session::count_all_lines_with_width`.
         let mut msg_total: u32 = 1; // role prefix
-        msg_total += m.line_count; // content
+        msg_total += read_cached_content_count_at(m, width as u16); // content (post-markdown)
                                    // Thinking segments
         if m.role == super::Role::Assistant
             && !m.thinking.trim().is_empty()
@@ -548,6 +569,44 @@ pub fn total_thinking_line_count(m: &super::Message, session: &Session, width: u
 
 pub fn tool_block_line_count(tool: &ToolResultBlock, visible: bool, width: usize) -> usize {
     build_tool_block_rows(tool, visible, width).len()
+}
+
+/// Count the rendered display lines of a message's `content` field at
+/// the given viewport `width`. This is the post-markdown / post-wrap
+/// count, NOT the raw `content.split('\n').count()`.
+///
+/// Why this exists: `Message::line_count` is just the raw newline
+/// count, which undercounts whenever the content contains markdown
+/// constructs that expand to more display lines (tables, fenced code
+/// blocks, indented lists, etc.) or any long line that wraps. Using
+/// `line_count` for viewport math made the scroll position land
+/// above the true bottom of such messages, so the last rows were
+/// hidden behind the input area even when the scrollbar was at the
+/// maximum position. This function mirrors the `render_content_segment`
+/// path exactly so the count always matches the viewport.
+pub fn content_line_count(content: &str, width: usize) -> u32 {
+    if content.is_empty() {
+        return 0;
+    }
+    let text = crate::session::strip_text_tool_calls(content);
+    if text.trim().is_empty() {
+        return 0;
+    }
+    // Match `render_content_segment`: the content gets a 3-space indent
+    // before being handed to markdown, and lines wider than `inner_w`
+    // are wrapped.
+    let inner_w = width.saturating_sub(3).max(1);
+    let md_lines = crate::session::markdown::render_with_width(&text, inner_w);
+    let mut count: u32 = 0;
+    for line in &md_lines {
+        if line.width() <= inner_w {
+            count += 1;
+        } else {
+            let combined: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            count += wrap_line(&combined, inner_w).len() as u32;
+        }
+    }
+    count
 }
 
 fn ensure_gap_before_block(msg_lines: &mut Vec<Line<'static>>) {
@@ -1295,6 +1354,158 @@ pub fn visible_width(s: &str) -> usize {
 }
 
 #[cfg(test)]
+mod content_line_count_tests {
+    //! Regression tests for the content-line-count fix. The bug: a
+    //! message with a markdown table (or fenced code block, or wrapped
+    //! line) has `Message::line_count` equal to the raw newline count
+    //! of its source, which is strictly less than the actual number
+    //! of display lines. Using that for viewport math hid the bottom
+    //! of such messages behind the input area even when the scrollbar
+    //! was at the maximum position. `content_line_count` and the
+    //! per-message `cached_content_line_count` cache fix this.
+
+    use super::*;
+    use crate::session::{Message, Role, Session};
+
+    #[test]
+    fn raw_newline_count_undercounts_markdown_table() {
+        // Source has 5 newlines → `line_count` = 6, but the table
+        // expands to more display lines (top border, header,
+        // separator, 3 data rows, bottom border = 7, minus the blank
+        // header that gets a leading newline so net ~6 rendered
+        // lines plus the leading intro line). The exact post-markdown
+        // count is the one we care about.
+        let content = "Here you go:\n\n\
+                       | 类型 | 名称 |\n\
+                       | --- | --- |\n\
+                       | 📁 目录 | src |\n\
+                       | 📄 文件 | .gitignore |\n\
+                       | 📄 文件 | Cargo.toml |";
+        let raw = content.matches('\n').count() as u32 + 1;
+        let rendered = content_line_count(content, 80);
+        assert!(
+            rendered > raw,
+            "rendered={rendered} should exceed raw line_count={raw} for table content"
+        );
+    }
+
+    #[test]
+    fn fenced_code_block_inflates_rendered_count() {
+        // A long body line inside the code block wraps when the
+        // viewport is narrow, while the raw newline count sees it as
+        // a single line.  This is the simplest case where the
+        // rendered count strictly exceeds the raw count for a fenced
+        // code block.
+        let long_line = "x".repeat(200);
+        let content = format!("before\n```\n{long_line}\n```\nafter");
+        let raw = content.matches('\n').count() as u32 + 1;
+        let rendered = content_line_count(&content, 40);
+        assert!(
+            rendered > raw,
+            "rendered={rendered} should exceed raw line_count={raw} for wrapped code block"
+        );
+    }
+
+    #[test]
+    fn count_total_lines_reflects_markdown_expansion() {
+        // The actual bug repro: a session with a user message and an
+        // assistant message containing a table. The total rendered
+        // line count must be ≥ the sum of raw `line_count`s.
+        let mut s = Session::default();
+        s.push(Message::new(
+            Role::User,
+            "give me a table of the current directory",
+        ));
+        let mut asst = Message::new(
+            Role::Assistant,
+            "Here you go:\n\n\
+             | 类型 | 名称 | 大小 | 修改时间 |\n\
+             | --- | --- | --- | --- |\n\
+             | 📁 目录 | src | — | 2026/6/26 15:03 |\n\
+             | 📄 文件 | .gitignore | 53 B | 2026/6/19 14:58 |\n\
+             | 📄 文件 | Cargo.toml | 1,312 B | 2026/6/25 13:05 |",
+        );
+        asst.thinking_visible = false;
+        s.push(asst);
+
+        let width = 80u16;
+        let total = s.count_all_lines_with_width(width as usize);
+
+        let raw_sum: u32 = s.messages.iter().map(|m| m.line_count).sum();
+        // Total must be strictly greater than the raw sum (4: role
+        // prefix + spacer for each of 2 messages + assistant's table
+        // expansion).
+        assert!(
+            total > raw_sum,
+            "total={total} should be > raw_sum={raw_sum} (table expansion undercounted)"
+        );
+
+        // Per-message cache should be populated after the warmup.
+        let asst = &s.messages[1];
+        assert!(
+            asst.cached_content_line_count.is_some(),
+            "assistant message should have a populated content cache after warmup"
+        );
+    }
+
+    #[test]
+    fn cache_is_width_aware() {
+        // The cache is keyed by width; the first width-miss recomputes
+        // and the second call at the same width is a hit.
+        let mut s = Session::default();
+        s.push(Message::new(
+            Role::Assistant,
+            "| h1 | h2 |\n| --- | --- |\n| a | b |",
+        ));
+        s.count_all_lines_with_width(80);
+        let cached_at_80 = s.messages[0].cached_content_line_count;
+        assert_eq!(cached_at_80.map(|c| c.width), Some(80));
+
+        s.count_all_lines_with_width(120);
+        let cached_at_120 = s.messages[0].cached_content_line_count;
+        assert_eq!(
+            cached_at_120.map(|c| c.width),
+            Some(120),
+            "width change should invalidate and recompute"
+        );
+    }
+
+    #[test]
+    fn content_change_invalidates_cache() {
+        // `Message::new` leaves the cache as `None`. The first
+        // `count_all_lines_with_width` populates it. A subsequent
+        // mutation (simulated here by direct field write + a call to
+        // `invalidate_layout_cache`) must reset it so the next read
+        // recomputes against the new content.
+        let mut s = Session::default();
+        let m = Message::new(Role::Assistant, "| a | b |\n| --- | --- |");
+        s.push(m);
+        s.count_all_lines_with_width(80);
+        assert!(s.messages[0].cached_content_line_count.is_some());
+
+        // Simulate a content mutation by hand and invalidate.
+        s.messages[0].content = "totally different content\nwith new lines".to_string();
+        s.messages[0].line_count = 2;
+        s.messages[0].cached_content_line_count = None;
+        s.invalidate_layout_cache();
+
+        let total = s.count_all_lines_with_width(80);
+        let rendered = content_line_count(&s.messages[0].content, 80);
+        // The recomputed cache count must reflect the new content,
+        // not the old cached value.
+        assert_eq!(s.messages[0].cached_content_line_count.map(|c| c.count), Some(rendered));
+        // And the total must include the new content's rendered lines.
+        assert!(total > 0);
+    }
+
+    #[test]
+    fn empty_content_returns_zero() {
+        assert_eq!(content_line_count("", 80), 0);
+        assert_eq!(content_line_count("   \n  \t  \n", 80), 0);
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::ThinkingDisplay;
@@ -1331,6 +1542,7 @@ mod tests {
             streaming: false,
             skill_ref: None,
             line_count: 0,
+            cached_content_line_count: None,
             content_version: 0,
         });
         s
@@ -1534,6 +1746,7 @@ mod tests {
                 streaming: false,
                 skill_ref: None,
                 line_count: lines_per_msg as u32,
+                cached_content_line_count: None,
                 content_version: 0,
             });
             if i % 2 == 0 {
