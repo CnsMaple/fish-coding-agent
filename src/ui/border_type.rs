@@ -1,8 +1,9 @@
 /// 边框类型枚举，用于控制 Markdown 表格和代码块的边框样式。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum BorderType {
     /// ASCII 风格: +-----+  | ... |
+    #[default]
     Ascii,
     /// Unicode 圆角风格: ┌──────┐  │ ... │
     Rounded,
@@ -88,11 +89,5 @@ impl BorderType {
             BorderType::Ascii => "ascii",
             BorderType::Rounded => "rounded",
         }
-    }
-}
-
-impl Default for BorderType {
-    fn default() -> Self {
-        BorderType::Ascii
     }
 }

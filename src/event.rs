@@ -109,6 +109,12 @@ impl EventChannels {
     }
 }
 
+impl Default for EventChannels {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub async fn run<B>(terminal: &mut Terminal<B>, app: &mut App) -> Result<()>
 where
     B: Backend,
@@ -178,15 +184,10 @@ where
                 if app.inflight.is_some() {
                     needs_draw = true;
                 }
-                // Advance the streaming display cursor so characters
-                // appear one-by-one rather than in API-chunk bursts.
-                if let Some(id) = app.session.streaming_id {
-                    if let Some(m) = app.session.messages.get_mut(id) {
-                        if m.streaming && m.display_cursor < m.content.len() {
-                            m.display_cursor = (m.display_cursor + 15).min(m.content.len());
-                        }
-                    }
-                }
+                // display_cursor is kept up-to-date in append_to_last,
+                // so content is immediately visible during streaming.
+                // The tick handler still triggers re-renders for the
+                // spinner animation above.
                 if last_status_refresh.elapsed() >= Duration::from_millis(500) {
                     app.status.update_hit(&app.hit_rate);
                     last_status_refresh = std::time::Instant::now();
@@ -287,7 +288,6 @@ fn clipboard_matches(text: &str) -> bool {
 /// This is primarily for legacy Windows terminals (conhost) that do not
 /// support bracketed paste and instead emit a stream of individual
 /// `KeyEvent`s.
-
 enum BurstResult {
     /// The burst qualifies as a paste; contains the aggregated text.
     Paste(String),
@@ -871,7 +871,8 @@ async fn handle_key(k: crossterm::event::KeyEvent, app: &mut App) {
                 }
                 // Track Enter in burst for legacy paste detection
                 let now = Instant::now();
-                let expired = app.burst_snapshot
+                let expired = app
+                    .burst_snapshot
                     .map(|(t, _, _)| now.duration_since(t) > Duration::from_millis(100))
                     .unwrap_or(true);
                 if expired {
@@ -908,10 +909,8 @@ async fn handle_key(k: crossterm::event::KeyEvent, app: &mut App) {
             }
         }
         KeyCode::Backspace => {
-            if !app.input.delete_selection() {
-                if !try_remove_paste_marker(app) {
-                    app.input.backspace();
-                }
+            if !app.input.delete_selection() && !try_remove_paste_marker(app) {
+                app.input.backspace();
             }
             app.sync_completion();
         }
@@ -951,7 +950,8 @@ async fn handle_key(k: crossterm::event::KeyEvent, app: &mut App) {
                 }
                 // Track burst for legacy-paste detection (conhost etc.).
                 let now = Instant::now();
-                let expired = app.burst_snapshot
+                let expired = app
+                    .burst_snapshot
                     .map(|(t, _, _)| now.duration_since(t) > Duration::from_millis(100))
                     .unwrap_or(true);
                 if expired {
@@ -1294,7 +1294,10 @@ fn try_remove_paste_marker(app: &mut App) -> bool {
     // Find "[paste " backwards from cursor
     if let Some(start) = before.rfind("[paste ") {
         let candidate = &buf[start..cursor];
-        if let Some(rest) = candidate.strip_prefix("[paste ").and_then(|s| s.strip_suffix(" lines]")) {
+        if let Some(rest) = candidate
+            .strip_prefix("[paste ")
+            .and_then(|s| s.strip_suffix(" lines]"))
+        {
             if !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()) {
                 app.input.buffer.replace_range(start..cursor, "");
                 app.input.cursor = start;
@@ -1429,10 +1432,8 @@ fn submit_direct_tool_input(app: &mut App, raw: &str) -> bool {
 
     use crate::session::Message;
     app.maybe_title_from_first_prompt(raw);
-    app.session.push(Message::new(
-        crate::session::Role::User,
-        raw.to_string(),
-    ));
+    app.session
+        .push(Message::new(crate::session::Role::User, raw.to_string()));
 
     // Create an empty streaming assistant message for tool output
     let assistant = Message {
@@ -1461,8 +1462,7 @@ fn submit_direct_tool_input(app: &mut App, raw: &str) -> bool {
                 name: n.clone(),
                 title: t.clone(),
             });
-            let result =
-                crate::tools::execute_tool_streaming(&n, &args, &cwd, tx.clone()).await;
+            let result = crate::tools::execute_tool_streaming(&n, &args, &cwd, tx.clone()).await;
             let display = tool_result_display(&result);
             let context = if include_context {
                 Some(local_tool_context(&n, &t, &display))
@@ -1791,7 +1791,7 @@ fn handle_todo_key(
 ) -> bool {
     use crossterm::event::{KeyCode, KeyModifiers};
     // When editing an item, most keys go to the edit buffer.
-    if let Some(_) = state.editing {
+    if state.editing.is_some() {
         match k.code {
             KeyCode::Esc => {
                 state.cancel_edit();
@@ -3410,10 +3410,7 @@ mod tests {
     fn expand_paste_blocks_replaces_marker_with_block() {
         let mut blocks = VecDeque::from(["a\nb\nc".to_string()]);
         let out = expand_paste_blocks("before [paste 3 lines] after".to_string(), &mut blocks);
-        assert_eq!(
-            out,
-            "before ```paste\na\nb\nc\n``` after"
-        );
+        assert_eq!(out, "before ```paste\na\nb\nc\n``` after");
         assert!(blocks.is_empty());
     }
 
@@ -3784,7 +3781,7 @@ mod tests {
         // Push a Settings tab and make it the active one.
         let mut s = SettingsState::new(&app.config);
         s.level = SettingsLevel::TopLevel;
-        app.function.push(SidebarTab::Settings(s));
+        app.function.push(SidebarTab::Settings(Box::new(s)));
         app.function.active = app.function.tabs.len() - 1;
         let settings_idx = app.function.active;
         assert_ne!(settings_idx, notif_idx);
@@ -3847,9 +3844,6 @@ mod tests {
         app.config.active = Some(id.clone());
 
         // Open the picker.
-        crate::function::SidebarTab::ModelPicker(crate::function::ModelPickerState::new(
-            ProviderKind::Openai,
-        ));
         let mut picker = crate::function::ModelPickerState::new(ProviderKind::Openai);
         picker.focus = crate::function::PickerFocus::List;
         picker
@@ -3932,7 +3926,7 @@ mod tests {
         st.cursor = 3;
         st.form_error = Some("stale error".to_string());
         st.load_error = Some("stale load error".to_string());
-        app.function.push(SidebarTab::Settings(st));
+        app.function.push(SidebarTab::Settings(Box::new(st)));
         let tabs_before = app.function.tabs.len();
         // Active index is on the old settings tab.
         let old_active = app.function.active;
@@ -3970,10 +3964,9 @@ mod tests {
         // must show it and focus the Notifications tab.
         let mut app = make_app();
         // Push a settings tab so the active tab is non-Notification.
-        app.function
-            .push(SidebarTab::Settings(crate::function::SettingsState::new(
-                &app.config,
-            )));
+        app.function.push(SidebarTab::Settings(Box::new(
+            crate::function::SettingsState::new(&app.config),
+        )));
         app.function.active = app.function.tabs.len() - 1;
         assert!(!app.function_visible);
         // No Notifications tab yet.
@@ -4021,10 +4014,9 @@ mod tests {
         // must switch focus to Notifications (not hide).
         let mut app = make_app();
         app.function_visible = true;
-        app.function
-            .push(SidebarTab::Settings(crate::function::SettingsState::new(
-                &app.config,
-            )));
+        app.function.push(SidebarTab::Settings(Box::new(
+            crate::function::SettingsState::new(&app.config),
+        )));
         app.function.active = app.function.tabs.len() - 1;
         assert!(matches!(
             app.function.tabs[app.function.active],
@@ -4182,10 +4174,9 @@ mod tests {
 
         let mut app = make_app();
         app.function_visible = true;
-        app.function
-            .push(SidebarTab::Settings(crate::function::SettingsState::new(
-                &app.config,
-            )));
+        app.function.push(SidebarTab::Settings(Box::new(
+            crate::function::SettingsState::new(&app.config),
+        )));
         app.function.active = app.function.tabs.len() - 1;
         // Use Info level so notify() does not auto-switch the active tab.
         app.notify(ToastLevel::Info, "heads up");
@@ -4711,10 +4702,9 @@ mod tests {
         use crate::function::SidebarTab;
 
         let mut app = make_app();
-        app.function
-            .push(SidebarTab::Settings(crate::function::SettingsState::new(
-                &app.config,
-            )));
+        app.function.push(SidebarTab::Settings(Box::new(
+            crate::function::SettingsState::new(&app.config),
+        )));
         app.function.active = app.function.tabs.len() - 1;
         app.function_visible = true;
         assert!(app.function.has_any_tab());
@@ -5425,7 +5415,7 @@ mod tests {
         let mut app = make_app();
         let mut state = crate::function::SettingsState::new(&app.config);
         state.level = SettingsLevel::TopLevel;
-        app.function.push(SidebarTab::Settings(state));
+        app.function.push(SidebarTab::Settings(Box::new(state)));
         app.function.active = app.function.tabs.len() - 1;
         let settings_idx = app.function.active;
         assert!(matches!(

@@ -33,7 +33,10 @@ impl Provider for VolcengineProvider {
     ) -> Result<Vec<ModelInfo>> {
         // Try OpenAI-compatible /api/v3/models endpoint (uses Bearer token)
         if !api_key.is_empty() {
-            if let Ok(models) = self.list_via_openai_endpoint(client, base_url, api_key).await {
+            if let Ok(models) = self
+                .list_via_openai_endpoint(client, base_url, api_key)
+                .await
+            {
                 if !models.is_empty() {
                     return Ok(models);
                 }
@@ -51,14 +54,18 @@ impl Provider for VolcengineProvider {
 
         // Fallback: ListFoundationModels via management API with AK/SK
         if !api_key.is_empty() || (!access_key.is_empty() && !secret_key.is_empty()) {
-            if let Ok(models) = self.list_via_agent_plan_api(client, api_key, access_key, secret_key).await {
+            if let Ok(models) = self
+                .list_via_agent_plan_api(client, api_key, access_key, secret_key)
+                .await
+            {
                 if !models.is_empty() {
                     return Ok(models);
                 }
             }
         }
 
-        self.list_via_management_api(client, access_key, secret_key).await
+        self.list_via_management_api(client, access_key, secret_key)
+            .await
     }
 
     async fn chat_stream(
@@ -109,16 +116,12 @@ impl VolcengineProvider {
         }
 
         let text = resp.text().await.map_err(ProviderError::Http)?;
-        let v: serde_json::Value =
-            serde_json::from_str(&text).map_err(ProviderError::Json)?;
+        let v: serde_json::Value = serde_json::from_str(&text).map_err(ProviderError::Json)?;
 
         let mut models = Vec::new();
         if let Some(data) = v.get("data").and_then(|d| d.as_array()) {
             for item in data {
-                let id = item
-                    .get("id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
+                let id = item.get("id").and_then(|v| v.as_str()).unwrap_or("");
                 if id.is_empty() {
                     continue;
                 }
@@ -180,19 +183,20 @@ impl VolcengineProvider {
         let status = resp.status();
         if !status.is_success() {
             let text = resp.text().await.unwrap_or_default();
-            return Err(ProviderError::Other(format!("ListEndpoints status {status}: {text}")).into());
+            return Err(
+                ProviderError::Other(format!("ListEndpoints status {status}: {text}")).into(),
+            );
         }
 
         let text = resp.text().await.map_err(ProviderError::Http)?;
-        let v: serde_json::Value =
-            serde_json::from_str(&text).map_err(ProviderError::Json)?;
+        let v: serde_json::Value = serde_json::from_str(&text).map_err(ProviderError::Json)?;
 
         // Try common Volcengine response structures
         let items = v
             .pointer("/Result/Items")
             .or_else(|| v.get("Items"))
             .and_then(|a| a.as_array())
-            .map(|a| a.clone())
+            .cloned()
             .unwrap_or_default();
 
         let mut models = Vec::new();
@@ -221,11 +225,37 @@ impl VolcengineProvider {
         Ok(models)
     }
 
-    async fn signed_post(&self, client: &reqwest::Client, query: &str, body: &[u8], access_key: &str, secret_key: &str) -> Result<reqwest::Response> {
-        self.signed_post_to(client, query, body, access_key, secret_key, VOLCENGINE_API_HOST, VOLCENGINE_SERVICE).await
+    async fn signed_post(
+        &self,
+        client: &reqwest::Client,
+        query: &str,
+        body: &[u8],
+        access_key: &str,
+        secret_key: &str,
+    ) -> Result<reqwest::Response> {
+        self.signed_post_to(
+            client,
+            query,
+            body,
+            access_key,
+            secret_key,
+            VOLCENGINE_API_HOST,
+            VOLCENGINE_SERVICE,
+        )
+        .await
     }
 
-    async fn signed_post_to(&self, client: &reqwest::Client, query: &str, body: &[u8], access_key: &str, secret_key: &str, host: &str, service: &str) -> Result<reqwest::Response> {
+    #[allow(clippy::too_many_arguments)]
+    async fn signed_post_to(
+        &self,
+        client: &reqwest::Client,
+        query: &str,
+        body: &[u8],
+        access_key: &str,
+        secret_key: &str,
+        host: &str,
+        service: &str,
+    ) -> Result<reqwest::Response> {
         let now = Utc::now();
         let date_str = now.format("%Y%m%d").to_string();
         let datetime_str = now.format("%Y%m%dT%H%M%SZ").to_string();
@@ -236,8 +266,7 @@ impl VolcengineProvider {
             "POST\n/\n{query}\nhost:{host}\nx-content-sha256:{hashed_body}\nx-date:{datetime_str}\n\n{signed_headers}\n{hashed_body}"
         );
         let hashed_canonical = hex::encode(Sha256::digest(canonical_request.as_bytes()));
-        let credential_scope =
-            format!("{date_str}/{VOLCENGINE_REGION}/{service}/request");
+        let credential_scope = format!("{date_str}/{VOLCENGINE_REGION}/{service}/request");
         let string_to_sign =
             format!("HMAC-SHA256\n{datetime_str}\n{credential_scope}\n{hashed_canonical}");
 
@@ -282,7 +311,9 @@ impl VolcengineProvider {
             VOLCENGINE_API_VERSION,
         );
         let body = b"{}";
-        let resp = self.signed_post(client, &query, body, access_key, secret_key).await?;
+        let resp = self
+            .signed_post(client, &query, body, access_key, secret_key)
+            .await?;
         let status = resp.status();
         let text = resp.text().await.map_err(ProviderError::Http)?;
         if !status.is_success() {
@@ -294,7 +325,8 @@ impl VolcengineProvider {
             .pointer("/Result/Items")
             .and_then(|a| a.as_array())
             .map(|items| {
-                items.iter()
+                items
+                    .iter()
                     .filter_map(|item| item.get("Name").and_then(|n| n.as_str()))
                     .map(|n| n.to_string())
                     .collect()
@@ -316,8 +348,12 @@ impl VolcengineProvider {
                 "Action=ListFoundationModelVersions&Version={}",
                 VOLCENGINE_API_VERSION,
             );
-            let body = serde_json::json!({"FoundationModelName": name}).to_string().into_bytes();
-            let resp = self.signed_post(client, &query, &body, access_key, secret_key).await?;
+            let body = serde_json::json!({"FoundationModelName": name})
+                .to_string()
+                .into_bytes();
+            let resp = self
+                .signed_post(client, &query, &body, access_key, secret_key)
+                .await?;
             let status = resp.status();
             let text = resp.text().await.map_err(ProviderError::Http)?;
             if !status.is_success() {
@@ -332,12 +368,14 @@ impl VolcengineProvider {
                 .unwrap_or_default();
 
             for item in items {
-                let model_id = item.get("ModelId")
+                let model_id = item
+                    .get("ModelId")
                     .or_else(|| item.get("Id"))
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string())
                     .unwrap_or_else(|| {
-                        let version = item.get("ModelVersion")
+                        let version = item
+                            .get("ModelVersion")
                             .or_else(|| item.get("Version"))
                             .and_then(|v| v.as_str())
                             .unwrap_or("default");
@@ -345,7 +383,8 @@ impl VolcengineProvider {
                     });
 
                 if seen.insert(model_id.clone()) {
-                    let context_window = item.pointer("/ModelInfo/MaxInputTokenLength")
+                    let context_window = item
+                        .pointer("/ModelInfo/MaxInputTokenLength")
                         .and_then(|v| v.as_u64());
                     all_models.push(ModelInfo {
                         id: model_id.clone(),
@@ -359,8 +398,10 @@ impl VolcengineProvider {
 
         if all_models.is_empty() {
             return Err(ProviderError::Other(
-                "Volcengine returned no models; check your Access Key / Secret Key permissions".to_string(),
-            ).into());
+                "Volcengine returned no models; check your Access Key / Secret Key permissions"
+                    .to_string(),
+            )
+            .into());
         }
 
         Ok(all_models)
@@ -376,14 +417,25 @@ impl VolcengineProvider {
         if access_key.is_empty() || secret_key.is_empty() {
             return Err(ProviderError::Other(
                 "Volcengine Access Key / Secret Key required for ListArkAgentPlanModel".to_string(),
-            ).into());
+            )
+            .into());
         }
 
         let query = format!(
             "Action=ListArkAgentPlanModel&Version={}",
             VOLCENGINE_API_VERSION,
         );
-        let resp = self.signed_post_to(client, &query, b"{}", access_key, secret_key, VOLCENGINE_AGENT_PLAN_HOST, VOLCENGINE_AGENT_PLAN_SERVICE).await?;
+        let resp = self
+            .signed_post_to(
+                client,
+                &query,
+                b"{}",
+                access_key,
+                secret_key,
+                VOLCENGINE_AGENT_PLAN_HOST,
+                VOLCENGINE_AGENT_PLAN_SERVICE,
+            )
+            .await?;
 
         let status = resp.status();
         let text = resp.text().await.map_err(ProviderError::Http)?;
@@ -398,7 +450,8 @@ impl VolcengineProvider {
             .cloned()
             .unwrap_or_default();
 
-        let models: Vec<ModelInfo> = items.iter()
+        let models: Vec<ModelInfo> = items
+            .iter()
             .filter_map(|item| {
                 let id = item.get("ModelID")?.as_str()?;
                 if id.is_empty() {
@@ -416,7 +469,8 @@ impl VolcengineProvider {
         if models.is_empty() {
             return Err(ProviderError::Other(
                 "ListArkAgentPlanModel returned no models".to_string(),
-            ).into());
+            )
+            .into());
         }
         Ok(models)
     }

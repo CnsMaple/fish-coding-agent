@@ -50,9 +50,8 @@ pub fn render(f: &mut Frame, app: &mut App) {
     // Pre-warm the layout cache before any render call, so that
     // `session::render::render` can read `cached_total_lines_for` cheaply
     // and `build_lines_viewport` knows which messages intersect the viewport.
-    let width_u16 = area.width.min(u16::MAX as u16);
-    app.session
-        .count_all_lines_with_width(width_u16 as usize);
+    let width_u16 = area.width;
+    app.session.count_all_lines_with_width(width_u16 as usize);
 
     if app.function_visible {
         crate::session::render::render(
@@ -94,13 +93,11 @@ pub fn render(f: &mut Frame, app: &mut App) {
     app.tool_toggle_rows.clear();
     let area = session_content_area(session_frame_area);
     let inner_h = area.height as usize;
-    let width_u16 = area.width.min(u16::MAX as u16);
+    let width_u16 = area.width;
 
     // Compute total lines. This populates the per-block caches inside
     // `Session` on the first call per invalidation.
-    let total_lines: usize = app
-        .session
-        .count_all_lines_with_width(width_u16 as usize) as usize;
+    let total_lines: usize = app.session.count_all_lines_with_width(width_u16 as usize) as usize;
 
     let scroll = app
         .session
@@ -135,8 +132,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
             && !m.thinking.trim().is_empty()
             && app.config.thinking_display != crate::config::ThinkingDisplay::Hide;
         if think_show {
-            let expanded = (app.config.thinking_display
-                == crate::config::ThinkingDisplay::Show
+            let expanded = (app.config.thinking_display == crate::config::ThinkingDisplay::Show
                 && m.thinking_visible)
                 || (app.config.thinking_display
                     == crate::config::ThinkingDisplay::ShowWhileStreaming
@@ -212,7 +208,11 @@ fn input_height(app: &App, viewport_height: u16, terminal_width: u16) -> u16 {
     for seg in app.input.buffer.split('\n') {
         let tw = unicode_width::UnicodeWidthStr::width(seg);
         let total = prompt_w + tw;
-        let seg_lines = if total <= inner_w { 1 } else { (total + inner_w - 1) / inner_w };
+        let seg_lines = if total <= inner_w {
+            1
+        } else {
+            total.div_ceil(inner_w)
+        };
         visual_lines += seg_lines as u16;
     }
     visual_lines = visual_lines.max(1);
@@ -296,7 +296,11 @@ fn apply_selection_style(buf: &mut Buffer, sel: &Selection) {
     let width = buf.area().width;
     for y in y_min..=y_max {
         let row_sx = if y == start.1 { start.0 } else { 0 };
-        let row_ex = if y == end.1 { end.0.min(width.saturating_sub(1)) } else { width.saturating_sub(1) };
+        let row_ex = if y == end.1 {
+            end.0.min(width.saturating_sub(1))
+        } else {
+            width.saturating_sub(1)
+        };
         for x in row_sx..=row_ex {
             if let Some(cell) = buf.cell_mut((x, y)) {
                 let new_style = cell.style().add_modifier(Modifier::REVERSED);
@@ -319,7 +323,11 @@ pub fn extract_selection_text(buf: &Buffer, sel: &Selection) -> String {
     let mut lines: Vec<String> = Vec::new();
     for y in y_min..=y_max {
         let row_sx = if y == start.1 { start.0 } else { 0 };
-        let row_ex = if y == end.1 { end.0.min(width.saturating_sub(1)) } else { width.saturating_sub(1) };
+        let row_ex = if y == end.1 {
+            end.0.min(width.saturating_sub(1))
+        } else {
+            width.saturating_sub(1)
+        };
         let mut line = String::new();
         for x in row_sx..=row_ex {
             if let Some(cell) = buf.cell((x, y)) {

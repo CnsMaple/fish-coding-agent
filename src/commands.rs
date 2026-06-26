@@ -12,7 +12,14 @@ pub fn dispatch(app: &mut App, cmd: &str, arg: &str) {
         "hotkey" | "help" | "keys" => open_hotkey(app),
         "new" | "clear" => {
             app.start_new_session();
-            app.notify(ToastLevel::Info, if cmd == "new" { "new session" } else { "session cleared" });
+            app.notify(
+                ToastLevel::Info,
+                if cmd == "new" {
+                    "new session"
+                } else {
+                    "session cleared"
+                },
+            );
         }
         "think" | "thinking" => {
             use crate::config::ReasoningMode;
@@ -21,26 +28,25 @@ pub fn dispatch(app: &mut App, cmd: &str, arg: &str) {
                 // Open a picker in the function panel.
                 open_thinking_picker(app);
                 return;
-            } else {
-                let next = match arg {
-                    "off" => ReasoningMode::Off,
-                    "low" => ReasoningMode::Low,
-                    "med" | "medium" => ReasoningMode::Med,
-                    "high" => ReasoningMode::High,
-                    "adaptive" => ReasoningMode::Adaptive,
-                    _ => {
-                        app.notify(
-                            ToastLevel::Fail,
-                            format!("unknown thinking level: {arg} (off/low/med/high/adaptive)"),
-                        );
-                        return;
-                    }
-                };
-                app.config.thinking = next;
-                app.status.set_thinking(next);
-                app.save_config();
-                app.notify(ToastLevel::Ok, format!("thinking: {}", next.as_str()));
             }
+            let next = match arg {
+                "off" => ReasoningMode::Off,
+                "low" => ReasoningMode::Low,
+                "med" | "medium" => ReasoningMode::Med,
+                "high" => ReasoningMode::High,
+                "adaptive" => ReasoningMode::Adaptive,
+                _ => {
+                    app.notify(
+                        ToastLevel::Fail,
+                        format!("unknown thinking level: {arg} (off/low/med/high/adaptive)"),
+                    );
+                    return;
+                }
+            };
+            app.config.thinking = next;
+            app.status.set_thinking(next);
+            app.save_config();
+            app.notify(ToastLevel::Ok, format!("thinking: {}", next.as_str()));
         }
         "timeline" => {
             open_timeline_picker(app);
@@ -58,7 +64,7 @@ pub fn dispatch(app: &mut App, cmd: &str, arg: &str) {
         }
         "fork" => app.fork_session(None),
         "retry" => retry_last_prompt(app),
-        "continue" => continue_response(app, &arg),
+        "continue" => continue_response(app, arg),
         "plan" => {
             let arg = arg.trim().to_lowercase();
             if matches!(arg.as_str(), "exit" | "off" | "yolo") {
@@ -124,7 +130,6 @@ pub fn dispatch_skill(app: &mut App, name: &str, args: &str) {
 /// renders a clean `[skill]` block (name / args / context path) so
 /// the user sees what was invoked without scrolling through the
 /// raw template.
-
 fn open_skill(app: &mut App, name: &str, args: &str) {
     let name = name.trim();
     let args = args.trim();
@@ -272,7 +277,7 @@ pub fn open_settings_at(app: &mut App, initial_level: crate::function::SettingsL
     let mut state = crate::function::SettingsState::new(&app.config);
     state.level = initial_level;
     state.clamp_cursor(&app.config);
-    app.function.push(SidebarTab::Settings(state));
+    app.function.push(SidebarTab::Settings(Box::new(state)));
     app.function_visible = true;
     app.acknowledge_panel();
 }
@@ -609,7 +614,7 @@ pub fn send_message(app: &mut App, user_msg: Message) {
             loop {
                 if *cancel_rx.borrow() {
                     let _ = tx.send(crate::event::AppMsg::ChatDebug(
-                        "user cancelled".to_string()
+                        "user cancelled".to_string(),
                     ));
                     let _ = tx.send(crate::event::AppMsg::ChatDone);
                     return;
@@ -692,9 +697,9 @@ pub fn send_message(app: &mut App, user_msg: Message) {
                             let _ = tx.send(crate::event::AppMsg::ChatError(e));
                             return;
                         }
-                        let _ = tx.send(crate::event::AppMsg::ChatDebug(
-                            format!("stream retry {stream_retries}/3: {e}")
-                        ));
+                        let _ = tx.send(crate::event::AppMsg::ChatDebug(format!(
+                            "stream retry {stream_retries}/3: {e}"
+                        )));
                         // If an assistant message was pushed to req (we got tool calls),
                         // pop it so the retry starts clean.
                         if !tool_calls.is_empty() {
@@ -725,7 +730,7 @@ pub fn send_message(app: &mut App, user_msg: Message) {
 
                 let _ = tx.send(crate::event::AppMsg::ChatTimerPause);
                 for call in &tool_calls {
-                    let title = tool_result_title(&call);
+                    let title = tool_result_title(call);
                     let _ = tx.send(crate::event::AppMsg::ToolStarted {
                         name: call.name.clone(),
                         title: title.clone(),
@@ -751,7 +756,9 @@ pub fn send_message(app: &mut App, user_msg: Message) {
                     });
                 }
                 // If any tool was "ask" or "plan", stop auto-continue and wait for user input
-                let has_interaction_tool = tool_calls.iter().any(|c| c.name == "ask" || c.name == "plan");
+                let has_interaction_tool = tool_calls
+                    .iter()
+                    .any(|c| c.name == "ask" || c.name == "plan");
                 if has_interaction_tool {
                     let _ = tx.send(crate::event::AppMsg::ChatDone);
                     return;
@@ -854,4 +861,3 @@ fn parse_text_tool_calls(content: &str) -> Vec<ToolCall> {
     }
     calls
 }
-

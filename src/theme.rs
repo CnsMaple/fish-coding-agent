@@ -27,9 +27,10 @@ pub fn init_theme(variant: ThemeVariant) {
 }
 
 /// Available theme variants.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum ThemeVariant {
     #[serde(rename = "default")]
+    #[default]
     Default,
     #[serde(rename = "light-eucalyptus")]
     LightEucalyptus,
@@ -45,12 +46,6 @@ impl ThemeVariant {
 
     pub fn all() -> &'static [ThemeVariant] {
         &[ThemeVariant::Default, ThemeVariant::LightEucalyptus]
-    }
-}
-
-impl Default for ThemeVariant {
-    fn default() -> Self {
-        ThemeVariant::Default
     }
 }
 
@@ -98,14 +93,14 @@ impl ThemeColors {
     fn light_eucalyptus() -> Self {
         Self {
             // Soothing pastel backgrounds for a light theme
-            tool_pending_bg: Color::Rgb(230, 245, 243),     // #E6F5F3
-            tool_success_bg: Color::Rgb(232, 245, 233),     // #E8F5E9
-            tool_error_bg: Color::Rgb(232, 245, 233),       // #E8F5E9 (same as success)
-            tool_error_fg: Color::Rgb(202, 67, 67),          // #CA4343
-            cursor_fg: Color::Rgb(5, 150, 105),              // emerald-600
+            tool_pending_bg: Color::Rgb(230, 245, 243), // #E6F5F3
+            tool_success_bg: Color::Rgb(232, 245, 233), // #E8F5E9
+            tool_error_bg: Color::Rgb(232, 245, 233),   // #E8F5E9 (same as success)
+            tool_error_fg: Color::Rgb(202, 67, 67),     // #CA4343
+            cursor_fg: Color::Rgb(5, 150, 105),         // emerald-600
             thinking_streaming_bg: Color::Rgb(230, 245, 243), // #E6F5F3
-            thinking_done_bg: Color::Rgb(232, 245, 233),     // #E8F5E9
-            user_bg: Color::Rgb(224, 247, 250),              // #E0F7FA (matches default)
+            thinking_done_bg: Color::Rgb(232, 245, 233), // #E8F5E9
+            user_bg: Color::Rgb(224, 247, 250),         // #E0F7FA (matches default)
         }
     }
 
@@ -187,13 +182,18 @@ impl Theme {
     }
 
     pub fn cursor() -> Style {
-        Style::default().fg(active_colors().cursor_fg).bg(Color::Reset)
+        Style::default()
+            .fg(active_colors().cursor_fg)
+            .bg(Color::Reset)
     }
 
     /// Visible cursor indicator for form fields. Uses bold so the cursor
     /// character stands out without relying on REVERSED background.
     pub fn cursor_visible() -> Style {
-        Style::default().fg(active_colors().cursor_fg).bg(Color::Reset).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(active_colors().cursor_fg)
+            .bg(Color::Reset)
+            .add_modifier(Modifier::BOLD)
     }
 
     pub fn block_running() -> Style {
@@ -205,7 +205,10 @@ impl Theme {
     }
 
     pub fn block_failed() -> Style {
-        Self::base().fg(active_colors().tool_error_fg).bg(active_colors().tool_error_bg).add_modifier(Modifier::BOLD)
+        Self::base()
+            .fg(active_colors().tool_error_fg)
+            .bg(active_colors().tool_error_bg)
+            .add_modifier(Modifier::BOLD)
     }
 
     /// Background for user message blocks.

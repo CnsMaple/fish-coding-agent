@@ -108,11 +108,9 @@ impl Provider for OpenAiProvider {
             && !resp_ct.contains("application/json")
         {
             let text = resp.text().await.unwrap_or_default();
-            return Err(ProviderError::Other(format!(
-                "unexpected ct={} body={}",
-                resp_ct, text
-            ))
-            .into());
+            return Err(
+                ProviderError::Other(format!("unexpected ct={} body={}", resp_ct, text)).into(),
+            );
         }
 
         let mut final_usage: Option<Usage> = None;
@@ -143,6 +141,13 @@ impl Provider for OpenAiProvider {
                     }
                 }
             }
+            if let Some(reasoning) = v.pointer("/choices/0/delta/reasoning_content") {
+                if let Some(s) = reasoning.as_str() {
+                    if !s.is_empty() {
+                        let _ = tx.send(ChatEvent::ThinkingDelta(s.to_string()));
+                    }
+                }
+            }
             if let Some(calls) = v
                 .pointer("/choices/0/delta/tool_calls")
                 .and_then(|v| v.as_array())
@@ -158,9 +163,7 @@ impl Provider for OpenAiProvider {
         })
         .await;
 
-        if let Err(e) = stream_result {
-            return Err(e);
-        }
+        stream_result?;
         if let Some(u) = final_usage {
             let _ = tx.send(ChatEvent::Usage(u));
         }

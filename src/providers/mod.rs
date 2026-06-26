@@ -135,7 +135,8 @@ pub async fn list_models(
         ProviderKind::MiniMax => Box::new(openai::OpenAiProvider),
         ProviderKind::Volcengine => Box::new(volcengine::VolcengineProvider),
     };
-    p.list_models(client, base_url, api_key, access_key, secret_key).await
+    p.list_models(client, base_url, api_key, access_key, secret_key)
+        .await
 }
 
 pub fn provider(kind: ProviderKind) -> Box<dyn Provider> {

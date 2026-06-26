@@ -87,7 +87,7 @@ impl AppMode {
 pub enum SidebarTab {
     Notifications,
     Completion(CompletionState),
-    Settings(SettingsState),
+    Settings(Box<SettingsState>),
     ModelPicker(ModelPickerState),
     ProviderPicker(ProviderPickerState),
     ThinkingPicker(ThinkingPickerState),
@@ -403,6 +403,12 @@ impl NewProviderPickerState {
     }
 }
 
+impl Default for NewProviderPickerState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// State of the settings sidebar tab.
 #[derive(Debug)]
 pub struct SettingsState {
@@ -684,6 +690,12 @@ impl ThinkingPickerState {
         if self.cursor >= self.filtered.len() {
             self.cursor = self.filtered.len().saturating_sub(1);
         }
+    }
+}
+
+impl Default for ThinkingPickerState {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -1114,6 +1126,12 @@ impl FunctionPanel {
     }
 }
 
+impl Default for FunctionPanel {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Top-level app state.
 pub struct App {
     pub config: Config,
@@ -1258,7 +1276,6 @@ impl App {
             .unwrap_or(&config_path)
             .join("model-cache.json");
         let model_cache = ModelCache::load(&cache_file);
-        let cache_file = cache_file; // keep alive for the field below
         let session_id = crate::session::store::new_session_id();
         let session_title = crate::session::store::default_title(&cwd);
         let mut app = Self {

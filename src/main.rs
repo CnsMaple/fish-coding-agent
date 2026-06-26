@@ -21,7 +21,7 @@ async fn main() -> Result<()> {
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
-        .with_writer(|| std::io::stderr())
+        .with_writer(std::io::stderr)
         .init();
 
     let config_path = config::paths::config_file_path()?;

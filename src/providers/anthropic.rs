@@ -138,8 +138,7 @@ impl Provider for AnthropicProvider {
             };
             match kind {
                 "content_block_start" => {
-                    if v.pointer("/content_block/type").and_then(|t| t.as_str())
-                        == Some("tool_use")
+                    if v.pointer("/content_block/type").and_then(|t| t.as_str()) == Some("tool_use")
                     {
                         merge_tool_use_start(&mut tool_calls, &v);
                     }
@@ -159,9 +158,7 @@ impl Provider for AnthropicProvider {
                             }
                         }
                     }
-                    if let Some(partial) = v
-                        .pointer("/delta/partial_json")
-                        .and_then(|p| p.as_str())
+                    if let Some(partial) = v.pointer("/delta/partial_json").and_then(|p| p.as_str())
                     {
                         merge_tool_use_delta(&mut tool_calls, &v, partial);
                     }
@@ -190,9 +187,7 @@ impl Provider for AnthropicProvider {
         })
         .await;
 
-        if let Err(e) = stream_result {
-            return Err(e);
-        }
+        stream_result?;
         if let Some(u) = final_usage {
             let _ = tx.send(ChatEvent::Usage(u));
         }

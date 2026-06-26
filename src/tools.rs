@@ -219,14 +219,12 @@ pub async fn execute_tool_streaming(
     tx: UnboundedSender<AppMsg>,
 ) -> String {
     let result = match name {
-        "shell_command" | "command" => {
-            run_command_streaming(args, cwd, tx).await
-                .unwrap_or_else(|e| json!({ "ok": false, "error": e.to_string() }).to_string())
-        }
-        "python_command" => {
-            run_python_streaming(args, cwd, tx).await
-                .unwrap_or_else(|e| json!({ "ok": false, "error": e.to_string() }).to_string())
-        }
+        "shell_command" | "command" => run_command_streaming(args, cwd, tx)
+            .await
+            .unwrap_or_else(|e| json!({ "ok": false, "error": e.to_string() }).to_string()),
+        "python_command" => run_python_streaming(args, cwd, tx)
+            .await
+            .unwrap_or_else(|e| json!({ "ok": false, "error": e.to_string() }).to_string()),
         _ => execute_tool(name, args, cwd).await,
     };
 
@@ -291,8 +289,13 @@ $OutputEncoding = [Console]::OutputEncoding = \
 $env:PYTHONIOENCODING='utf-8'; ";
         let full_cmd = format!("{utf8_preamble}{command}");
         let shell = windows_shell_program();
-        run_shell_streaming_impl(shell, &["-NoLogo", "-NoProfile", "-Command", &full_cmd], cwd, tx)
-            .await
+        run_shell_streaming_impl(
+            shell,
+            &["-NoLogo", "-NoProfile", "-Command", &full_cmd],
+            cwd,
+            tx,
+        )
+        .await
     }
 
     #[cfg(not(windows))]
@@ -309,13 +312,7 @@ async fn run_python_streaming_inner(
 ) -> Result<String> {
     #[cfg(windows)]
     {
-        match run_shell_streaming_impl(
-            "python",
-            &["-X", "utf8", "-c", code],
-            cwd,
-            tx.clone(),
-        )
-        .await
+        match run_shell_streaming_impl("python", &["-X", "utf8", "-c", code], cwd, tx.clone()).await
         {
             Ok(output) => Ok(output),
             Err(_) => {
@@ -326,18 +323,9 @@ async fn run_python_streaming_inner(
 
     #[cfg(not(windows))]
     {
-        match run_shell_streaming_impl(
-            "python3",
-            &["-c", code],
-            cwd,
-            tx.clone(),
-        )
-        .await
-        {
+        match run_shell_streaming_impl("python3", &["-c", code], cwd, tx.clone()).await {
             Ok(output) => Ok(output),
-            Err(_) => {
-                run_shell_streaming_impl("python", &["-c", code], cwd, tx).await
-            }
+            Err(_) => run_shell_streaming_impl("python", &["-c", code], cwd, tx).await,
         }
     }
 }
@@ -368,10 +356,8 @@ async fn run_shell_streaming_impl(
     let mut stderr_buf = String::new();
 
     // Take stdout/stderr handles
-    let stdout_reader = child.stdout.take()
-        .map(|out| tokio::io::BufReader::new(out));
-    let stderr_reader = child.stderr.take()
-        .map(|err| tokio::io::BufReader::new(err));
+    let stdout_reader = child.stdout.take().map(tokio::io::BufReader::new);
+    let stderr_reader = child.stderr.take().map(tokio::io::BufReader::new);
 
     // Read stdout and stderr concurrently
     let stdout_task = async {
@@ -384,7 +370,9 @@ async fn run_shell_streaming_impl(
                     Ok(0) => break,
                     Ok(_) => {
                         buf.push_str(&line);
-                        let _ = tx.send(AppMsg::ToolDelta { content: line.clone() });
+                        let _ = tx.send(AppMsg::ToolDelta {
+                            content: line.clone(),
+                        });
                     }
                     Err(_) => break,
                 }
@@ -404,7 +392,9 @@ async fn run_shell_streaming_impl(
                     Ok(_) => {
                         let tag = "stderr: ";
                         buf.push_str(&line);
-                        let _ = tx.send(AppMsg::ToolDelta { content: format!("{tag}{line}") });
+                        let _ = tx.send(AppMsg::ToolDelta {
+                            content: format!("{tag}{line}"),
+                        });
                     }
                     Err(_) => break,
                 }
@@ -423,7 +413,10 @@ async fn run_shell_streaming_impl(
 
     Ok(format!(
         "exit_code: {}\nwall_secs: {:.2}\ntimeout_secs: {}\nstdout:\n{}\nstderr:\n{}",
-        status.code().map(|c| c.to_string()).unwrap_or_else(|| "terminated".to_string()),
+        status
+            .code()
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| "terminated".to_string()),
         started.elapsed().as_secs_f64(),
         COMMAND_TIMEOUT_SECS,
         stdout,
@@ -519,8 +512,7 @@ async fn grep_text(args: &str, cwd: &Path) -> Result<String> {
     if args.pattern.is_empty() {
         return Err(anyhow!("pattern is empty"));
     }
-    let re = Regex::new(&args.pattern)
-        .map_err(|e| anyhow!("invalid regex pattern: {e}"))?;
+    let re = Regex::new(&args.pattern).map_err(|e| anyhow!("invalid regex pattern: {e}"))?;
     let rel = args.path.unwrap_or_else(|| ".".to_string());
     let root = resolve_workspace_path(cwd, &rel)?;
     let mut out = Vec::new();

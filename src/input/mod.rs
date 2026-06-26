@@ -381,6 +381,12 @@ impl InputState {
     }
 }
 
+impl Default for InputState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Convert a column offset (0-based display columns) to a byte index in `s`.
 fn col_to_byte(s: &str, col: u16) -> usize {
     byte_at_display_col(s, col as usize)
@@ -452,11 +458,7 @@ pub fn render(area: Rect, buf: &mut Buffer, app: &mut crate::app::App) {
     let cursor_line_idx = buffer[..cursor].chars().filter(|&c| c == '\n').count();
     let all_lines: Vec<&str> = buffer.split('\n').collect();
     let visible_count = (all_lines.len() as u16).min(inner.height).max(1) as usize;
-    let start_line = if cursor_line_idx + 1 > visible_count {
-        cursor_line_idx + 1 - visible_count
-    } else {
-        0
-    };
+    let start_line = (cursor_line_idx + 1).saturating_sub(visible_count);
     let end_line = (start_line + visible_count).min(all_lines.len().max(1));
 
     let inner_w = inner.width as usize;
@@ -473,7 +475,7 @@ pub fn render(area: Rect, buf: &mut Buffer, app: &mut crate::app::App) {
         let n_vis = if seg_total_w <= inner_w {
             1
         } else {
-            (seg_total_w + inner_w - 1) / inner_w
+            seg_total_w.div_ceil(inner_w)
         };
         if idx < start_line || idx >= end_line {
             continue;
@@ -577,7 +579,7 @@ pub fn render(area: Rect, buf: &mut Buffer, app: &mut crate::app::App) {
             let n_vis = if seg_total_w <= inner_w {
                 1
             } else {
-                (seg_total_w + inner_w - 1) / inner_w
+                seg_total_w.div_ceil(inner_w)
             };
             let text_before = &text[..cursor - line_start];
             let width_before = prompt_width + UnicodeWidthStr::width(text_before);
@@ -601,7 +603,7 @@ pub fn render(area: Rect, buf: &mut Buffer, app: &mut crate::app::App) {
                 let nv = if stw <= inner_w {
                     1
                 } else {
-                    (stw + inner_w - 1) / inner_w
+                    stw.div_ceil(inner_w)
                 };
                 vis_before += nv;
             }

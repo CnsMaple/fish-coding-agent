@@ -73,9 +73,7 @@ pub fn completion_candidates(query: &str) -> Vec<String> {
     let q = query.trim();
     let mut scored: Vec<(u32, String)> = BUILTIN_MCPS
         .iter()
-        .filter_map(|m| {
-            crate::fuzzy::score(q, m.name).map(|sc| (sc, format!("/mcp:{}", m.name)))
-        })
+        .filter_map(|m| crate::fuzzy::score(q, m.name).map(|sc| (sc, format!("/mcp:{}", m.name))))
         .collect();
     scored.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
     scored.into_iter().map(|(_, s)| s).collect()

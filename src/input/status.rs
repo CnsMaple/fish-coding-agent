@@ -172,6 +172,12 @@ impl StatusBar {
     }
 }
 
+impl Default for StatusBar {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 fn strip_stale_context_label(model: &str) -> &str {
     // Providers like "OpenAI: GPT-4o" or "Anthropic: Claude 3.5 Sonnet"
     // sometimes embed a stale " (128K)" context window label in the
@@ -195,7 +201,7 @@ fn fmt_tokens_k(tokens: u64) -> String {
         format!("{:.0}k", v)
     } else if tokens >= 1_000 {
         let v = tokens as f64 / 1_000.0;
-        if tokens % 1_000 == 0 {
+        if tokens.is_multiple_of(1_000) {
             format!("{:.0}k", v)
         } else {
             format!("{:.1}k", v)

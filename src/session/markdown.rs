@@ -7,6 +7,9 @@ use syntect::highlighting::{FontStyle, Style as SyntectStyle, ThemeSet};
 use syntect::parsing::SyntaxSet;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+/// Inline style applier: takes raw text and returns a styled `Span`.
+type InlineStyleFn = Box<dyn Fn(&str) -> Span<'static>>;
+
 /// Raw-Markdown table → formatted table block renderer.
 /// Works on any pipe-delimited block regardless of line endings,
 /// separators, or surrounding content, so it handles the incomplete
@@ -75,7 +78,7 @@ struct MdRenderer {
     out: Vec<Line<'static>>,
     /// Inline style stack — pushed on `Start(Tag::Emphasis)` etc., popped
     /// on `End`.
-    style_stack: Vec<Box<dyn Fn(&str) -> Span<'static>>>,
+    style_stack: Vec<InlineStyleFn>,
     table: Option<TableState>,
     code_block: Option<CodeBlockState>,
     list_stack: Vec<ListState>,
@@ -239,8 +242,7 @@ impl MdRenderer {
     fn push_list_marker(&mut self) {
         self.flush_line();
         let depth = self.list_stack.len().saturating_sub(1);
-        self.spans
-            .push(Span::raw(format!("{}", "  ".repeat(depth))));
+        self.spans.push(Span::raw("  ".repeat(depth).to_string()));
         if let Some(list) = self.list_stack.last_mut() {
             if list.ordered {
                 let n = list.next;
@@ -307,7 +309,7 @@ impl MdRenderer {
                 Event::Code(t) => self.push_code(t.as_ref()),
                 Event::Html(t) => self.push_text(t.as_ref()),
                 Event::Rule => self.out.push(Line::from(Span::styled(
-                    "─".repeat(self.max_width.min(80).max(8)),
+                    "─".repeat(self.max_width.clamp(8, 80)),
                     Theme::dim(),
                 ))),
                 Event::TaskListMarker(checked) => {
@@ -847,10 +849,7 @@ let x = 1;
         let code_line = lines
             .iter()
             .find(|line| {
-                let joined: String = line.spans
-                    .iter()
-                    .map(|s| s.content.as_ref())
-                    .collect();
+                let joined: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
                 joined.contains("let x = 1;")
             })
             .expect("code content line missing");

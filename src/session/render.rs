@@ -1,6 +1,6 @@
 use super::{Role, Session, SkillRef, ThinkingSegment, ToolResultBlock};
 use crate::config::{ThinkingDisplay, ToolResultDisplay};
-use crate::theme::{active_colors, Theme};
+use crate::theme::active_colors;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
@@ -196,7 +196,11 @@ pub fn build_message_lines(session: &Session, msg_idx: usize, width: usize) -> V
         msg_lines.push(Line::from(""));
     }
 
-    let raw = if m.streaming { m.visible_content() } else { &m.content };
+    let raw = if m.streaming {
+        m.visible_content()
+    } else {
+        &m.content
+    };
 
     // Build sorted items (thinking segments + tools) for interleaved rendering
     enum RenderItemKind {
@@ -212,11 +216,8 @@ pub fn build_message_lines(session: &Session, msg_idx: usize, width: usize) -> V
 
     // Add thinking segments (only when display allows)
     if m.role == Role::Assistant {
-        let show_thinking = !m.thinking.trim().is_empty()
-            && match session.display {
-                ThinkingDisplay::Hide => false,
-                _ => true,
-            };
+        let show_thinking =
+            !m.thinking.trim().is_empty() && !matches!(session.display, ThinkingDisplay::Hide);
         if show_thinking {
             let segments = get_thinking_segments(m);
             for seg in &segments {
@@ -240,23 +241,31 @@ pub fn build_message_lines(session: &Session, msg_idx: usize, width: usize) -> V
 
     // Sort by offset; at same offset, tools before thinking
     items.sort_by(|a, b| {
-        a.offset.cmp(&b.offset).then_with(|| {
-            match (&a.kind, &b.kind) {
+        a.offset
+            .cmp(&b.offset)
+            .then_with(|| match (&a.kind, &b.kind) {
                 (RenderItemKind::Tool(_), RenderItemKind::Thinking(_)) => std::cmp::Ordering::Less,
-                (RenderItemKind::Thinking(_), RenderItemKind::Tool(_)) => std::cmp::Ordering::Greater,
+                (RenderItemKind::Thinking(_), RenderItemKind::Tool(_)) => {
+                    std::cmp::Ordering::Greater
+                }
                 _ => std::cmp::Ordering::Equal,
-            }
-        })
+            })
     });
 
     let mut cursor = 0usize;
     for item in items {
         let offset = item.offset;
-        if offset < cursor { continue; }
+        if offset < cursor {
+            continue;
+        }
 
         // Render content before this item
         if offset > cursor {
-            render_content_segment(&strip_legacy_markers(&raw[cursor..offset]), width, &mut msg_lines);
+            render_content_segment(
+                &strip_legacy_markers(&raw[cursor..offset]),
+                width,
+                &mut msg_lines,
+            );
             cursor = offset;
         }
 
@@ -268,7 +277,11 @@ pub fn build_message_lines(session: &Session, msg_idx: usize, width: usize) -> V
                     _ => false,
                 };
                 let colors = active_colors();
-                let bg = if m.streaming { colors.thinking_streaming_bg } else { colors.thinking_done_bg };
+                let bg = if m.streaming {
+                    colors.thinking_streaming_bg
+                } else {
+                    colors.thinking_done_bg
+                };
                 ensure_gap_before_block(&mut msg_lines);
                 let rows = build_thinking_block_rows(&content, visible, width, bg);
                 push_block_rows(&mut msg_lines, rows);
@@ -279,7 +292,9 @@ pub fn build_message_lines(session: &Session, msg_idx: usize, width: usize) -> V
                     if session.tool_display != ToolResultDisplay::Hide {
                         let t_vis = match session.tool_display {
                             ToolResultDisplay::Show => tool.visible || tool.running,
-                            ToolResultDisplay::ShowWhileStreaming => m.streaming || tool.visible || tool.running,
+                            ToolResultDisplay::ShowWhileStreaming => {
+                                m.streaming || tool.visible || tool.running
+                            }
                             _ => false,
                         };
                         ensure_gap_before_block(&mut msg_lines);
@@ -294,15 +309,7 @@ pub fn build_message_lines(session: &Session, msg_idx: usize, width: usize) -> V
     // Render remaining content
     render_content_segment(&strip_legacy_markers(&raw[cursor..]), width, &mut msg_lines);
 
-    if m.streaming {
-        if let Some(last) = msg_lines.last_mut() {
-            let mut s = last.spans.clone();
-            s.push(Span::styled("▌", Theme::cursor()));
-            *last = Line::from(s);
-        } else {
-            msg_lines.push(Line::from(Span::styled("▌", Theme::cursor())));
-        }
-    }
+    // streaming cursor removed — content is immediately visible
     msg_lines.push(Line::from(""));
 
     if m.role == Role::User {
@@ -314,16 +321,30 @@ pub fn build_message_lines(session: &Session, msg_idx: usize, width: usize) -> V
             for span in &mut line.spans {
                 span.style = span.style.bg(user_bg);
             }
-            let content_len: usize = line.spans.iter().map(|s| UnicodeWidthStr::width(s.content.as_ref())).sum();
+            let content_len: usize = line
+                .spans
+                .iter()
+                .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+                .sum();
             let pad = width.saturating_sub(content_len);
             if pad > 0 {
-                line.spans.push(Span::styled(" ".repeat(pad), Style::default().bg(user_bg)));
+                line.spans
+                    .push(Span::styled(" ".repeat(pad), Style::default().bg(user_bg)));
             }
         }
         // Blank line with background above content.
-        msg_lines.insert(0, Line::from(Span::styled(" ".repeat(width), Style::default().bg(user_bg))));
+        msg_lines.insert(
+            0,
+            Line::from(Span::styled(
+                " ".repeat(width),
+                Style::default().bg(user_bg),
+            )),
+        );
         // Blank line with background below content.
-        msg_lines.push(Line::from(Span::styled(" ".repeat(width), Style::default().bg(user_bg))));
+        msg_lines.push(Line::from(Span::styled(
+            " ".repeat(width),
+            Style::default().bg(user_bg),
+        )));
         // Re-add the spacer (no background) so there's a gap to the next message.
         if let Some(s) = spacer {
             msg_lines.push(s);
@@ -365,8 +386,9 @@ fn build_lines_viewport(
         // per-block caches populated by `Session::count_all_lines_with_width`.
         let mut msg_total: u32 = 1; // role prefix
         msg_total += m.line_count; // content
-        // Thinking segments
-        if m.role == super::Role::Assistant && !m.thinking.trim().is_empty()
+                                   // Thinking segments
+        if m.role == super::Role::Assistant
+            && !m.thinking.trim().is_empty()
             && session.display != crate::config::ThinkingDisplay::Hide
         {
             let expanded = (session.display == crate::config::ThinkingDisplay::Show
@@ -408,7 +430,8 @@ fn build_lines_viewport(
             let rendered = build_message_lines(session, msg_idx, width);
             // Compute the slice of this message's lines that overlap the viewport.
             let local_start = start_line.saturating_sub(global_line) as usize;
-            let local_end = (end_line.saturating_sub(global_line)).min(rendered.len() as u32) as usize;
+            let local_end =
+                (end_line.saturating_sub(global_line)).min(rendered.len() as u32) as usize;
             if local_start < local_end {
                 out.extend(rendered[local_start..local_end].iter().cloned());
             }
@@ -484,11 +507,7 @@ fn render_content_segment(text: &str, width: usize, out: &mut Vec<Line<'static>>
             // Concatenate all spans into a single string, wrap, then split
             // back into multiple lines preserving the first span's style
             // and emitting the rest as plain.
-            let combined: String = line
-                .spans
-                .iter()
-                .map(|s| s.content.as_ref())
-                .collect();
+            let combined: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
             for wrapped in wrap_line(&combined, inner_w) {
                 out.push(Line::from(vec![
                     Span::raw("   ".to_string()),
@@ -619,16 +638,27 @@ pub fn get_thinking_segments(m: &super::Message) -> Vec<ThinkingSegment> {
     vec![]
 }
 
-fn build_thinking_block_rows(content: &str, visible: bool, width: usize, bg: Color) -> Vec<Line<'static>> {
-    build_output_block_rows(
-        "thinking",
-        " Thinking ",
-        content.trim_end(),
-        "",
-        visible,
-        width,
-        bg,
-    )
+fn build_thinking_block_rows(
+    content: &str,
+    visible: bool,
+    width: usize,
+    bg: Color,
+) -> Vec<Line<'static>> {
+    let width = width.max(4);
+    let mut rows = Vec::new();
+    rows.push(border_with_label_line(width, " Thinking ", bg));
+    if visible {
+        let body_rows = output_row_lines(content.trim_end(), width, bg);
+        if body_rows.is_empty() {
+            rows.extend(box_row_lines("[no thinking content]", width, bg));
+        } else {
+            rows.extend(body_rows);
+        }
+    } else {
+        rows.extend(collapsed_output_lines(content.trim_end(), width, bg));
+    }
+    rows.push(border_line(width, bg));
+    rows
 }
 
 /// Build the boxed rows for a `[skill]` marker block. The block
@@ -646,12 +676,20 @@ fn build_skill_block_rows(skill: &SkillRef, width: usize) -> Vec<Line<'static>> 
     if let Some(args) = skill.args.as_deref().filter(|a| !a.trim().is_empty()) {
         rows.extend(box_row_lines(&format!("args: {args}"), width, bg));
     }
-    rows.extend(box_row_lines(&format!("context: {}", skill.context_path), width, bg));
+    rows.extend(box_row_lines(
+        &format!("context: {}", skill.context_path),
+        width,
+        bg,
+    ));
     rows.push(border_line(width, bg));
     rows
 }
 
-fn build_tool_block_rows(tool: &ToolResultBlock, visible: bool, width: usize) -> Vec<Line<'static>> {
+fn build_tool_block_rows(
+    tool: &ToolResultBlock,
+    visible: bool,
+    width: usize,
+) -> Vec<Line<'static>> {
     let (bg, fg) = block_colors_for_tool(tool);
 
     let mut rows: Vec<Line<'static>> = if tool.name == "write_file" {
@@ -668,8 +706,7 @@ fn build_tool_block_rows(tool: &ToolResultBlock, visible: bool, width: usize) ->
         }
     } else {
         let (output, footer) = tool_display_content(tool);
-        let title_highlighted = tool.name == "shell_command"
-            || tool.name == "command";
+        let title_highlighted = tool.name == "shell_command" || tool.name == "command";
         if title_highlighted {
             build_shell_command_rows(&tool.title, &output, &footer, visible, width, bg)
         } else {
@@ -816,10 +853,13 @@ fn collapsed_output_lines(output: &str, width: usize, bg: Color) -> Vec<Line<'st
 /// Override the background color on all spans to match the block bg.
 /// This ensures syntax-highlighted spans don't reset bg to terminal default.
 fn spans_with_bg(spans: &[Span<'static>], bg: Color) -> Vec<Span<'static>> {
-    spans.iter().map(|s| {
-        let style = s.style.clone().bg(bg);
-        Span::styled(s.content.clone(), style)
-    }).collect()
+    spans
+        .iter()
+        .map(|s| {
+            let style = s.style.bg(bg);
+            Span::styled(s.content.clone(), style)
+        })
+        .collect()
 }
 
 fn border_line(width: usize, bg: Color) -> Line<'static> {
@@ -827,7 +867,10 @@ fn border_line(width: usize, bg: Color) -> Line<'static> {
 }
 
 fn border_with_label_line(width: usize, label: &str, bg: Color) -> Line<'static> {
-    Line::from(Span::styled(border_with_label_str(width, label), dim_bg_style(bg)))
+    Line::from(Span::styled(
+        border_with_label_str(width, label),
+        dim_bg_style(bg),
+    ))
 }
 
 fn box_row_line(text: &str, width: usize, bg: Color) -> Line<'static> {
@@ -849,9 +892,7 @@ fn box_row_line_spans(spans: Vec<Span<'static>>, width: usize, bg: Color) -> Lin
         .map(|s| unicode_width::UnicodeWidthStr::width(s.content.as_ref()))
         .sum();
     let pad = width.saturating_sub(4).saturating_sub(content_width);
-    let mut all_spans = vec![
-        Span::styled("| ", dim_bg_style(bg)),
-    ];
+    let mut all_spans = vec![Span::styled("| ", dim_bg_style(bg))];
     all_spans.extend(spans);
     if pad > 0 {
         all_spans.push(Span::styled(" ".repeat(pad), bg_style(bg)));
@@ -950,10 +991,7 @@ fn tool_display_content(tool: &ToolResultBlock) -> (String, String) {
         }
     }
 
-    (
-        tool.content.trim_end().to_string(),
-        String::new(),
-    )
+    (tool.content.trim_end().to_string(), String::new())
 }
 
 fn interaction_tool_display(content: &str) -> Option<String> {
@@ -1046,7 +1084,9 @@ fn diff_box_row_line(diff_line: &str, width: usize, bg: Color) -> Line<'static> 
         Color::Reset
     };
 
-    let pad = width.saturating_sub(4).saturating_sub(visible_width(diff_line));
+    let pad = width
+        .saturating_sub(4)
+        .saturating_sub(visible_width(diff_line));
     let mut spans = vec![
         Span::styled("| ", dim_bg_style(bg)),
         Span::styled(diff_line.to_string(), Style::default().fg(fg).bg(bg)),
@@ -1106,17 +1146,32 @@ fn unified_diff_rows(old: &str, new: &str) -> Vec<String> {
         .max(3);
 
     let mut rows = Vec::new();
-    for idx in context_start..prefix {
-        rows.push(diff_context_line(idx + 1, old_lines[idx], number_width));
+    for (idx, line) in old_lines
+        .iter()
+        .enumerate()
+        .take(prefix)
+        .skip(context_start)
+    {
+        rows.push(diff_context_line(idx + 1, line, number_width));
     }
-    for idx in prefix..old_change_end {
-        rows.push(diff_removed_line(idx + 1, old_lines[idx], number_width));
+    for (idx, line) in old_lines
+        .iter()
+        .enumerate()
+        .take(old_change_end)
+        .skip(prefix)
+    {
+        rows.push(diff_removed_line(idx + 1, line, number_width));
     }
-    for idx in prefix..new_change_end {
-        rows.push(diff_added_line(new_lines[idx], number_width));
+    for line in new_lines.iter().take(new_change_end).skip(prefix) {
+        rows.push(diff_added_line(line, number_width));
     }
-    for idx in old_change_end..old_change_end.saturating_add(context_after) {
-        rows.push(diff_context_line(idx + 1, old_lines[idx], number_width));
+    for (idx, line) in old_lines
+        .iter()
+        .enumerate()
+        .take(old_change_end.saturating_add(context_after))
+        .skip(old_change_end)
+    {
+        rows.push(diff_context_line(idx + 1, line, number_width));
     }
     rows
 }
@@ -1259,8 +1314,10 @@ mod tests {
     }
 
     fn session_with_table_table() -> Session {
-        let mut s = Session::default();
-        s.display = ThinkingDisplay::Show;
+        let mut s = Session {
+            display: ThinkingDisplay::Show,
+            ..Session::default()
+        };
         s.push(Message::new(Role::User, "give me a table"));
         s.push(Message {
             role: Role::Assistant,
@@ -1364,7 +1421,10 @@ mod tests {
         // in the user message block should (a) have every span painted with
         // the user background color, and (b) sum to exactly `width` columns.
         let mut s = Session::default();
-        s.push(Message::new(Role::User, "hello\nworld\nlonger line that should wrap maybe"));
+        s.push(Message::new(
+            Role::User,
+            "hello\nworld\nlonger line that should wrap maybe",
+        ));
         let width = 30usize;
         let (lines, _toggles) = build_lines(&s, width);
 
@@ -1414,7 +1474,10 @@ mod tests {
     #[test]
     fn dump_user_message_buffer() {
         let mut s = Session::default();
-        s.push(Message::new(Role::User, "longer line that should wrap maybe"));
+        s.push(Message::new(
+            Role::User,
+            "longer line that should wrap maybe",
+        ));
         let area = Rect::new(0, 0, 30, 6);
         let mut buf = Buffer::empty(area);
         let mut toggles = Vec::new();
@@ -1429,7 +1492,13 @@ mod tests {
             let row: String = (0..area.width)
                 .map(|x| {
                     let bg = match buf.cell((x, y)).unwrap().style().bg {
-                        Some(c) => if c == user_bg { "U" } else { "?" },
+                        Some(c) => {
+                            if c == user_bg {
+                                "U"
+                            } else {
+                                "?"
+                            }
+                        }
                         None => ".",
                     };
                     bg.to_string()
@@ -1442,8 +1511,10 @@ mod tests {
     /// Create a session with `count` assistant messages, each `lines_per_msg`
     /// long. Used to benchmark viewport rendering at scale.
     fn large_session(count: usize, lines_per_msg: usize) -> Session {
-        let mut s = Session::default();
-        s.display = ThinkingDisplay::Show;
+        let mut s = Session {
+            display: ThinkingDisplay::Show,
+            ..Session::default()
+        };
         s.push(Message::new(Role::User, "start"));
         let line = "x".repeat(100);
         let content = (0..lines_per_msg)
@@ -1466,7 +1537,7 @@ mod tests {
                 content_version: 0,
             });
             if i % 2 == 0 {
-                s.push(Message::new(Role::User, &format!("prompt {}", i / 2)));
+                s.push(Message::new(Role::User, format!("prompt {}", i / 2)));
             }
         }
         s
@@ -1486,19 +1557,18 @@ mod tests {
         let start = total.saturating_sub(50);
         let end = total;
         let lines = build_lines_viewport(&s, width, start, end);
-        assert!(lines.len() <= 60, "viewport should produce ~50 lines, got {}", lines.len());
+        assert!(
+            lines.len() <= 60,
+            "viewport should produce ~50 lines, got {}",
+            lines.len()
+        );
 
         // Verify that the pre-warm cache is read correctly and messages
         // beyond the viewport are not rendered into the output.
-        let first_line_text: String = lines[0]
-            .spans
-            .iter()
-            .map(|s| s.content.as_ref())
-            .collect();
         // The last message contributes the last ~50 lines (its full content
         // plus spacers). The first rendered line should come from that message.
         assert!(
-            lines.len() > 0,
+            !lines.is_empty(),
             "viewport should have lines but was empty"
         );
     }
@@ -1564,8 +1634,10 @@ mod tests {
 
     #[test]
     fn streaming_cache_reuses_when_content_unchanged() {
-        let mut s = Session::default();
-        s.display = ThinkingDisplay::Show;
+        let mut s = Session {
+            display: ThinkingDisplay::Show,
+            ..Session::default()
+        };
         let mut m = Message::new(Role::Assistant, "hello streaming world");
         m.streaming = true;
         m.display_cursor = 5; // only "hello" visible
@@ -1603,10 +1675,7 @@ mod tests {
         use crate::session::{Message, Role, Session, ToolResultBlock};
         let mut s = Session::default();
         s.push(Message::new(Role::User, "short user message"));
-        let mut asst = Message::new(
-            Role::Assistant,
-            "I will run a command for you.",
-        );
+        let mut asst = Message::new(Role::Assistant, "I will run a command for you.");
         asst.tool_results.push(ToolResultBlock {
             name: "shell_command".to_string(),
             title: "$ echo hello".to_string(),
@@ -1633,7 +1702,7 @@ mod tests {
                     let bg = buf.cell((x, y)).unwrap().style().bg;
                     match bg {
                         Some(c) if c == user_bg => "U",
-                        Some(c) => "?",
+                        Some(_) => "?",
                         None => ".",
                     }
                 })

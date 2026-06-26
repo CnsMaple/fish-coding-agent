@@ -51,8 +51,7 @@ pub struct Skill {
 /// Returns `None` if `$HOME` is not set or the directory does not
 /// exist — silently: the user just gets no skill completions.
 fn skills_root() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))?;
+    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
     let root = PathBuf::from(home).join(SKILLS_DIR);
     if root.is_dir() {
         Some(root)
@@ -128,7 +127,10 @@ fn parse_skill_markdown(dir_name: &str, raw: &str) -> Skill {
     let mut description = String::new();
     let body;
 
-    if let Some(rest) = trimmed.strip_prefix("---\n").or_else(|| trimmed.strip_prefix("---\r\n")) {
+    if let Some(rest) = trimmed
+        .strip_prefix("---\n")
+        .or_else(|| trimmed.strip_prefix("---\r\n"))
+    {
         if let Some(end) = find_frontmatter_end(rest) {
             let header = &rest[..end];
             for line in header.lines() {

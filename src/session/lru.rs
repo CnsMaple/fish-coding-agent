@@ -56,9 +56,9 @@ impl<V> BoundedCache<V> {
         if self.capacity == 0 {
             return Some((key, value));
         }
-        if self.map.contains_key(&key) {
+        if let std::collections::hash_map::Entry::Occupied(mut e) = self.map.entry(key) {
             // Update in place; do not move in eviction order.
-            self.map.insert(key, value);
+            e.insert(value);
             return None;
         }
         let mut evicted = None;

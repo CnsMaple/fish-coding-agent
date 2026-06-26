@@ -327,16 +327,16 @@ impl Provider for CursorProvider {
             }) else {
                 break;
             };
-            let chunk = chunk
-                .map_err(|e| {
-                    let preview = if pending.len() > 5 {
-                        let len = u32::from_be_bytes([pending[1], pending[2], pending[3], pending[4]]) as usize;
-                        format!(" pending_frame_len={} pending_bytes={}", len, pending.len())
-                    } else {
-                        String::new()
-                    };
-                    ProviderError::Other(format!("Cursor response body decode: {e}{preview}"))
-                })?;
+            let chunk = chunk.map_err(|e| {
+                let preview = if pending.len() > 5 {
+                    let len = u32::from_be_bytes([pending[1], pending[2], pending[3], pending[4]])
+                        as usize;
+                    format!(" pending_frame_len={} pending_bytes={}", len, pending.len())
+                } else {
+                    String::new()
+                };
+                ProviderError::Other(format!("Cursor response body decode: {e}{preview}"))
+            })?;
             pending.extend_from_slice(&chunk);
             while pending.len() >= 5 {
                 let flags = pending[0];
@@ -458,7 +458,6 @@ fn build_request(req: ChatRequest) -> (AgentClientMessage, HashMap<Vec<u8>, Vec<
         action: Some(conversation_action::Action::UserMessageAction(
             UserMessageAction {
                 user_message: Some(user_message),
-                ..Default::default()
             },
         )),
     };
@@ -470,7 +469,6 @@ fn build_request(req: ChatRequest) -> (AgentClientMessage, HashMap<Vec<u8>, Vec<
         model_id: req.model.clone(),
         display_model_id: req.model.clone(),
         display_name: req.model,
-        ..Default::default()
     };
     let run = AgentRunRequest {
         conversation_state: Some(state),
@@ -1475,6 +1473,7 @@ struct ExecServerMessage {
 }
 mod exec_server_message {
     #[derive(Clone, PartialEq, prost::Oneof)]
+    #[allow(clippy::enum_variant_names)]
     pub enum Message {
         #[prost(message, tag = "2")]
         ShellArgs(super::ShellArgs),

@@ -176,8 +176,9 @@ pub struct Session {
     /// by the viewport-aware render path so we only re-parse Markdown
     /// for messages that actually intersect the visible window.
     #[serde(skip)]
-    pub message_lines_cache:
-        std::sync::Mutex<crate::session::lru::BoundedCache<crate::session::render::CachedMessageLines>>,
+    pub message_lines_cache: std::sync::Mutex<
+        crate::session::lru::BoundedCache<crate::session::render::CachedMessageLines>,
+    >,
     /// Cached total rendered line count across all messages. Width
     /// dependent — the cache is keyed by the viewport width and the
     /// per-block visibility state in `display` / `tool_display`. We
@@ -240,7 +241,9 @@ impl Session {
                 m.line_count = m.content.split('\n').count().max(1) as u32;
                 m.bump_version();
                 if let Ok(mut c) = self.line_cache.lock() {
-                    if id < c.len() { c[id] = None; }
+                    if id < c.len() {
+                        c[id] = None;
+                    }
                 }
                 // Streaming: invalidate any pre-computed block counts
                 // for this message so count_all_lines_* stays accurate.
@@ -252,12 +255,8 @@ impl Session {
                     t.cached_line_count_visible = None;
                     t.cached_line_count_collapsed = None;
                 }
-                // Keep cursor ~30 chars behind content for a progressive
-                // streaming reveal effect.  The tick handler advances it
-                // by 30 per 100ms tick so it steadily catches up.
-                if m.display_cursor < m.content.len() {
-                    m.display_cursor = m.content.len().saturating_sub(30);
-                }
+                // Keep cursor up-to-date so all content is immediately visible.
+                m.display_cursor = m.content.len();
                 true
             } else {
                 false
@@ -281,7 +280,9 @@ impl Session {
                     tool.cached_line_count_collapsed = None;
                     m.bump_version();
                     if let Ok(mut c) = self.line_cache.lock() {
-                        if id < c.len() { c[id] = None; }
+                        if id < c.len() {
+                            c[id] = None;
+                        }
                     }
                     self.invalidate_layout_cache();
                     return;
@@ -342,7 +343,9 @@ impl Session {
                     tool.cached_line_count_collapsed = None;
                     m.bump_version();
                     if let Ok(mut c) = self.line_cache.lock() {
-                        if id < c.len() { c[id] = None; }
+                        if id < c.len() {
+                            c[id] = None;
+                        }
                     }
                     self.invalidate_layout_cache();
                 }
@@ -448,7 +451,9 @@ impl Session {
                 m.line_count = m.content.split('\n').count().max(1) as u32;
                 m.bump_version();
                 if let Ok(mut c) = self.line_cache.lock() {
-                    if id < c.len() { c[id] = None; }
+                    if id < c.len() {
+                        c[id] = None;
+                    }
                 }
                 // Invalidate any per-segment / per-tool counts.
                 for seg in m.thinking_segments.iter_mut() {
@@ -553,24 +558,22 @@ impl Session {
                 for seg in m.thinking_segments.iter_mut() {
                     if expanded {
                         if seg.cached_line_count_expanded.is_none() {
-                            seg.cached_line_count_expanded = Some(
-                                crate::session::render::thinking_block_line_count(
+                            seg.cached_line_count_expanded =
+                                Some(crate::session::render::thinking_block_line_count(
                                     &seg.content,
                                     true,
                                     width as usize,
-                                ) as u32,
-                            );
+                                ) as u32);
                         }
                         n += seg.cached_line_count_expanded.unwrap_or(0);
                     } else {
                         if seg.cached_line_count_collapsed.is_none() {
-                            seg.cached_line_count_collapsed = Some(
-                                crate::session::render::thinking_block_line_count(
+                            seg.cached_line_count_collapsed =
+                                Some(crate::session::render::thinking_block_line_count(
                                     &seg.content,
                                     false,
                                     width as usize,
-                                ) as u32,
-                            );
+                                ) as u32);
                         }
                         n += seg.cached_line_count_collapsed.unwrap_or(0);
                     }
@@ -592,24 +595,22 @@ impl Session {
                     };
                     if t_vis {
                         if t.cached_line_count_visible.is_none() {
-                            t.cached_line_count_visible = Some(
-                                crate::session::render::tool_block_line_count(
+                            t.cached_line_count_visible =
+                                Some(crate::session::render::tool_block_line_count(
                                     t,
                                     true,
                                     width as usize,
-                                ) as u32,
-                            );
+                                ) as u32);
                         }
                         n += t.cached_line_count_visible.unwrap_or(0);
                     } else {
                         if t.cached_line_count_collapsed.is_none() {
-                            t.cached_line_count_collapsed = Some(
-                                crate::session::render::tool_block_line_count(
+                            t.cached_line_count_collapsed =
+                                Some(crate::session::render::tool_block_line_count(
                                     t,
                                     false,
                                     width as usize,
-                                ) as u32,
-                            );
+                                ) as u32);
                         }
                         n += t.cached_line_count_collapsed.unwrap_or(0);
                     }
@@ -660,7 +661,10 @@ impl Session {
         let inner_h = viewport_height.max(1) as u32;
         let lines_before = self.lines_before(msg_idx);
         let total = self.count_all_lines();
-        self.scroll = total.saturating_sub(inner_h).saturating_sub(lines_before).min(u16::MAX as u32) as u16;
+        self.scroll = total
+            .saturating_sub(inner_h)
+            .saturating_sub(lines_before)
+            .min(u16::MAX as u32) as u16;
     }
 
     /// Number of rendered lines from the top of the buffer up to (but

@@ -483,7 +483,7 @@ fn render_settings(
         SettingsLevel::ConfigForm(form) => {
             use crate::function::ConfigField;
             let fields = form.active_fields();
-            for (_i, f) in fields.iter().enumerate() {
+            for f in fields.iter() {
                 let focused = form.focused == *f;
                 let label = form.field_label(*f);
                 let value: Option<String> = match f {
@@ -976,7 +976,10 @@ fn render_session_rename(
     ]);
     buf.set_line(rows[0].x, rows[0].y, &line, rows[0].width);
     let cursor_x = rows[0].x + 8 + s.cursor.min(s.title.len()) as u16;
-    let hint = Line::from(Span::styled(" Enter: save | Ctrl+E: edit | Esc: close ", Theme::dim()));
+    let hint = Line::from(Span::styled(
+        " Enter: save | Ctrl+E: edit | Esc: close ",
+        Theme::dim(),
+    ));
     Paragraph::new(hint).render(rows[1], buf);
     Some((cursor_x.min(rows[0].right().saturating_sub(1)), rows[0].y))
 }
@@ -1040,9 +1043,7 @@ fn render_ask(area: Rect, buf: &mut Buffer, s: &crate::function::AskState) -> Op
         let y = rows[0].y + 2;
         // Convert input_cursor (byte offset) to a display column.
         let prefix_cols: u16 = 2; // "> "
-        let cursor_col = s.input[..s.input_cursor.min(s.input.len())]
-            .chars()
-            .count() as u16;
+        let cursor_col = s.input[..s.input_cursor.min(s.input.len())].chars().count() as u16;
         let x = (rows[0].x + prefix_cols + cursor_col).min(rows[0].right().saturating_sub(1));
         return Some((x, y));
     }
@@ -1092,11 +1093,7 @@ fn render_todo(area: Rect, buf: &mut Buffer, s: &crate::function::TodoState) -> 
     } else {
         " Up/Down: nav | Enter: cycle | Ctrl+D: below | Ctrl+U: above | Del: delete | Ctrl+E: edit | Esc: close "
     };
-    Paragraph::new(Line::from(Span::styled(
-        help,
-        Theme::dim(),
-    )))
-    .render(rows[1], buf);
+    Paragraph::new(Line::from(Span::styled(help, Theme::dim()))).render(rows[1], buf);
     None
 }
 
