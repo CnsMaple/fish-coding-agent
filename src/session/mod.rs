@@ -564,13 +564,41 @@ impl Session {
     /// Internal: walks the session, populates per-block line caches, and
     /// returns the total. Called by `count_all_lines_with_width` only
     /// when the cached value is stale.
+    ///
+    /// The line count must match what `build_message_lines` actually
+    /// produces:
+    ///   1. Content lines (post-markdown, cached by width).
+    ///   2. For each thinking block: the block rows + 1 trailing blank.
+    ///   3. For each tool block: the block rows + 1 trailing blank.
+    ///   4. If there is at least one block (thinking or tool) and the
+    ///      content is empty: 1 leading gap line.
+    ///   5. For user messages: 2 extra background-fill lines (one
+    ///      inserted above content, one pushed below content) so the
+    ///      user-bg block visually wraps the message.
+    ///   6. A final trailing blank line ("spacer").
+    ///
+    /// Previously this function (and `build_lines_viewport` /
+    /// `count_lines_estimate`) added 1 for a phantom "role prefix" line
+    /// that is never actually rendered, and never accounted for the
+    /// blank line `build_message_lines` pushes after every block.
+    /// That mismatch made the viewport's last 1–N lines of tool /
+    /// thinking blocks invisible (the bottom border of a long
+    /// write_file diff was the most common casualty).
     fn compute_total_lines(&mut self, width: u16) -> u32 {
         let mut n: u32 = 0;
         for m in &mut self.messages {
-            // Role prefix line.
-            n += 1;
+            // Content lines (post-markdown rendered count, cached by width).
+            // `m.line_count` is the raw newline count and would undercount
+            // anything that expands during markdown rendering (tables, fenced
+            // code blocks, long lines that wrap), which made the viewport
+            // scroll position land above the true bottom of such messages.
+            let content_lines = render_cached_content_lines(m, width);
+            n += content_lines;
 
-            // Thinking blocks.
+            // Thinking blocks: each contributes its rendered line count
+            // plus the trailing blank that `build_message_lines` pushes
+            // immediately after it.
+            let mut thinking_blocks: u32 = 0;
             let show_thinking = m.role == Role::Assistant
                 && !m.thinking.trim().is_empty()
                 && self.display != crate::config::ThinkingDisplay::Hide;
@@ -601,17 +629,14 @@ impl Session {
                         }
                         n += seg.cached_line_count_collapsed.unwrap_or(0);
                     }
+                    n += 1; // trailing blank after this thinking block
+                    thinking_blocks += 1;
                 }
             }
 
-            // Content lines (post-markdown rendered count, cached by width).
-            // `m.line_count` is the raw newline count and would undercount
-            // anything that expands during markdown rendering (tables, fenced
-            // code blocks, long lines that wrap), which made the viewport
-            // scroll position land above the true bottom of such messages.
-            n += render_cached_content_lines(m, width);
-
-            // Tool result blocks.
+            // Tool result blocks: each contributes its rendered line
+            // count plus the trailing blank.
+            let mut tool_blocks: u32 = 0;
             if self.tool_display != crate::config::ToolResultDisplay::Hide {
                 for t in m.tool_results.iter_mut() {
                     let t_vis = match self.tool_display {
@@ -642,10 +667,33 @@ impl Session {
                         }
                         n += t.cached_line_count_collapsed.unwrap_or(0);
                     }
+                    n += 1; // trailing blank after this tool block
+                    tool_blocks += 1;
                 }
             }
 
-            // Spacer.
+            // Leading gap: `ensure_gap_before_block` in
+            // `build_message_lines` always inserts a blank line
+            // immediately before the first block (thinking or tool)
+            // of a message — both when the content is empty (the
+            // message vec starts empty) and when it is non-empty
+            // (the content's final line is non-empty, so the gap is
+            // added on top). Without this +1, the count is off by
+            // 1 per message that has at least one block.
+            if thinking_blocks > 0 || tool_blocks > 0 {
+                n += 1;
+            }
+
+            // User messages get a background-filled padding line
+            // above and below the content so the user-bg block
+            // visually wraps the message (`build_message_lines`
+            // inserts one and pushes another after the content
+            // section). Assistant/system messages do not.
+            if m.role == Role::User {
+                n += 2;
+            }
+
+            // Spacer (final blank line emitted by `build_message_lines`).
             n += 1;
         }
         if !self.messages.is_empty() {
@@ -698,6 +746,10 @@ impl Session {
     /// Number of rendered lines from the top of the buffer up to (but
     /// not including) the message at `msg_idx`. Uses a fixed width of
     /// 120 columns to match the previous (pre-cache) behavior.
+    ///
+    /// Mirrors `compute_total_lines` so the per-block counts plus
+    /// trailing blanks plus leading gap plus spacer all add up to the
+    /// same number `build_message_lines` would produce.
     pub fn lines_before(&mut self, msg_idx: usize) -> u32 {
         // Make sure the per-block caches are populated so we can sum
         // without re-rendering.
@@ -707,9 +759,9 @@ impl Session {
             if i >= msg_idx {
                 break;
             }
-            // Role prefix.
-            n += 1;
-            // Thinking blocks.
+            let content_lines = read_cached_content_lines(m, 120);
+            n += content_lines;
+            let mut thinking_blocks: u32 = 0;
             let show = m.role == Role::Assistant
                 && !m.thinking.trim().is_empty()
                 && self.display != crate::config::ThinkingDisplay::Hide;
@@ -725,9 +777,11 @@ impl Session {
                         seg.cached_line_count_collapsed.unwrap_or(0)
                     };
                     n += v;
+                    n += 1; // trailing blank after thinking block
+                    thinking_blocks += 1;
                 }
             }
-            n += read_cached_content_lines(m, 120);
+            let mut tool_blocks: u32 = 0;
             if self.tool_display != crate::config::ToolResultDisplay::Hide {
                 for t in &m.tool_results {
                     let t_vis = match self.tool_display {
@@ -743,7 +797,15 @@ impl Session {
                         t.cached_line_count_collapsed.unwrap_or(0)
                     };
                     n += v;
+                    n += 1; // trailing blank after tool block
+                    tool_blocks += 1;
                 }
+            }
+            if thinking_blocks > 0 || tool_blocks > 0 {
+                n += 1; // leading gap
+            }
+            if m.role == Role::User {
+                n += 2; // user-bg padding above and below
             }
             n += 1; // spacer
         }

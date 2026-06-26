@@ -135,18 +135,33 @@ pub fn render(
 /// the session and adds `m.line_count` plus rough estimates for
 /// thinking/tools. Only invoked in the rare path where the cache
 /// hasn't been warmed by the caller.
+///
+/// Mirrors `Session::compute_total_lines`: no phantom role prefix,
+/// plus the per-block trailing blank and (when applicable) the
+/// leading gap and final spacer, so the rough estimate tracks the
+/// real structure of `build_message_lines`.
 fn count_lines_estimate(session: &Session) -> u32 {
     let mut n: u32 = 0;
     for m in &session.messages {
-        n += 1; // role prefix
+        let content_lines = read_cached_content_count(m);
+        n += content_lines;
+        let mut thinking_blocks: u32 = 0;
         if !m.thinking.trim().is_empty() {
             n += 1; // toggle line
             if m.thinking_visible {
                 n += m.thinking.matches('\n').count() as u32 + 1;
             }
+            n += 1; // trailing blank after the thinking block
+            thinking_blocks = 1;
         }
-        n += read_cached_content_count(m);
-        n += m.tool_results.len() as u32 * 2; // rough estimate
+        let tool_blocks = m.tool_results.len() as u32;
+        n += tool_blocks * 2; // rough per-block estimate + 1 trailing blank
+        if thinking_blocks > 0 || tool_blocks > 0 {
+            n += 1; // leading gap
+        }
+        if m.role == super::Role::User {
+            n += 2; // user-bg padding above and below
+        }
         n += 1; // spacer
     }
     if !session.messages.is_empty() {
@@ -160,14 +175,14 @@ fn count_lines_estimate(session: &Session) -> u32 {
 /// doesn't need an exact value, just something in the right
 /// ballpark. Will use the per-message cache if it's at the same
 /// width, otherwise computes live without writing back.
-fn read_cached_content_count(m: &super::Message) -> u32 {
+pub(crate) fn read_cached_content_count(m: &super::Message) -> u32 {
     read_cached_content_count_at(m, 120)
 }
 
 /// Read-only content line count at a specific width. Used by callers
 /// that have `&Message` (not `&mut Message`) and therefore cannot
 /// write to the cache — they accept the live-compute cost.
-fn read_cached_content_count_at(m: &super::Message, width: u16) -> u32 {
+pub(crate) fn read_cached_content_count_at(m: &super::Message, width: u16) -> u32 {
     if let Some(c) = m.cached_content_line_count {
         if c.width == width {
             return c.count;
@@ -405,9 +420,15 @@ fn build_lines_viewport(
 
         // Compute total rendered line count for this message, using the
         // per-block caches populated by `Session::count_all_lines_with_width`.
-        let mut msg_total: u32 = 1; // role prefix
-        msg_total += read_cached_content_count_at(m, width as u16); // content (post-markdown)
-                                   // Thinking segments
+        // Must match the structure produced by `build_message_lines` exactly:
+        //   content (post-markdown) + (thinking rows + 1 trailing blank per
+        //   segment) + (tool rows + 1 trailing blank per block) + 1 leading
+        //   gap if a block precedes empty content + 1 final spacer.
+        let content_lines = read_cached_content_count_at(m, width as u16);
+        let mut msg_total: u32 = content_lines;
+        let mut thinking_blocks: u32 = 0;
+        let mut tool_blocks: u32 = 0;
+
         if m.role == super::Role::Assistant
             && !m.thinking.trim().is_empty()
             && session.display != crate::config::ThinkingDisplay::Hide
@@ -422,9 +443,10 @@ fn build_lines_viewport(
                 } else {
                     msg_total += seg.cached_line_count_collapsed.unwrap_or(0);
                 }
+                msg_total += 1; // trailing blank
+                thinking_blocks += 1;
             }
         }
-        // Tool results
         if session.tool_display != crate::config::ToolResultDisplay::Hide {
             for t in &m.tool_results {
                 let t_vis = match session.tool_display {
@@ -439,9 +461,17 @@ fn build_lines_viewport(
                 } else {
                     msg_total += t.cached_line_count_collapsed.unwrap_or(0);
                 }
+                msg_total += 1; // trailing blank
+                tool_blocks += 1;
             }
         }
-        msg_total += 1; // spacer
+        if thinking_blocks > 0 || tool_blocks > 0 {
+            msg_total += 1; // leading gap
+        }
+        if m.role == super::Role::User {
+            msg_total += 2; // user-bg padding above and below
+        }
+        msg_total += 1; // final spacer
 
         let msg_end = global_line + msg_total;
 
@@ -1502,6 +1532,192 @@ mod content_line_count_tests {
     fn empty_content_returns_zero() {
         assert_eq!(content_line_count("", 80), 0);
         assert_eq!(content_line_count("   \n  \t  \n", 80), 0);
+    }
+}
+
+#[cfg(test)]
+mod tool_block_count_tests {
+    //! Regression tests for the tool-block / thinking-block line-count
+    //! fix. The bug: `compute_total_lines` (and its siblings) never
+    //! accounted for the blank line that `build_message_lines` pushes
+    //! after every thinking or tool block, and still added 1 for a
+    //! phantom "role prefix" line that is never rendered. For
+    //! messages with one or more blocks the count was off by 1 per
+    //! block — typically cutting the bottom border of a long
+    //! `write_file` diff (or the last `Wall: ...` row of a long shell
+    //! command) off the viewport.
+
+    use super::*;
+    use crate::session::{Message, Role, Session, ToolResultBlock};
+
+    fn lines_to_text(lines: &[Line]) -> String {
+        lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn make_write_file_tool() -> ToolResultBlock {
+        // A small but valid write_file_diff payload so the bottom
+        // border is part of the rendered block.
+        ToolResultBlock {
+            name: "write_file".to_string(),
+            title: "[tool:write_file]".to_string(),
+            content: serde_json::json!({
+                "kind": "write_file_diff",
+                "path": "src/demo.py",
+                "old": "alpha\nold_call()\nomega\n",
+                "new": "alpha\nnew_call()\nomega\n",
+            })
+            .to_string(),
+            content_offset: 0,
+            visible: true,
+            running: false,
+            cached_line_count_visible: None,
+            cached_line_count_collapsed: None,
+        }
+    }
+
+    fn make_shell_tool() -> ToolResultBlock {
+        ToolResultBlock {
+            name: "shell_command".to_string(),
+            title: "$ echo hi".to_string(),
+            content: serde_json::json!({
+                "ok": true,
+                "result": "exit_code: 0\nwall_secs: 0.01\ntimeout_secs: 300\nstdout:\nhi\n\nstderr:\n"
+            })
+            .to_string(),
+            content_offset: 0,
+            visible: true,
+            running: false,
+            cached_line_count_visible: None,
+            cached_line_count_collapsed: None,
+        }
+    }
+
+    fn session_with_tool(tool: ToolResultBlock, with_content: bool) -> Session {
+        let mut s = Session {
+            display: ThinkingDisplay::Show,
+            ..Session::default()
+        };
+        s.push(Message::new(Role::User, "do it"));
+        let mut asst = if with_content {
+            Message::new(
+                Role::Assistant,
+                "I'll handle that. Here is the result:\n\nbody text",
+            )
+        } else {
+            Message::new(Role::Assistant, "")
+        };
+        asst.tool_results.push(tool);
+        s.push(asst);
+        s
+    }
+
+    fn count_all(s: &mut Session, width: u16) -> u32 {
+        s.count_all_lines_with_width(width as usize)
+    }
+
+    fn lines_for_msg(s: &Session, msg_idx: usize, width: usize) -> Vec<Line<'static>> {
+        build_message_lines(s, msg_idx, width)
+    }
+
+    /// The exact total returned by `compute_total_lines` must equal
+    /// the number of lines `build_message_lines` produces for that
+    /// single message (because the message is the only thing in the
+    /// session apart from the prompt).
+    #[test]
+    fn tool_block_count_matches_rendered_no_content() {
+        let mut s = session_with_tool(make_write_file_tool(), false);
+        let width = 80u16;
+        let total = count_all(&mut s, width);
+        let user_lines = lines_for_msg(&s, 0, width as usize).len() as u32;
+        let asst_lines = lines_for_msg(&s, 1, width as usize).len() as u32;
+        // The `Session` adds 1 trailing gap line at the end.
+        let expected = user_lines + asst_lines + 1;
+        assert_eq!(
+            total, expected,
+            "total={total} but user={user_lines} + asst={asst_lines} + 1 trailing = {expected}"
+        );
+    }
+
+    #[test]
+    fn tool_block_count_matches_rendered_with_content() {
+        let mut s = session_with_tool(make_write_file_tool(), true);
+        let width = 80u16;
+        let total = count_all(&mut s, width);
+        let user_lines = lines_for_msg(&s, 0, width as usize).len() as u32;
+        let asst_lines = lines_for_msg(&s, 1, width as usize).len() as u32;
+        let expected = user_lines + asst_lines + 1;
+        assert_eq!(total, expected);
+    }
+
+    #[test]
+    fn two_tool_blocks_count_matches_rendered() {
+        let mut s = session_with_tool(make_write_file_tool(), false);
+        s.messages[1].tool_results.push(make_shell_tool());
+        let width = 80u16;
+        let total = count_all(&mut s, width);
+        let asst_lines = lines_for_msg(&s, 1, width as usize).len() as u32;
+        let user_lines = lines_for_msg(&s, 0, width as usize).len() as u32;
+        let expected = user_lines + asst_lines + 1;
+        assert_eq!(total, expected);
+    }
+
+    #[test]
+    fn thinking_plus_tool_count_matches_rendered() {
+        let mut s = session_with_tool(make_write_file_tool(), false);
+        // Add a thinking segment so the assistant has both kinds of
+        // blocks.
+        s.messages[1].thinking = "let me think about this".to_string();
+        s.messages[1].thinking_segments = vec![crate::session::ThinkingSegment {
+            offset: 0,
+            content: "let me think about this".to_string(),
+            cached_line_count_expanded: None,
+            cached_line_count_collapsed: None,
+        }];
+        s.messages[1].thinking_visible = true;
+        let width = 80u16;
+        let total = count_all(&mut s, width);
+        let asst_lines = lines_for_msg(&s, 1, width as usize).len() as u32;
+        let user_lines = lines_for_msg(&s, 0, width as usize).len() as u32;
+        let expected = user_lines + asst_lines + 1;
+        assert_eq!(total, expected);
+    }
+
+    /// The bug, narrowed to a single assertion: the very last line
+    /// emitted by `build_message_lines` for an assistant message that
+    /// contains a tool block must be the block's bottom border
+    /// (`+---…---+`), and the viewport slice built by
+    /// `build_lines_viewport` at the bottom of the session must
+    /// include that border.
+    #[test]
+    fn bottom_border_line_is_in_viewport() {
+        let mut s = session_with_tool(make_write_file_tool(), false);
+        let width: usize = 80;
+        // Warm the layout cache and force a render so the per-block
+        // counts are populated.
+        let total = count_all(&mut s, width as u16) as usize;
+        let asst_lines = lines_for_msg(&s, 1, width).len();
+        let user_lines = lines_for_msg(&s, 0, width).len();
+        // The viewport for the very last `inner_h` lines of the
+        // session must include the tool block's bottom border.
+        let inner_h = asst_lines + user_lines + 1; // big enough to show everything
+        let start = total.saturating_sub(inner_h);
+        let end = total;
+        let rendered = build_lines_viewport(&s, width, start as u32, end as u32);
+        let text = lines_to_text(&rendered);
+        let last_text_line = text.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("");
+        assert!(
+            last_text_line.starts_with('+') && last_text_line.contains("---"),
+            "last visible line should be the tool block's bottom border, got: {last_text_line:?}"
+        );
     }
 }
 

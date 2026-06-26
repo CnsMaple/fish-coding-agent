@@ -116,21 +116,21 @@ pub fn render(f: &mut Frame, app: &mut App) {
     // Walk the session in lockstep with the cached counts to record
     // toggle rows for messages whose first visible row is on-screen.
     // Re-uses the per-block cache populated above.
+    //
+    // `line_idx` mirrors `Session::compute_total_lines` /
+    // `build_lines_viewport` so toggle rows land on the exact screen
+    // row of the corresponding block's first line. That means:
+    //   - no phantom role prefix line
+    //   - +1 for each thinking/tool block (the trailing blank)
+    //   - +1 leading gap if a block appears with empty content
+    //   - +1 final spacer
     let mut line_idx: usize = 0;
     for (msg_idx, m) in app.session.messages.iter().enumerate() {
-        // Role prefix line.
-        if line_idx >= start && line_idx < end {
-            let screen_y = area.y + (line_idx - start) as u16;
-            // The first line of each message is reserved for the role
-            // prefix, not a thinking toggle; skip the record.
-            let _ = (screen_y, msg_idx);
-        }
-        line_idx += 1;
-
         // Thinking segments.
         let think_show = m.role == crate::session::Role::Assistant
             && !m.thinking.trim().is_empty()
             && app.config.thinking_display != crate::config::ThinkingDisplay::Hide;
+        let mut thinking_blocks: usize = 0;
         if think_show {
             let expanded = (app.config.thinking_display == crate::config::ThinkingDisplay::Show
                 && m.thinking_visible)
@@ -148,13 +148,20 @@ pub fn render(f: &mut Frame, app: &mut App) {
                     seg.cached_line_count_collapsed.unwrap_or(0) as usize
                 };
                 line_idx += lines;
+                line_idx += 1; // trailing blank after the thinking block
+                thinking_blocks += 1;
             }
         }
 
-        // Content (raw newline count from `line_count`).
-        line_idx += m.line_count as usize;
+        // Content (post-markdown rendered count, cached by width).
+        let content_lines = crate::session::render::read_cached_content_count_at(
+            m,
+            width_u16,
+        ) as usize;
+        line_idx += content_lines;
 
         // Tool result blocks.
+        let mut tool_blocks: usize = 0;
         if app.config.tool_display != crate::config::ToolResultDisplay::Hide {
             for (tool_idx, t) in m.tool_results.iter().enumerate() {
                 let t_vis = match app.config.tool_display {
@@ -174,10 +181,28 @@ pub fn render(f: &mut Frame, app: &mut App) {
                     app.tool_toggle_rows.push((screen_y, msg_idx, tool_idx));
                 }
                 line_idx += lines;
+                line_idx += 1; // trailing blank after the tool block
+                tool_blocks += 1;
             }
         }
 
-        // Spacer.
+        // Leading gap: always added before the first block (whether
+        // the content is empty or not — `ensure_gap_before_block`
+        // pushes a blank either way). Without this +1 the line
+        // indices for the thinking/tool toggles land one row too
+        // high and the click hit-boxes miss.
+        if thinking_blocks > 0 || tool_blocks > 0 {
+            line_idx += 1;
+        }
+
+        // User messages get a background-filled padding line above
+        // and below the content (`build_message_lines` inserts one
+        // and pushes another). Assistant/system messages do not.
+        if m.role == crate::session::Role::User {
+            line_idx += 2;
+        }
+
+        // Spacer (final blank).
         line_idx += 1;
     }
 
