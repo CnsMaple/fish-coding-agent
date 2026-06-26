@@ -269,6 +269,7 @@ pub fn build_message_lines(session: &Session, msg_idx: usize, width: usize) -> V
                 };
                 let colors = active_colors();
                 let bg = if m.streaming { colors.thinking_streaming_bg } else { colors.thinking_done_bg };
+                ensure_gap_before_block(&mut msg_lines);
                 let rows = build_thinking_block_rows(&content, visible, width, bg);
                 push_block_rows(&mut msg_lines, rows);
                 msg_lines.push(Line::from(""));
@@ -281,6 +282,7 @@ pub fn build_message_lines(session: &Session, msg_idx: usize, width: usize) -> V
                             ToolResultDisplay::ShowWhileStreaming => m.streaming || tool.visible || tool.running,
                             _ => false,
                         };
+                        ensure_gap_before_block(&mut msg_lines);
                         let rows = build_tool_block_rows(tool, t_vis, width);
                         push_block_rows(&mut msg_lines, rows);
                         msg_lines.push(Line::from(""));
@@ -372,7 +374,6 @@ fn build_lines_viewport(
                 || (session.display == crate::config::ThinkingDisplay::ShowWhileStreaming
                     && (m.streaming || m.thinking_visible));
             for seg in &m.thinking_segments {
-                msg_total += 1; // toggle line
                 if expanded {
                     msg_total += seg.cached_line_count_expanded.unwrap_or(0);
                 } else {
@@ -383,7 +384,6 @@ fn build_lines_viewport(
         // Tool results
         if session.tool_display != crate::config::ToolResultDisplay::Hide {
             for t in &m.tool_results {
-                msg_total += 1; // toggle line
                 let t_vis = match session.tool_display {
                     crate::config::ToolResultDisplay::Show => t.visible || t.running,
                     crate::config::ToolResultDisplay::ShowWhileStreaming => {
@@ -529,6 +529,12 @@ pub fn total_thinking_line_count(m: &super::Message, session: &Session, width: u
 
 pub fn tool_block_line_count(tool: &ToolResultBlock, visible: bool, width: usize) -> usize {
     build_tool_block_rows(tool, visible, width).len()
+}
+
+fn ensure_gap_before_block(msg_lines: &mut Vec<Line<'static>>) {
+    if msg_lines.last().map(|l| l.width() != 0).unwrap_or(true) {
+        msg_lines.push(Line::from(""));
+    }
 }
 
 fn push_block_rows(out: &mut Vec<Line<'static>>, rows: Vec<Line<'static>>) {
