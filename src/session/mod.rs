@@ -431,31 +431,53 @@ impl Session {
             if let Some(m) = self.messages.get_mut(id) {
                 m.thinking.push_str(chunk);
                 let content_len = m.content.len();
-                if let Some(last) = m.thinking_segments.last_mut() {
-                    if last.offset == content_len {
-                        // Same phase (content hasn't grown since last thinking) → extend
-                        last.content.push_str(chunk);
-                        last.cached_line_count_expanded = None;
-                        last.cached_line_count_collapsed = None;
-                    } else {
-                        // Content has grown → new phase, new segment
-                        m.thinking_segments.push(ThinkingSegment {
-                            offset: content_len,
-                            content: chunk.to_string(),
-                            cached_line_count_expanded: None,
-                            cached_line_count_collapsed: None,
-                        });
-                    }
-                } else {
-                    m.thinking_segments.push(ThinkingSegment {
-                        offset: content_len,
-                        content: chunk.to_string(),
-                        cached_line_count_expanded: None,
-                        cached_line_count_collapsed: None,
-                    });
-                }
+                // Always start a new thinking segment for each
+                // appended chunk. The provider (e.g. Anthropic)
+                // signals content-block boundaries via
+                // `Session::begin_thinking_segment` so deltas that
+                // belong to the same content block get appended to
+                // the same segment. We no longer merge by `offset ==
+                // content_len` because that collapsed every
+                // per-tool-call thinking event into a single block
+                // when the model interleaved thinking and tool_use
+                // without writing any text content in between
+                // (offset stayed 0 across all of them).
+                m.thinking_segments.push(ThinkingSegment {
+                    offset: content_len,
+                    content: chunk.to_string(),
+                    cached_line_count_expanded: None,
+                    cached_line_count_collapsed: None,
+                });
                 m.bump_version();
                 self.invalidate_layout_cache();
+            }
+        }
+    }
+
+    /// Mark that a fresh thinking content block has begun in the
+    /// upstream stream. The next `append_thinking_to_last` will
+    /// start a new segment; if there is an in-flight segment from
+    /// the previous content block, this call closes it off so the
+    /// renderer treats it as a complete block.
+    ///
+    /// The Anthropic provider fires this on every `content_block_start`
+    /// (for thinking, text, or tool_use) so deltas that belong to
+    /// the same content block land in the same segment while deltas
+    /// from different content blocks are kept separate.
+    pub fn begin_thinking_segment(&mut self) {
+        if let Some(id) = self.streaming_id {
+            if let Some(m) = self.messages.get_mut(id) {
+                // Drop the in-flight open segment if it is empty
+                // (it was created by a previous content_block_start
+                // and has not received any deltas yet). Otherwise
+                // leave it alone — `append_thinking_to_last` will
+                // push a fresh segment for the new block's deltas
+                // and the renderer will keep the closed one as is.
+                if let Some(last) = m.thinking_segments.last() {
+                    if last.content.is_empty() {
+                        m.thinking_segments.pop();
+                    }
+                }
             }
         }
     }
@@ -600,7 +622,7 @@ impl Session {
             // immediately after it.
             let mut thinking_blocks: u32 = 0;
             let show_thinking = m.role == Role::Assistant
-                && !m.thinking.trim().is_empty()
+                && crate::session::render::message_has_thinking(m)
                 && self.display != crate::config::ThinkingDisplay::Hide;
             if show_thinking {
                 let expanded = (self.display == crate::config::ThinkingDisplay::Show
@@ -763,7 +785,7 @@ impl Session {
             n += content_lines;
             let mut thinking_blocks: u32 = 0;
             let show = m.role == Role::Assistant
-                && !m.thinking.trim().is_empty()
+                && crate::session::render::message_has_thinking(m)
                 && self.display != crate::config::ThinkingDisplay::Hide;
             if show {
                 let expanded = (self.display == crate::config::ThinkingDisplay::Show

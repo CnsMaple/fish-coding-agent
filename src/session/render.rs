@@ -146,7 +146,7 @@ fn count_lines_estimate(session: &Session) -> u32 {
         let content_lines = read_cached_content_count(m);
         n += content_lines;
         let mut thinking_blocks: u32 = 0;
-        if !m.thinking.trim().is_empty() {
+        if message_has_thinking(m) {
             n += 1; // toggle line
             if m.thinking_visible {
                 n += m.thinking.matches('\n').count() as u32 + 1;
@@ -177,6 +177,21 @@ fn count_lines_estimate(session: &Session) -> u32 {
 /// width, otherwise computes live without writing back.
 pub(crate) fn read_cached_content_count(m: &super::Message) -> u32 {
     read_cached_content_count_at(m, 120)
+}
+
+/// True if the message has any thinking content (either the legacy
+/// `thinking` field or any segment in `thinking_segments`). Use this
+/// instead of checking `m.thinking.trim().is_empty()` because
+/// `append_thinking_to_last` no longer mutates `m.thinking`; content
+/// lives entirely in `thinking_segments` after the per-block
+/// non-merging fix.
+pub(crate) fn message_has_thinking(m: &super::Message) -> bool {
+    if !m.thinking.trim().is_empty() {
+        return true;
+    }
+    m.thinking_segments
+        .iter()
+        .any(|s| !s.content.trim().is_empty())
 }
 
 /// Read-only content line count at a specific width. Used by callers
@@ -252,10 +267,11 @@ pub fn build_message_lines(session: &Session, msg_idx: usize, width: usize) -> V
 
     // Add thinking segments (only when display allows)
     if m.role == Role::Assistant {
-        let show_thinking =
-            !m.thinking.trim().is_empty() && !matches!(session.display, ThinkingDisplay::Hide);
-        if show_thinking {
-            let segments = get_thinking_segments(m);
+        let segments = get_thinking_segments(m);
+        let has_thinking_content = segments
+            .iter()
+            .any(|s| !s.content.trim().is_empty());
+        if has_thinking_content && !matches!(session.display, ThinkingDisplay::Hide) {
             for seg in &segments {
                 let offset = clamp_char_boundary(raw, seg.offset.min(raw.len()));
                 items.push(RenderItem {
@@ -275,13 +291,22 @@ pub fn build_message_lines(session: &Session, msg_idx: usize, width: usize) -> V
         });
     }
 
-    // Sort by offset; at same offset, tools before thinking
+    // Sort by offset; at the same offset, thinking comes before
+    // tools. This matches the natural order of the model stream:
+    // the model typically thinks first, then issues a tool call.
+    // Using a stable sort + the natural insertion order of the
+    // items (thinking segments first, then tools, each in
+    // creation order) means multiple thinking events that share an
+    // offset with a tool are still rendered in their natural
+    // grouping.
     items.sort_by(|a, b| {
         a.offset
             .cmp(&b.offset)
             .then_with(|| match (&a.kind, &b.kind) {
-                (RenderItemKind::Tool(_), RenderItemKind::Thinking(_)) => std::cmp::Ordering::Less,
                 (RenderItemKind::Thinking(_), RenderItemKind::Tool(_)) => {
+                    std::cmp::Ordering::Less
+                }
+                (RenderItemKind::Tool(_), RenderItemKind::Thinking(_)) => {
                     std::cmp::Ordering::Greater
                 }
                 _ => std::cmp::Ordering::Equal,
@@ -430,7 +455,7 @@ fn build_lines_viewport(
         let mut tool_blocks: u32 = 0;
 
         if m.role == super::Role::Assistant
-            && !m.thinking.trim().is_empty()
+            && message_has_thinking(m)
             && session.display != crate::config::ThinkingDisplay::Hide
         {
             let expanded = (session.display == crate::config::ThinkingDisplay::Show
@@ -579,7 +604,7 @@ pub fn thinking_block_line_count(content: &str, visible: bool, width: usize) -> 
 /// Count total thinking lines across all segments.
 pub fn total_thinking_line_count(m: &super::Message, session: &Session, width: usize) -> usize {
     let show = m.role == super::Role::Assistant
-        && !m.thinking.trim().is_empty()
+        && message_has_thinking(m)
         && session.display != crate::config::ThinkingDisplay::Hide;
     if !show {
         return 0;
@@ -1719,6 +1744,117 @@ mod tool_block_count_tests {
             "last visible line should be the tool block's bottom border, got: {last_text_line:?}"
         );
     }
+
+    /// Regression test for the "all thinking collapsed into one
+    /// block" bug. The model streams thinking in multiple events
+    /// (one per tool call) but they all share the same content
+    /// offset because the model wrote no text between them, so the
+    /// old code merged them via `offset == content_len` into a
+    /// single segment. After the fix, every thinking delta should
+    /// land in its own segment.
+    #[test]
+    fn thinking_deltas_with_same_offset_stay_separate() {
+        let mut s = Session::default();
+        s.push(Message::new(Role::User, "do it"));
+        let mut asst = Message::new(Role::Assistant, "");
+        // Simulate the model streaming three thinking events with
+        // no text content written in between (offset stays 0).
+        asst.thinking = "abc".to_string();
+        asst.thinking_segments = vec![
+            crate::session::ThinkingSegment {
+                offset: 0,
+                content: "first thought ".to_string(),
+                cached_line_count_expanded: None,
+                cached_line_count_collapsed: None,
+            },
+            crate::session::ThinkingSegment {
+                offset: 0,
+                content: "second thought ".to_string(),
+                cached_line_count_expanded: None,
+                cached_line_count_collapsed: None,
+            },
+            crate::session::ThinkingSegment {
+                offset: 0,
+                content: "third thought".to_string(),
+                cached_line_count_expanded: None,
+                cached_line_count_collapsed: None,
+            },
+        ];
+        asst.thinking_visible = true;
+        s.push(asst);
+        let width = 80;
+        let rendered = build_message_lines(&s, 1, width);
+        let text = lines_to_text(&rendered);
+        // Three thinking blocks → three "Thinking" labels in the
+        // rendered output.
+        let thinking_count = text.matches("Thinking").count();
+        assert!(
+            thinking_count >= 3,
+            "expected 3 separate Thinking blocks, got {thinking_count}. Rendered:\n{text}"
+        );
+    }
+
+    /// The thinking block must appear BEFORE the tool block in the
+    /// rendered output, matching the natural model order
+    /// (think → tool → think → tool …). Before the fix, tools
+    /// were sorted first so all thinking landed after the last
+    /// tool.
+    #[test]
+    fn thinking_block_appears_before_tool_block() {
+        let mut s = Session::default();
+        s.push(Message::new(Role::User, "do it"));
+        let mut asst = Message::new(Role::Assistant, "");
+        asst.thinking_segments = vec![crate::session::ThinkingSegment {
+            offset: 0,
+            content: "plan".to_string(),
+            cached_line_count_expanded: None,
+            cached_line_count_collapsed: None,
+        }];
+        asst.thinking_visible = true;
+        asst.tool_results.push(make_write_file_tool());
+        s.push(asst);
+        let width = 80;
+        let rendered = build_message_lines(&s, 1, width);
+        let text = lines_to_text(&rendered);
+        let think_idx = text.find("Thinking").expect("Thinking block missing");
+        let tool_idx = text
+            .find("Edit:")
+            .or_else(|| text.find("Output"))
+            .expect("tool block missing");
+        assert!(
+            think_idx < tool_idx,
+            "Thinking block must appear before the tool block, but thinking at {think_idx} came after tool at {tool_idx}.\nRendered:\n{text}"
+        );
+    }
+
+    /// `begin_thinking_segment` should drop an in-flight empty
+    /// segment so the next `append_thinking_to_last` lands in a
+    /// fresh block rather than the just-opened-but-unused one.
+    #[test]
+    fn begin_thinking_segment_drops_empty_inflight_segment() {
+        let mut s = Session::default();
+        s.push(Message::new(Role::User, "go"));
+        let mut asst = Message::new(Role::Assistant, "");
+        asst.streaming = true;
+        s.push(asst.clone());
+        s.streaming_id = Some(1);
+        // Simulate: a content_block_start fired before any delta
+        // arrived, leaving an empty in-flight segment.
+        asst.thinking_segments.push(crate::session::ThinkingSegment {
+            offset: 0,
+            content: String::new(),
+            cached_line_count_expanded: None,
+            cached_line_count_collapsed: None,
+        });
+        s.messages[1] = asst;
+        assert_eq!(s.messages[1].thinking_segments.len(), 1);
+        s.begin_thinking_segment();
+        assert_eq!(
+            s.messages[1].thinking_segments.len(),
+            0,
+            "begin_thinking_segment should drop the in-flight empty segment"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -2138,5 +2274,53 @@ mod tests {
                 .collect();
             eprintln!("y={y:2} |{}| {}", chars, row);
         }
+    }
+
+    /// Diagnostic for the bottom-cut-off bug: a long assistant
+    /// message with a markdown table + bullet list. Render the
+    /// message and dump the buffer so we can see exactly which
+    /// lines the renderer produces vs. what the count says.
+    #[test]
+    fn dump_assistant_table_with_bullets() {
+        use crate::session::{Message, Role, Session};
+        let mut s = Session::default();
+        s.push(Message::new(
+            Role::User,
+            "all steps done. summarize the commit",
+        ));
+        let content = "所有步骤已成功完成。 ✅\n\n\
+                       执行总结\n\n\
+                       | 步骤 | 命令 | 结果 |\n\
+                       | --- | --- | --- |\n\
+                       | 1 | git status | 3个文件已修改 |\n\
+                       | 2 | git add . | 暂存成功 |\n\
+                       | 3 | Conventional Commit 构造 | fix(session): align viewport |\n\
+                       | 4 | git commit -m \"...\" | 提交成功, hash cc8f35e |\n\
+                       | 5 | git push | 推送成功 |\n\n\
+                       Commit Message 说明\n\n\
+                       - Type: fix — 修复 bug (viewport 末尾 1~N 行被截断)\n\
+                       - Scope: session — 影响 session 模块的 line-count 计算\n\
+                       - Description: 简短说明核心改动 (让 viewport 行数与 build_message_lines 输出一致)\n\
+                       - Body: 详细说明原因 (遗漏 per-block trailing blank、多了 phantom role prefix) 、新规则、测试覆盖";
+        let asst = Message::new(Role::Assistant, content);
+        s.push(asst);
+
+        let width: u16 = 130;
+        let total = s.count_all_lines_with_width(width as usize);
+        let asst_lines =
+            crate::session::render::build_message_lines(&s, 1, width as usize);
+        let user_lines =
+            crate::session::render::build_message_lines(&s, 0, width as usize);
+        eprintln!(
+            "counted total={total}, asst rendered={}, user rendered={}, asst+user+1trailing = {}",
+            asst_lines.len(),
+            user_lines.len(),
+            asst_lines.len() + user_lines.len() + 1
+        );
+        assert_eq!(
+            total as usize,
+            asst_lines.len() + user_lines.len() + 1,
+            "viewport line count must match the rendered output line for line"
+        );
     }
 }

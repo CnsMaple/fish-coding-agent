@@ -115,6 +115,13 @@ impl Provider for OpenAiProvider {
 
         let mut final_usage: Option<Usage> = None;
         let mut tool_calls: Vec<ToolCall> = Vec::new();
+        // Tracks the kind of the most recent block we emitted a
+        // delta for ("thinking" or "text") so we can fire a
+        // `ContentBlockStart` event when the upstream switches
+        // between reasoning and final-answer deltas. Without this
+        // the session would merge every reasoning segment that
+        // shares the same content offset into a single block.
+        let mut last_block_kind: Option<&'static str> = None;
 
         let stream_result = drive_sse_stream(resp, STREAM_IDLE_TIMEOUT, |ev| {
             if ev.data == "[DONE]" {
@@ -137,6 +144,14 @@ impl Provider for OpenAiProvider {
             if let Some(delta) = v.pointer("/choices/0/delta/content") {
                 if let Some(s) = delta.as_str() {
                     if !s.is_empty() {
+                        // Transition: reasoning → text. Close off
+                        // the in-flight thinking segment so the
+                        // session starts a fresh one on the next
+                        // reasoning delta.
+                        if last_block_kind.as_deref() == Some("thinking") {
+                            let _ = tx.send(ChatEvent::ContentBlockStart("text".to_string()));
+                        }
+                        last_block_kind = Some("text");
                         let _ = tx.send(ChatEvent::Delta(s.to_string()));
                     }
                 }
@@ -144,6 +159,10 @@ impl Provider for OpenAiProvider {
             if let Some(reasoning) = v.pointer("/choices/0/delta/reasoning_content") {
                 if let Some(s) = reasoning.as_str() {
                     if !s.is_empty() {
+                        if last_block_kind.as_deref() == Some("text") {
+                            let _ = tx.send(ChatEvent::ContentBlockStart("thinking".to_string()));
+                        }
+                        last_block_kind = Some("thinking");
                         let _ = tx.send(ChatEvent::ThinkingDelta(s.to_string()));
                     }
                 }

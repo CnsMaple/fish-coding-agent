@@ -683,6 +683,9 @@ pub fn send_message(app: &mut App, user_msg: Message) {
                             let _ = tx.send(crate::event::AppMsg::ChatError(e));
                             return;
                         }
+                        crate::providers::ChatEvent::ContentBlockStart(kind) => {
+                            let _ = tx.send(crate::event::AppMsg::ChatContentBlockStart(kind));
+                        }
                     }
                 }
 

@@ -138,9 +138,20 @@ impl Provider for AnthropicProvider {
             };
             match kind {
                 "content_block_start" => {
-                    if v.pointer("/content_block/type").and_then(|t| t.as_str()) == Some("tool_use")
-                    {
+                    let block_type = v
+                        .pointer("/content_block/type")
+                        .and_then(|t| t.as_str())
+                        .unwrap_or("");
+                    if block_type == "tool_use" {
                         merge_tool_use_start(&mut tool_calls, &v);
+                    }
+                    // Notify the session so it can close off the
+                    // in-flight thinking segment. This is the
+                    // signal that makes per-tool-call thinking
+                    // blocks render as separate boxes rather than
+                    // collapsing into a single block.
+                    if !block_type.is_empty() {
+                        let _ = tx.send(ChatEvent::ContentBlockStart(block_type.to_string()));
                     }
                 }
                 "content_block_delta" => {

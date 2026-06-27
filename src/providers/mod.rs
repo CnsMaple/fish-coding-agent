@@ -22,6 +22,13 @@ pub struct Usage {
 pub enum ChatEvent {
     Delta(String),
     ThinkingDelta(String),
+    /// Fired by the provider when a new content block begins in the
+    /// upstream stream (Anthropic `content_block_start`,
+    /// OpenAI/Cursor reasoning→text transitions, etc.). The session
+    /// uses this to close off the in-flight thinking segment so the
+    /// next `ThinkingDelta` lands in a fresh block. The string is
+    /// the block kind ("thinking", "text", "tool_use", ...).
+    ContentBlockStart(String),
     Debug(String),
     ToolResult {
         name: String,
@@ -40,6 +47,9 @@ impl ChatEvent {
         match self {
             ChatEvent::Delta(s) => crate::event::AppMsg::ChatDelta(s),
             ChatEvent::ThinkingDelta(s) => crate::event::AppMsg::ChatThinkingDelta(s),
+            ChatEvent::ContentBlockStart(kind) => {
+                crate::event::AppMsg::ChatContentBlockStart(kind)
+            }
             ChatEvent::Debug(s) => crate::event::AppMsg::ChatDebug(s),
             ChatEvent::ToolResult {
                 name,

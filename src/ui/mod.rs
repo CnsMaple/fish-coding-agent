@@ -128,7 +128,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     for (msg_idx, m) in app.session.messages.iter().enumerate() {
         // Thinking segments.
         let think_show = m.role == crate::session::Role::Assistant
-            && !m.thinking.trim().is_empty()
+            && crate::session::render::message_has_thinking(m)
             && app.config.thinking_display != crate::config::ThinkingDisplay::Hide;
         let mut thinking_blocks: usize = 0;
         if think_show {

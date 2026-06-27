@@ -44,6 +44,13 @@ pub enum AppMsg {
     ChatDelta(String),
     /// A piece of thinking delta (Anthropic "thinking_delta") arrived.
     ChatThinkingDelta(String),
+    /// Provider signals a new content block has started in the upstream
+    /// stream (Anthropic `content_block_start` for thinking/text/
+    /// tool_use, or a reasoning→text transition in OpenAI / Cursor).
+    /// The session closes off the in-flight thinking segment so the
+    /// next thinking delta lands in a fresh block. The string is the
+    /// block kind ("thinking", "text", "tool_use", ...).
+    ChatContentBlockStart(String),
     /// Provider-level debug event, shown only in notifications.
     ChatDebug(String),
     /// A structured tool result arrived, to be rendered as a collapsible block.
@@ -476,6 +483,13 @@ fn handle_msg(msg: AppMsg, app: &mut App) {
         AppMsg::ChatThinkingDelta(s) => {
             note_model_output(app, &s);
             app.session.append_thinking_to_last(&s);
+        }
+        AppMsg::ChatContentBlockStart(_) => {
+            // A new content block has begun in the upstream stream;
+            // close off the in-flight thinking segment so the
+            // renderer treats it as a complete block and the next
+            // thinking delta lands in a fresh one.
+            app.session.begin_thinking_segment();
         }
         AppMsg::ChatDebug(s) => {
             app.notify(crate::function::notifications::ToastLevel::Info, s);

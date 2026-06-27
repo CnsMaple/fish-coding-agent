@@ -309,6 +309,13 @@ impl Provider for CursorProvider {
         let mut stream = resp.bytes_stream();
         let mut pending = Vec::<u8>::new();
         let mut usage = Usage::default();
+        // Tracks the kind of the most recent block we emitted a
+        // delta for so the provider can fire a `ContentBlockStart`
+        // event when the upstream switches between thinking and
+        // text deltas. Without this the session would merge every
+        // reasoning segment that shares the same content offset
+        // into a single block.
+        let mut last_block_kind: Option<&'static str> = None;
         loop {
             let Some(chunk) = (match tokio::time::timeout(
                 Duration::from_secs(CURSOR_STREAM_TIMEOUT_SECS),
@@ -352,8 +359,15 @@ impl Provider for CursorProvider {
                     continue;
                 }
                 if let Ok(server) = AgentServerMessage::decode(msg.as_slice()) {
-                    match handle_server_message(server, &tx, &mut usage, &body_tx, &mut blob_store)
-                        .await?
+                    match handle_server_message(
+                        server,
+                        &tx,
+                        &mut usage,
+                        &body_tx,
+                        &mut blob_store,
+                        &mut last_block_kind,
+                    )
+                    .await?
                     {
                         CursorServerOutcome::Done => {
                             cursor_debug(&tx, "finish: done event");
@@ -508,31 +522,40 @@ async fn handle_server_message(
     usage: &mut Usage,
     body_tx: &tokio::sync::mpsc::Sender<Vec<u8>>,
     blob_store: &mut HashMap<Vec<u8>, Vec<u8>>,
+    last_block_kind: &mut Option<&'static str>,
 ) -> Result<CursorServerOutcome> {
-    match msg.message {
-        Some(agent_server_message::Message::InteractionUpdate(update)) => match update.message {
-            Some(interaction_update::Message::TextDelta(v)) => {
-                if !v.text.is_empty() {
-                    cursor_debug(
-                        tx,
-                        format!("event text_delta chars={}", v.text.chars().count()),
-                    );
-                    let _ = tx.send(ChatEvent::Delta(v.text));
-                    return Ok(CursorServerOutcome::TextOutput);
+        match msg.message {
+            Some(agent_server_message::Message::InteractionUpdate(update)) => match update.message {
+                Some(interaction_update::Message::TextDelta(v)) => {
+                    if !v.text.is_empty() {
+                        cursor_debug(
+                            tx,
+                            format!("event text_delta chars={}", v.text.chars().count()),
+                        );
+                        if *last_block_kind == Some("thinking") {
+                            let _ = tx.send(ChatEvent::ContentBlockStart("text".to_string()));
+                        }
+                        *last_block_kind = Some("text");
+                        let _ = tx.send(ChatEvent::Delta(v.text));
+                        return Ok(CursorServerOutcome::TextOutput);
+                    }
+                    Ok(CursorServerOutcome::Continue)
                 }
-                Ok(CursorServerOutcome::Continue)
-            }
-            Some(interaction_update::Message::ThinkingDelta(v)) => {
-                if !v.text.is_empty() {
-                    cursor_debug(
-                        tx,
-                        format!("event thinking_delta chars={}", v.text.chars().count()),
-                    );
-                    let _ = tx.send(ChatEvent::ThinkingDelta(v.text));
-                    return Ok(CursorServerOutcome::Meaningful);
+                Some(interaction_update::Message::ThinkingDelta(v)) => {
+                    if !v.text.is_empty() {
+                        cursor_debug(
+                            tx,
+                            format!("event thinking_delta chars={}", v.text.chars().count()),
+                        );
+                        if *last_block_kind == Some("text") {
+                            let _ = tx.send(ChatEvent::ContentBlockStart("thinking".to_string()));
+                        }
+                        *last_block_kind = Some("thinking");
+                        let _ = tx.send(ChatEvent::ThinkingDelta(v.text));
+                        return Ok(CursorServerOutcome::Meaningful);
+                    }
+                    Ok(CursorServerOutcome::Continue)
                 }
-                Ok(CursorServerOutcome::Continue)
-            }
             Some(interaction_update::Message::TokenDelta(v)) => {
                 cursor_debug(tx, format!("event token_delta tokens={}", v.tokens));
                 usage.output_tokens = usage.output_tokens.saturating_add(v.tokens.max(0) as u64);
