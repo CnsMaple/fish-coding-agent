@@ -9,8 +9,6 @@ use ratatui::widgets::Paragraph;
 use ratatui::widgets::Widget;
 use unicode_width::UnicodeWidthStr;
 
-const COLLAPSED_PREVIEW_LINES: usize = 10;
-
 /// LRU cache entry for a fully rendered message. Validity is checked
 /// against `Message.content_version` so changing one message does not
 /// invalidate cached render output for any other message.
@@ -344,22 +342,39 @@ pub fn build_message_lines(session: &Session, msg_idx: usize, width: usize) -> V
                     colors.thinking_done_bg
                 };
                 ensure_gap_before_block(&mut msg_lines);
-                let rows = build_thinking_block_rows(&content, visible, width, bg);
+                let rows = build_thinking_block_rows(
+                    &content,
+                    visible,
+                    session.tool_preview_lines,
+                    width,
+                    bg,
+                );
                 push_block_rows(&mut msg_lines, rows);
                 msg_lines.push(Line::from(""));
             }
             RenderItemKind::Tool(ti) => {
                 if let Some(tool) = m.tool_results.get(ti) {
                     if session.tool_display != ToolResultDisplay::Hide {
+                        // Same logic as `build_lines_viewport`:
+                        // `tool.running` no longer forces expansion
+                        // — the preview form is used during streaming
+                        // and the pending background colour alone
+                        // signals "in flight". The user expands with
+                        // Ctrl+O.
                         let t_vis = match session.tool_display {
-                            ToolResultDisplay::Show => tool.visible || tool.running,
+                            ToolResultDisplay::Show => tool.visible,
                             ToolResultDisplay::ShowWhileStreaming => {
-                                m.streaming || tool.visible || tool.running
+                                m.streaming || tool.visible
                             }
                             _ => false,
                         };
                         ensure_gap_before_block(&mut msg_lines);
-                        let rows = build_tool_block_rows(tool, t_vis, width);
+                        let rows = build_tool_block_rows(
+                            tool,
+                            t_vis,
+                            session.tool_preview_lines,
+                            width,
+                        );
                         push_block_rows(&mut msg_lines, rows);
                         msg_lines.push(Line::from(""));
                     }
@@ -449,6 +464,9 @@ fn build_lines_viewport(
         //   content (post-markdown) + (thinking rows + 1 trailing blank per
         //   segment) + (tool rows + 1 trailing blank per block) + 1 leading
         //   gap if a block precedes empty content + 1 final spacer.
+        // The session-wide trailing blank line appended below this
+        // loop is accounted for separately in
+        // `Session::compute_total_lines` (and the scroll math).
         let content_lines = read_cached_content_count_at(m, width as u16);
         let mut msg_total: u32 = content_lines;
         let mut thinking_blocks: u32 = 0;
@@ -474,10 +492,14 @@ fn build_lines_viewport(
         }
         if session.tool_display != crate::config::ToolResultDisplay::Hide {
             for t in &m.tool_results {
+                // `t.running` no longer forces expansion — the
+                // preview form is used during streaming so the chat
+                // stays readable. The pending background colour
+                // (driven by `running`) still signals "in flight".
                 let t_vis = match session.tool_display {
-                    crate::config::ToolResultDisplay::Show => t.visible || t.running,
+                    crate::config::ToolResultDisplay::Show => t.visible,
                     crate::config::ToolResultDisplay::ShowWhileStreaming => {
-                        m.streaming || t.visible || t.running
+                        m.streaming || t.visible
                     }
                     _ => false,
                 };
@@ -517,6 +539,16 @@ fn build_lines_viewport(
         if global_line >= end_line {
             break;
         }
+    }
+
+    // One extra trailing blank line at the bottom of the session,
+    // intentionally rendered (not just counted). This visually
+    // separates the chat from the input/function panel below. The
+    // count and viewport math above already account for it via the
+    // per-message final spacer; this final empty line is the
+    // session-wide gap.
+    if !out.is_empty() {
+        out.push(Line::from(""));
     }
 
     out
@@ -594,11 +626,23 @@ fn render_content_segment(text: &str, width: usize, out: &mut Vec<Line<'static>>
     }
 }
 
-pub fn thinking_block_line_count(content: &str, visible: bool, width: usize) -> usize {
+pub fn thinking_block_line_count(
+    content: &str,
+    visible: bool,
+    preview_lines: usize,
+    width: usize,
+) -> usize {
     if content.is_empty() {
         return 0;
     }
-    build_thinking_block_rows(content, visible, width, active_colors().thinking_done_bg).len()
+    build_thinking_block_rows(
+        content,
+        visible,
+        preview_lines,
+        width,
+        active_colors().thinking_done_bg,
+    )
+    .len()
 }
 
 /// Count total thinking lines across all segments.
@@ -617,13 +661,23 @@ pub fn total_thinking_line_count(m: &super::Message, session: &Session, width: u
             crate::config::ThinkingDisplay::ShowWhileStreaming => m.streaming || m.thinking_visible,
             _ => false,
         };
-        total += thinking_block_line_count(&seg.content, visible, width);
+        total += thinking_block_line_count(
+            &seg.content,
+            visible,
+            session.tool_preview_lines,
+            width,
+        );
     }
     total
 }
 
-pub fn tool_block_line_count(tool: &ToolResultBlock, visible: bool, width: usize) -> usize {
-    build_tool_block_rows(tool, visible, width).len()
+pub fn tool_block_line_count(
+    tool: &ToolResultBlock,
+    visible: bool,
+    preview_lines: usize,
+    width: usize,
+) -> usize {
+    build_tool_block_rows(tool, visible, preview_lines, width).len()
 }
 
 /// Count the rendered display lines of a message's `content` field at
@@ -745,6 +799,7 @@ pub fn get_thinking_segments(m: &super::Message) -> Vec<ThinkingSegment> {
         return vec![super::ThinkingSegment {
             offset: 0,
             content: m.thinking.clone(),
+            closed: false,
             cached_line_count_expanded: None,
             cached_line_count_collapsed: None,
         }];
@@ -755,6 +810,7 @@ pub fn get_thinking_segments(m: &super::Message) -> Vec<ThinkingSegment> {
 fn build_thinking_block_rows(
     content: &str,
     visible: bool,
+    preview_lines: usize,
     width: usize,
     bg: Color,
 ) -> Vec<Line<'static>> {
@@ -769,7 +825,12 @@ fn build_thinking_block_rows(
             rows.extend(body_rows);
         }
     } else {
-        rows.extend(collapsed_output_lines(content.trim_end(), width, bg));
+        let (preview, skipped) =
+            collapsed_output_lines(content.trim_end(), preview_lines, width, bg);
+        rows.extend(preview);
+        if skipped > 0 {
+            rows.push(ctrl_o_hint_line(skipped, width, bg));
+        }
     }
     rows.push(border_line(width, bg));
     rows
@@ -802,18 +863,19 @@ fn build_skill_block_rows(skill: &SkillRef, width: usize) -> Vec<Line<'static>> 
 fn build_tool_block_rows(
     tool: &ToolResultBlock,
     visible: bool,
+    preview_lines: usize,
     width: usize,
 ) -> Vec<Line<'static>> {
     let (bg, fg) = block_colors_for_tool(tool);
 
     let mut rows: Vec<Line<'static>> = if tool.name == "write_file" {
-        if let Some(r) = build_write_file_diff_rows(tool, visible, width, bg) {
+        if let Some(r) = build_write_file_diff_rows(tool, visible, preview_lines, width, bg) {
             r
         } else {
             return vec![];
         }
     } else if tool.name == "python_command" {
-        if let Some(r) = build_python_command_rows(tool, visible, width, bg) {
+        if let Some(r) = build_python_command_rows(tool, visible, preview_lines, width, bg) {
             r
         } else {
             return vec![];
@@ -822,7 +884,15 @@ fn build_tool_block_rows(
         let (output, footer) = tool_display_content(tool);
         let title_highlighted = tool.name == "shell_command" || tool.name == "command";
         if title_highlighted {
-            build_shell_command_rows(&tool.title, &output, &footer, visible, width, bg)
+            build_shell_command_rows(
+                &tool.title,
+                &output,
+                &footer,
+                visible,
+                preview_lines,
+                width,
+                bg,
+            )
         } else {
             build_output_block_rows(
                 &tool.title,
@@ -830,6 +900,7 @@ fn build_tool_block_rows(
                 &output,
                 &footer,
                 visible,
+                preview_lines,
                 width,
                 bg,
             )
@@ -852,6 +923,7 @@ fn build_shell_command_rows(
     output: &str,
     footer: &str,
     visible: bool,
+    preview_lines: usize,
     width: usize,
     bg: Color,
 ) -> Vec<Line<'static>> {
@@ -883,10 +955,26 @@ fn build_shell_command_rows(
             rows.extend(box_row_lines(footer, width, bg));
         }
     } else {
-        rows.extend(collapsed_output_lines(output, width, bg));
-        // Show footer info even when collapsed for shell commands
-        if !footer.is_empty() {
-            rows.extend(box_row_lines(footer, width, bg));
+        let (preview, skipped) =
+            collapsed_output_lines(output, preview_lines, width, bg);
+        rows.extend(preview);
+        match (skipped, footer.is_empty()) {
+            (n, false) if n > 0 => {
+                // Ctrl+O hint on the left, footer on the right — same row.
+                rows.push(box_row_line_two(
+                    &format!("[Ctrl+O to collapse/expand {n} lines]"),
+                    footer,
+                    width,
+                    bg,
+                ));
+            }
+            (0, false) => {
+                rows.extend(box_row_lines(footer, width, bg));
+            }
+            (n, true) if n > 0 => {
+                rows.push(ctrl_o_hint_line(n, width, bg));
+            }
+            _ => {}
         }
     }
 
@@ -894,12 +982,14 @@ fn build_shell_command_rows(
     rows
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_output_block_rows(
     title: &str,
     label: &str,
     output: &str,
     footer: &str,
     visible: bool,
+    preview_lines: usize,
     width: usize,
     bg: Color,
 ) -> Vec<Line<'static>> {
@@ -920,7 +1010,12 @@ fn build_output_block_rows(
             rows.extend(box_row_lines(footer, width, bg));
         }
     } else {
-        rows.extend(collapsed_output_lines(output, width, bg));
+        let (preview, skipped) =
+            collapsed_output_lines(output, preview_lines, width, bg);
+        rows.extend(preview);
+        if skipped > 0 {
+            rows.push(ctrl_o_hint_line(skipped, width, bg));
+        }
     }
 
     rows.push(border_line(width, bg));
@@ -937,29 +1032,65 @@ fn output_row_lines(output: &str, width: usize, bg: Color) -> Vec<Line<'static>>
     rows
 }
 
-fn collapsed_output_lines(output: &str, width: usize, bg: Color) -> Vec<Line<'static>> {
+/// Render the last `preview_lines` lines of `output` as a collapsed
+/// preview block. Returns the rendered rows *plus* the number of
+/// hidden lines so callers can build their own Ctrl+O hint layout
+/// (single full-width line, or combined with a footer on one row).
+fn collapsed_output_lines(
+    output: &str,
+    preview_lines: usize,
+    width: usize,
+    bg: Color,
+) -> (Vec<Line<'static>>, usize) {
     let lines: Vec<&str> = output.lines().collect();
     if lines.is_empty() {
-        return box_row_lines("[no output]", width, bg);
+        return (box_row_lines("[no output]", width, bg), 0);
     }
 
     let total = lines.len();
-    let shown = total.min(COLLAPSED_PREVIEW_LINES);
+    let shown = total.min(preview_lines);
     let skipped = total.saturating_sub(shown);
     let mut rows = Vec::new();
     // Show preview lines
     for line in lines.iter().skip(skipped) {
         rows.extend(box_row_lines(line, width, bg));
     }
-    // Show collapse hint at the bottom if there are hidden lines
-    if skipped > 0 {
-        rows.extend(box_row_lines(
-            &format!("[Ctrl+O to collapse/expand {skipped} lines]"),
-            width,
-            bg,
-        ));
+    (rows, skipped)
+}
+
+/// Single full-width Ctrl+O hint line for collapsed blocks that
+/// don't pair the hint with a footer.
+fn ctrl_o_hint_line(skipped: usize, width: usize, bg: Color) -> Line<'static> {
+    let line = format!("[Ctrl+O to collapse/expand {skipped} lines]");
+    box_row_line(&line, width, bg)
+}
+
+/// One row inside a tool box with a left chunk (typically the
+/// Ctrl+O hint) and a right chunk (typically the timing footer).
+/// The middle is filled with the box background so it still looks
+/// like a `box_row_line`. When the chunks would overflow the
+/// available inner width, both are shown full-width stacked on
+/// separate rows by the caller.
+fn box_row_line_two(
+    left: &str,
+    right: &str,
+    width: usize,
+    bg: Color,
+) -> Line<'static> {
+    let inner_w = width.saturating_sub(4);
+    let left_w = visible_width(left);
+    let right_w = visible_width(right);
+    let pad = inner_w.saturating_sub(left_w).saturating_sub(right_w);
+    let mut spans = vec![
+        Span::styled("| ", dim_bg_style(bg)),
+        Span::styled(left.to_string(), bg_style(bg)),
+    ];
+    if pad > 0 {
+        spans.push(Span::styled(" ".repeat(pad), bg_style(bg)));
     }
-    rows
+    spans.push(Span::styled(right.to_string(), bg_style(bg)));
+    spans.push(Span::styled(" |", dim_bg_style(bg)));
+    Line::from(spans)
 }
 
 // ── Line-based helper functions for styled block rendering ──
@@ -1052,6 +1183,7 @@ fn border_with_label_str(width: usize, label: &str) -> String {
 fn build_python_command_rows(
     tool: &ToolResultBlock,
     visible: bool,
+    preview_lines: usize,
     width: usize,
     bg: Color,
 ) -> Option<Vec<Line<'static>>> {
@@ -1086,7 +1218,12 @@ fn build_python_command_rows(
             rows.extend(body_rows);
         }
     } else {
-        rows.extend(collapsed_output_lines(&output, width, bg));
+        let (preview, skipped) =
+            collapsed_output_lines(&output, preview_lines, width, bg);
+        rows.extend(preview);
+        if skipped > 0 {
+            rows.push(ctrl_o_hint_line(skipped, width, bg));
+        }
     }
     if !footer.is_empty() {
         rows.extend(box_row_lines(&footer, width, bg));
@@ -1148,6 +1285,7 @@ fn interaction_tool_display(content: &str) -> Option<String> {
 fn build_write_file_diff_rows(
     tool: &ToolResultBlock,
     visible: bool,
+    preview_lines: usize,
     width: usize,
     bg: Color,
 ) -> Option<Vec<Line<'static>>> {
@@ -1176,7 +1314,12 @@ fn build_write_file_diff_rows(
             }
         }
     } else {
-        rows.extend(collapsed_output_lines(&body, width, bg));
+        let (preview, skipped) =
+            collapsed_output_lines(&body, preview_lines, width, bg);
+        rows.extend(preview);
+        if skipped > 0 {
+            rows.push(ctrl_o_hint_line(skipped, width, bg));
+        }
     }
     rows.push(border_line(width, bg));
     Some(rows)
@@ -1704,6 +1847,7 @@ mod tool_block_count_tests {
         s.messages[1].thinking_segments = vec![crate::session::ThinkingSegment {
             offset: 0,
             content: "let me think about this".to_string(),
+            closed: false,
             cached_line_count_expanded: None,
             cached_line_count_collapsed: None,
         }];
@@ -1745,53 +1889,90 @@ mod tool_block_count_tests {
         );
     }
 
-    /// Regression test for the "all thinking collapsed into one
-    /// block" bug. The model streams thinking in multiple events
-    /// (one per tool call) but they all share the same content
-    /// offset because the model wrote no text between them, so the
-    /// old code merged them via `offset == content_len` into a
-    /// single segment. After the fix, every thinking delta should
-    /// land in its own segment.
+/// Regression test for the "thinking fragmented into one box per
+    /// delta" problem. The model streams thinking in many small SSE
+    /// deltas, and each one used to become its own Thinking box in
+    /// the rendered chat. The fix: `append_thinking_to_last` only
+    /// opens a new segment when the previous one was closed by a
+    /// `begin_thinking_segment` (i.e. a non-thinking content block
+    /// started in between). When the model emits consecutive
+    /// thinking deltas at the same content offset, they should
+    /// collapse into a single continuous Thinking box.
     #[test]
-    fn thinking_deltas_with_same_offset_stay_separate() {
+    fn thinking_deltas_at_same_offset_merge_into_one_segment() {
         let mut s = Session::default();
         s.push(Message::new(Role::User, "do it"));
         let mut asst = Message::new(Role::Assistant, "");
-        // Simulate the model streaming three thinking events with
-        // no text content written in between (offset stays 0).
-        asst.thinking = "abc".to_string();
-        asst.thinking_segments = vec![
-            crate::session::ThinkingSegment {
-                offset: 0,
-                content: "first thought ".to_string(),
-                cached_line_count_expanded: None,
-                cached_line_count_collapsed: None,
-            },
-            crate::session::ThinkingSegment {
-                offset: 0,
-                content: "second thought ".to_string(),
-                cached_line_count_expanded: None,
-                cached_line_count_collapsed: None,
-            },
-            crate::session::ThinkingSegment {
-                offset: 0,
-                content: "third thought".to_string(),
-                cached_line_count_expanded: None,
-                cached_line_count_collapsed: None,
-            },
-        ];
+        // Three consecutive thinking deltas with no intervening
+        // text or tool_use → one open segment, three pushes that
+        // all land in the same segment.
+        asst.streaming = true;
         asst.thinking_visible = true;
         s.push(asst);
+        s.streaming_id = Some(1);
+        s.append_thinking_to_last("first thought ");
+        s.append_thinking_to_last("second thought ");
+        s.append_thinking_to_last("third thought");
+        // No `begin_thinking_segment` between deltas — the model
+        // emitted a single thinking content block.
+        let asst = &s.messages[1];
+        assert_eq!(
+            asst.thinking_segments.len(),
+            1,
+            "three consecutive deltas should land in a single segment, got {}",
+            asst.thinking_segments.len()
+        );
+        let combined = asst.thinking_segments[0].content.clone();
+        assert!(
+            combined.contains("first thought ")
+                && combined.contains("second thought ")
+                && combined.contains("third thought"),
+            "merged segment should contain all three deltas in order, got: {combined:?}"
+        );
+        // Render and verify exactly one Thinking box (single top
+        // border, single bottom border).
         let width = 80;
         let rendered = build_message_lines(&s, 1, width);
         let text = lines_to_text(&rendered);
-        // Three thinking blocks → three "Thinking" labels in the
-        // rendered output.
         let thinking_count = text.matches("Thinking").count();
-        assert!(
-            thinking_count >= 3,
-            "expected 3 separate Thinking blocks, got {thinking_count}. Rendered:\n{text}"
+        assert_eq!(
+            thinking_count, 1,
+            "expected exactly 1 Thinking box, got {thinking_count}. Rendered:\n{text}"
         );
+    }
+
+    /// A `begin_thinking_segment` (signalling a new content block)
+    /// between two thinking deltas must force the next delta into a
+    /// fresh segment, so the two "phases" of thinking render as two
+    /// separate boxes.
+    #[test]
+    fn begin_thinking_segment_opens_a_new_segment() {
+        let mut s = Session::default();
+        s.push(Message::new(Role::User, "do it"));
+        let asst = Message::new(Role::Assistant, "");
+        s.push(asst);
+        s.streaming_id = Some(1);
+        s.append_thinking_to_last("phase one ");
+        s.begin_thinking_segment();
+        s.append_thinking_to_last("phase two");
+        let asst = &s.messages[1];
+        assert_eq!(
+            asst.thinking_segments.len(),
+            2,
+            "begin_thinking_segment should split deltas into separate segments"
+        );
+        // `begin_thinking_segment` closed the previous segment so
+        // the next delta opens a fresh one.
+        assert!(
+            asst.thinking_segments[0].closed,
+            "older segment should be closed by begin_thinking_segment"
+        );
+        assert!(
+            !asst.thinking_segments[1].closed,
+            "newly-opened segment must stay open for further deltas"
+        );
+        assert_eq!(asst.thinking_segments[0].content, "phase one ");
+        assert_eq!(asst.thinking_segments[1].content, "phase two");
     }
 
     /// The thinking block must appear BEFORE the tool block in the
@@ -1807,6 +1988,7 @@ mod tool_block_count_tests {
         asst.thinking_segments = vec![crate::session::ThinkingSegment {
             offset: 0,
             content: "plan".to_string(),
+            closed: false,
             cached_line_count_expanded: None,
             cached_line_count_collapsed: None,
         }];
@@ -1843,6 +2025,7 @@ mod tool_block_count_tests {
         asst.thinking_segments.push(crate::session::ThinkingSegment {
             offset: 0,
             content: String::new(),
+            closed: false,
             cached_line_count_expanded: None,
             cached_line_count_collapsed: None,
         });
@@ -1931,7 +2114,7 @@ mod tests {
             cached_line_count_visible: None,
             cached_line_count_collapsed: None,
         };
-        let rows = build_tool_block_rows(&tool, true, 100);
+        let rows = build_tool_block_rows(&tool, true, 10, 100);
         let text = lines_to_text(&rows);
         assert!(
             text.contains("Get-ChildItem: bad flag"),
@@ -1962,7 +2145,7 @@ mod tests {
             cached_line_count_visible: None,
             cached_line_count_collapsed: None,
         };
-        let rows = build_tool_block_rows(&tool, true, 80);
+        let rows = build_tool_block_rows(&tool, true, 10, 80);
         let text = lines_to_text(&rows);
         assert!(
             text.contains("~ Edit: py src/demo.py [+1/-1]"),

@@ -1337,6 +1337,11 @@ fn expand_paste_blocks(mut raw: String, paste_blocks: &mut VecDeque<String>) -> 
 }
 
 fn submit_input(app: &mut App) {
+    // Snap the chat viewport to the tail before we push any new
+    // messages. If the user scrolled up to look at older content,
+    // we want their just-submitted message to be visible (so they
+    // can confirm it was sent) — not pushed off the bottom.
+    app.session.scroll = 0;
     let raw = expand_paste_blocks(app.input.take(), &mut app.paste_blocks);
     if raw.is_empty() {
         return;
@@ -2550,6 +2555,38 @@ fn handle_settings_key(
         }
         return handle_new_provider_key(k, state);
     }
+    // Tool-preview-lines is a single-row stepper: Up/Down adjust the
+    // value rather than navigate.
+    if matches!(
+        state.level,
+        crate::function::SettingsLevel::ToolPreviewLines
+    ) {
+        match k.code {
+            KeyCode::Up => {
+                if app.config.tool_preview_lines
+                    > crate::config::TOOL_PREVIEW_LINES_MIN
+                {
+                    app.config.tool_preview_lines -= 1;
+                    app.save_config();
+                }
+                return true;
+            }
+            KeyCode::Down => {
+                if app.config.tool_preview_lines
+                    < crate::config::TOOL_PREVIEW_LINES_MAX
+                {
+                    app.config.tool_preview_lines += 1;
+                    app.save_config();
+                }
+                return true;
+            }
+            KeyCode::Esc | KeyCode::Enter => {
+                handle_settings_back(app, state);
+                return true;
+            }
+            _ => return true,
+        }
+    }
     // Navigation keys are level-agnostic.
     match k.code {
         KeyCode::Up => {
@@ -2668,7 +2705,8 @@ fn handle_settings_back(app: &mut App, state: &mut crate::function::SettingsStat
         | SettingsLevel::ToolResultDisplayList
         | SettingsLevel::EnterBehaviorList
         | SettingsLevel::BorderTypeList
-        | SettingsLevel::ThemeList => {
+        | SettingsLevel::ThemeList
+        | SettingsLevel::ToolPreviewLines => {
             state.level = SettingsLevel::TopLevel;
             state.cursor = 0;
             state.clamp_cursor(&app.config);
@@ -2714,7 +2752,8 @@ fn handle_settings_enter(app: &mut App, state: &mut crate::function::SettingsSta
             2 => SettingsLevel::ToolResultDisplayList,
             3 => SettingsLevel::EnterBehaviorList,
             4 => SettingsLevel::BorderTypeList,
-            _ => SettingsLevel::ThemeList,
+            5 => SettingsLevel::ThemeList,
+            _ => SettingsLevel::ToolPreviewLines,
         },
         SettingsLevel::ProviderList => {
             if cursor == 0 {
@@ -2846,6 +2885,11 @@ fn handle_settings_enter(app: &mut App, state: &mut crate::function::SettingsSta
                     c.clear();
                 }
             }
+            SettingsLevel::TopLevel
+        }
+        SettingsLevel::ToolPreviewLines => {
+            // The single-row stepper is purely Up/Down driven; Enter
+            // pops back to the top level without changing the value.
             SettingsLevel::TopLevel
         }
         SettingsLevel::ConfigForm(form) => {

@@ -283,6 +283,8 @@ pub enum SettingsLevel {
     BorderTypeList,
     /// Theme chooser.
     ThemeList,
+    /// Inline number stepper for `Config::tool_preview_lines`.
+    ToolPreviewLines,
 }
 
 impl SettingsLevel {
@@ -311,6 +313,7 @@ impl SettingsLevel {
             SettingsLevel::EnterBehaviorList => "settings / enter behavior".to_string(),
             SettingsLevel::BorderTypeList => "settings / border type".to_string(),
             SettingsLevel::ThemeList => "settings / theme".to_string(),
+            SettingsLevel::ToolPreviewLines => "settings / tool preview lines".to_string(),
         }
     }
 
@@ -329,6 +332,7 @@ impl SettingsLevel {
             | SettingsLevel::EnterBehaviorList
             | SettingsLevel::BorderTypeList
             | SettingsLevel::ThemeList => "Up/Down: nav | Enter: select | Esc: back",
+            SettingsLevel::ToolPreviewLines => "Up/Down: ±1 | Esc: back",
         }
     }
 }
@@ -437,7 +441,7 @@ impl SettingsState {
     /// Number of items in the current list view (used to clamp cursor).
     pub fn list_len(&self, cfg: &Config) -> usize {
         match &self.level {
-            SettingsLevel::TopLevel => 6, // set provider, thinking display, tool display, enter behavior, border type, theme
+            SettingsLevel::TopLevel => 7, // set provider, thinking display, tool display, enter behavior, border type, theme, tool preview lines
             SettingsLevel::ProviderList => 1 + cfg.configured_provider_ids().len(), // new + existing
             SettingsLevel::NewProviderKind => self.new_provider.filtered.len(),
             SettingsLevel::ExistingActions(_) => 2, // edit, delete
@@ -447,6 +451,7 @@ impl SettingsState {
             SettingsLevel::EnterBehaviorList => 2,   // enter sends, enter newline
             SettingsLevel::BorderTypeList => 2,      // ascii, rounded
             SettingsLevel::ThemeList => crate::theme::ThemeVariant::all().len(),
+            SettingsLevel::ToolPreviewLines => 1, // single-row stepper, the value lives in cfg
         }
     }
 
@@ -1394,6 +1399,10 @@ impl App {
                 format!("save config: {e}"),
             );
         } else {
+            // Layout-affecting config (e.g. `tool_preview_lines`)
+            // may have changed; force the session renderer to
+            // re-compute viewport math and the viewport cache.
+            self.session.invalidate_layout_cache();
             self.notify(
                 crate::function::notifications::ToastLevel::Ok,
                 format!("config saved to {}", self.config_path.display()),
@@ -1468,6 +1477,7 @@ impl App {
                     streaming_id: None,
                     display: self.config.thinking_display,
                     tool_display: self.config.tool_display,
+                    tool_preview_lines: self.config.tool_preview_lines,
                     line_cache: Default::default(),
                     message_lines_cache: Default::default(),
                     cached_total_lines: None,
@@ -1543,6 +1553,7 @@ impl App {
                     streaming_id: None,
                     display: self.config.thinking_display,
                     tool_display: self.config.tool_display,
+                    tool_preview_lines: self.config.tool_preview_lines,
                     line_cache: Default::default(),
                     message_lines_cache: Default::default(),
                     cached_total_lines: None,

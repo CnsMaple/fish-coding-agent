@@ -19,6 +19,15 @@ pub struct CachedLineCount {
 pub struct ThinkingSegment {
     pub offset: usize,
     pub content: String,
+    /// `true` once a non-thinking content block has begun after this
+    /// segment, or `begin_thinking_segment` was called explicitly.
+    /// `append_thinking_to_last` only appends into the most recent
+    /// segment when `closed == false`, so consecutive thinking deltas
+    /// that belong to the same Anthropic content block land in the
+    /// same rendered box instead of being fragmented into one box per
+    /// delta.
+    #[serde(default)]
+    pub closed: bool,
     /// Cached rendered line count for the expanded thinking block.
     /// `None` means "needs (re)compute"; populated on first render
     /// or by `Session::recompute_layout_caches`.
@@ -172,7 +181,7 @@ pub struct TodoItem {
     pub status: String,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Session {
     pub messages: Vec<Message>,
     #[serde(default)]
@@ -188,6 +197,11 @@ pub struct Session {
     /// Tool result display mode, set from App config on each render.
     #[serde(skip)]
     pub tool_display: crate::config::ToolResultDisplay,
+    /// Number of output lines shown in a collapsed tool block before
+    /// the Ctrl+O hint is offered. Mirrors
+    /// `Config::tool_preview_lines`; `ui::render` keeps this in sync.
+    #[serde(skip)]
+    pub tool_preview_lines: usize,
     /// Cache of rendered `Line`s per message index.
     /// `None` = uncached; `Some(lines)` = cached until content changes.
     #[serde(skip)]
@@ -216,6 +230,31 @@ pub struct Session {
     /// `render()` skips all work and just blits this buffer.
     #[serde(skip)]
     pub render_cache: std::sync::Mutex<Option<crate::session::render::RenderCache>>,
+}
+
+impl Default for Session {
+    /// `tool_preview_lines` needs a non-zero default so freshly
+    /// constructed sessions (tests, restores, etc.) render a useful
+    /// preview instead of empty boxes. The UI keeps this in sync
+    /// with `Config::tool_preview_lines` on every render.
+    fn default() -> Self {
+        Self {
+            messages: Vec::new(),
+            todo_items: Vec::new(),
+            scroll: 0,
+            streaming_id: None,
+            display: crate::config::ThinkingDisplay::default(),
+            tool_display: crate::config::ToolResultDisplay::default(),
+            tool_preview_lines: 10,
+            line_cache: std::sync::Mutex::new(Vec::new()),
+            message_lines_cache: std::sync::Mutex::new(
+                crate::session::lru::BoundedCache::default(),
+            ),
+            cached_total_lines: None,
+            layout_version: 0,
+            render_cache: std::sync::Mutex::new(None),
+        }
+    }
 }
 
 impl Session {
@@ -319,7 +358,13 @@ impl Session {
         if let Some(id) = self.streaming_id {
             if let Some(m) = self.messages.get_mut(id) {
                 let content_offset = m.content.len();
-                let visible = name != "write_file" && !is_long_tool_content(&content);
+                // Default to collapsed: the user expands with Ctrl+O.
+                // This applies to short and long tool content alike so
+                // the chat stays readable while the model streams
+                // large outputs; long / write_file content used to
+                // auto-expand, which buried the user-bg block at the
+                // bottom of the viewport.
+                let visible = false;
                 m.tool_results.push(ToolResultBlock {
                     name,
                     title,
@@ -345,7 +390,10 @@ impl Session {
                     title,
                     content: String::new(),
                     content_offset,
-                    visible: true,
+                    // Collapsed by default; `running` is what paints
+                    // the pending background colour. The expanded
+                    // form is opt-in via Ctrl+O.
+                    visible: false,
                     running: true,
                     cached_line_count_visible: None,
                     cached_line_count_collapsed: None,
@@ -376,7 +424,9 @@ impl Session {
     }
 
     pub fn push_tool_result_message(&mut self, name: String, title: String, content: String) {
-        let visible = name != "write_file" && !is_long_tool_content(&content);
+        // Default to collapsed for the same reason as
+        // `append_tool_to_last`; user can Ctrl+O to expand.
+        let visible = false;
         let msg = Message {
             role: Role::Assistant,
             content: String::new(),
@@ -430,24 +480,28 @@ impl Session {
         if let Some(id) = self.streaming_id {
             if let Some(m) = self.messages.get_mut(id) {
                 m.thinking.push_str(chunk);
-                let content_len = m.content.len();
-                // Always start a new thinking segment for each
-                // appended chunk. The provider (e.g. Anthropic)
-                // signals content-block boundaries via
-                // `Session::begin_thinking_segment` so deltas that
-                // belong to the same content block get appended to
-                // the same segment. We no longer merge by `offset ==
-                // content_len` because that collapsed every
-                // per-tool-call thinking event into a single block
-                // when the model interleaved thinking and tool_use
-                // without writing any text content in between
-                // (offset stayed 0 across all of them).
-                m.thinking_segments.push(ThinkingSegment {
-                    offset: content_len,
-                    content: chunk.to_string(),
-                    cached_line_count_expanded: None,
-                    cached_line_count_collapsed: None,
-                });
+                // If the most recent thinking segment is still open
+                // (no non-thinking content block has begun since),
+                // append into it. Otherwise open a fresh segment.
+                let mut extended = false;
+                if let Some(last) = m.thinking_segments.last_mut() {
+                    if !last.closed {
+                        last.content.push_str(chunk);
+                        last.cached_line_count_expanded = None;
+                        last.cached_line_count_collapsed = None;
+                        extended = true;
+                    }
+                }
+                if !extended {
+                    let content_len = m.content.len();
+                    m.thinking_segments.push(ThinkingSegment {
+                        offset: content_len,
+                        content: chunk.to_string(),
+                        closed: false,
+                        cached_line_count_expanded: None,
+                        cached_line_count_collapsed: None,
+                    });
+                }
                 m.bump_version();
                 self.invalidate_layout_cache();
             }
@@ -470,12 +524,13 @@ impl Session {
                 // Drop the in-flight open segment if it is empty
                 // (it was created by a previous content_block_start
                 // and has not received any deltas yet). Otherwise
-                // leave it alone — `append_thinking_to_last` will
-                // push a fresh segment for the new block's deltas
-                // and the renderer will keep the closed one as is.
-                if let Some(last) = m.thinking_segments.last() {
-                    if last.content.is_empty() {
+                // close the most recent segment so subsequent
+                // thinking deltas land in a fresh one.
+                if let Some(last) = m.thinking_segments.last_mut() {
+                    if !last.closed && last.content.is_empty() {
                         m.thinking_segments.pop();
+                    } else if !last.closed {
+                        last.closed = true;
                     }
                 }
             }
@@ -636,6 +691,7 @@ impl Session {
                                 Some(crate::session::render::thinking_block_line_count(
                                     &seg.content,
                                     true,
+                                    self.tool_preview_lines,
                                     width as usize,
                                 ) as u32);
                         }
@@ -646,6 +702,7 @@ impl Session {
                                 Some(crate::session::render::thinking_block_line_count(
                                     &seg.content,
                                     false,
+                                    self.tool_preview_lines,
                                     width as usize,
                                 ) as u32);
                         }
@@ -661,10 +718,12 @@ impl Session {
             let mut tool_blocks: u32 = 0;
             if self.tool_display != crate::config::ToolResultDisplay::Hide {
                 for t in m.tool_results.iter_mut() {
+                    // `t.running` no longer forces expansion — see
+                    // the matching note in `build_lines_viewport`.
                     let t_vis = match self.tool_display {
-                        crate::config::ToolResultDisplay::Show => t.visible || t.running,
+                        crate::config::ToolResultDisplay::Show => t.visible,
                         crate::config::ToolResultDisplay::ShowWhileStreaming => {
-                            m.streaming || t.visible || t.running
+                            m.streaming || t.visible
                         }
                         _ => false,
                     };
@@ -674,6 +733,7 @@ impl Session {
                                 Some(crate::session::render::tool_block_line_count(
                                     t,
                                     true,
+                                    self.tool_preview_lines,
                                     width as usize,
                                 ) as u32);
                         }
@@ -684,6 +744,7 @@ impl Session {
                                 Some(crate::session::render::tool_block_line_count(
                                     t,
                                     false,
+                                    self.tool_preview_lines,
                                     width as usize,
                                 ) as u32);
                         }
@@ -719,7 +780,10 @@ impl Session {
             n += 1;
         }
         if !self.messages.is_empty() {
-            n += 1; // trailing gap line at the bottom
+            // One trailing blank line rendered at the very bottom of
+            // the session by `build_lines_viewport` to give the chat a
+            // visible gap from the input/function panel below.
+            n += 1;
         }
         n
     }
@@ -807,9 +871,9 @@ impl Session {
             if self.tool_display != crate::config::ToolResultDisplay::Hide {
                 for t in &m.tool_results {
                     let t_vis = match self.tool_display {
-                        crate::config::ToolResultDisplay::Show => t.visible || t.running,
+                        crate::config::ToolResultDisplay::Show => t.visible,
                         crate::config::ToolResultDisplay::ShowWhileStreaming => {
-                            m.streaming || t.visible || t.running
+                            m.streaming || t.visible
                         }
                         _ => false,
                     };
@@ -931,8 +995,4 @@ fn is_text_tool_call_normalized(line: &str) -> bool {
         && inner.starts_with('{')
         && inner.contains("\"name\"")
         && inner.contains("\"arguments\"")
-}
-
-fn is_long_tool_content(content: &str) -> bool {
-    content.lines().count() > 200 || content.len() > 10_000
 }

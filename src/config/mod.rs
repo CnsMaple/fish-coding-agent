@@ -325,6 +325,19 @@ pub fn default_model(_kind: ProviderKind) -> &'static str {
     ""
 }
 
+/// Default number of output lines visible inside a collapsed tool
+/// block before the Ctrl+O hint is offered. Adjustable via
+/// `/settings → tool preview lines`.
+pub fn default_tool_preview_lines() -> usize {
+    10
+}
+
+/// Lower / upper bounds for `Config::tool_preview_lines`. The
+/// settings UI clamps the user's selection to this range so the
+/// preview stays useful (no 0-line boxes, no overflowing the box).
+pub const TOOL_PREVIEW_LINES_MIN: usize = 3;
+pub const TOOL_PREVIEW_LINES_MAX: usize = 50;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     /// Active entry id, e.g. "openai:key". None means no entry is active.
@@ -338,6 +351,12 @@ pub struct Config {
     pub tool_display: ToolResultDisplay,
     #[serde(default)]
     pub enter_behavior: EnterBehavior,
+    /// Number of output lines shown in a collapsed tool block before
+    /// the Ctrl+O hint is offered. Clamped to
+    /// `[TOOL_PREVIEW_LINES_MIN, TOOL_PREVIEW_LINES_MAX]` by the
+    /// settings UI.
+    #[serde(default = "default_tool_preview_lines")]
+    pub tool_preview_lines: usize,
     /// Border style for markdown tables and code blocks.
     #[serde(default)]
     pub border_type: crate::ui::border_type::BorderType,
@@ -406,6 +425,7 @@ impl Config {
             thinking_display: ThinkingDisplay::Show,
             tool_display: ToolResultDisplay::Show,
             enter_behavior: EnterBehavior::EnterSends,
+            tool_preview_lines: default_tool_preview_lines(),
             border_type: crate::ui::border_type::BorderType::default(),
             theme: crate::theme::ThemeVariant::default(),
             entries,
@@ -589,6 +609,7 @@ impl Default for Config {
             thinking_display: ThinkingDisplay::Show,
             tool_display: ToolResultDisplay::Show,
             enter_behavior: EnterBehavior::EnterSends,
+            tool_preview_lines: default_tool_preview_lines(),
             border_type: crate::ui::border_type::BorderType::default(),
             theme: crate::theme::ThemeVariant::default(),
             entries: HashMap::new(),

@@ -384,6 +384,18 @@ fn render_settings(
                 "theme",
                 Some(cfg.theme.as_str().to_string()),
             ));
+            body_lines.push(list_item(
+                6 == s.cursor,
+                "tool preview lines",
+                Some(format!(
+                    "{}",
+                    cfg.tool_preview_lines
+                        .clamp(
+                            crate::config::TOOL_PREVIEW_LINES_MIN,
+                            crate::config::TOOL_PREVIEW_LINES_MAX,
+                        )
+                )),
+            ));
         }
         SettingsLevel::ProviderList => {
             body_lines.push(list_item(0 == s.cursor, "+ new provider", None));
@@ -479,6 +491,19 @@ fn render_settings(
                 }
                 body_lines.push(list_item(s.cursor == i, &label, None));
             }
+        }
+        SettingsLevel::ToolPreviewLines => {
+            use crate::config::{
+                default_tool_preview_lines, TOOL_PREVIEW_LINES_MAX, TOOL_PREVIEW_LINES_MIN,
+            };
+            let cur = cfg
+                .tool_preview_lines
+                .clamp(TOOL_PREVIEW_LINES_MIN, TOOL_PREVIEW_LINES_MAX);
+            let label = format!(
+                "preview lines: {cur}  (min {TOOL_PREVIEW_LINES_MIN}, max {TOOL_PREVIEW_LINES_MAX}, default {})",
+                default_tool_preview_lines()
+            );
+            body_lines.push(list_item(true, &label, None));
         }
         SettingsLevel::ConfigForm(form) => {
             use crate::function::ConfigField;

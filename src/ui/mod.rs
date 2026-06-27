@@ -43,6 +43,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
 
     app.session.display = app.config.thinking_display;
     app.session.tool_display = app.config.tool_display;
+    app.session.tool_preview_lines = app.config.tool_preview_lines;
     let session_frame_area = chunks[0];
     let area = session_content_area(session_frame_area);
     app.session_area = Some(session_frame_area);
@@ -124,6 +125,9 @@ pub fn render(f: &mut Frame, app: &mut App) {
     //   - +1 for each thinking/tool block (the trailing blank)
     //   - +1 leading gap if a block appears with empty content
     //   - +1 final spacer
+    // The session-wide trailing blank line at the very bottom of
+    // `build_lines_viewport` is *not* added here because there are no
+    // toggles on that row.
     let mut line_idx: usize = 0;
     for (msg_idx, m) in app.session.messages.iter().enumerate() {
         // Thinking segments.
@@ -164,10 +168,13 @@ pub fn render(f: &mut Frame, app: &mut App) {
         let mut tool_blocks: usize = 0;
         if app.config.tool_display != crate::config::ToolResultDisplay::Hide {
             for (tool_idx, t) in m.tool_results.iter().enumerate() {
+                // `t.running` no longer forces expansion — see the
+                // matching note in `build_lines_viewport`. The
+                // pending background colour alone signals "in flight".
                 let t_vis = match app.config.tool_display {
-                    crate::config::ToolResultDisplay::Show => t.visible || t.running,
+                    crate::config::ToolResultDisplay::Show => t.visible,
                     crate::config::ToolResultDisplay::ShowWhileStreaming => {
-                        m.streaming || t.visible || t.running
+                        m.streaming || t.visible
                     }
                     _ => false,
                 };
