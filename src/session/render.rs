@@ -546,18 +546,15 @@ fn build_lines_viewport(
     // at the end of the last message, but when the content overflows
     // the viewport the slice above can land on a non-blank line (e.g.
     // the bottom border of a code block) and the spacer sits one row
-    // past the viewport. Ratatui's `Paragraph` then renders the last
-    // content line flush against the input block with no breathing
-    // room. Force one final blank here whenever the last rendered
-    // line isn't already blank, so the chat always shows a gap line
-    // at the bottom regardless of scroll position or content length.
-    if !out.is_empty() {
-        let last_is_blank = out
-            .last()
-            .map(|l| l.spans.iter().all(|s| s.content.is_empty()))
-            .unwrap_or(false);
-        if !last_is_blank {
-            out.push(Line::from(""));
+    // past the viewport. Pushing an extra blank would push `out.len()`
+    // to `inner_h + 1` and Ratatui's `Paragraph` clips at
+    // `y >= area.height`, dropping the new row entirely. Replace the
+    // last line in-place instead: this keeps `out.len()` within the
+    // viewport budget and guarantees the bottom row is blank.
+    if let Some(last) = out.last_mut() {
+        let is_blank = last.spans.iter().all(|s| s.content.is_empty());
+        if !is_blank {
+            *last = Line::from("");
         }
     }
 

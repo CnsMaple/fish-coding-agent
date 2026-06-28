@@ -244,11 +244,19 @@ fn input_height(app: &App, viewport_height: u16, terminal_width: u16) -> u16 {
         } else {
             total.div_ceil(inner_w)
         };
-        visual_lines += seg_lines as u16;
+        visual_lines = visual_lines.saturating_add(seg_lines as u16);
     }
     visual_lines = visual_lines.max(1);
-    let max_body = ((viewport_height as f32) * 0.40).floor() as u16;
-    let max_body = max_body.max(1).saturating_sub(2).max(1);
+    // Cap how tall the input can grow so the session always keeps at
+    // least ~25% of the viewport. The previous 40%-of-viewport cap
+    // silently truncated long single-line input down to one visual
+    // row, hiding the rest of the message until something else
+    // triggered a redraw (typically the first streaming token).
+    let min_for_session = ((viewport_height as f32) * 0.25).floor() as u16;
+    let max_body = viewport_height
+        .saturating_sub(min_for_session)
+        .saturating_sub(2)
+        .max(1);
     visual_lines.min(max_body) + 2
 }
 
