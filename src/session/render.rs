@@ -162,9 +162,6 @@ fn count_lines_estimate(session: &Session) -> u32 {
         }
         n += 1; // spacer
     }
-    if !session.messages.is_empty() {
-        n += 1;
-    }
     n
 }
 
@@ -266,9 +263,7 @@ pub fn build_message_lines(session: &Session, msg_idx: usize, width: usize) -> V
     // Add thinking segments (only when display allows)
     if m.role == Role::Assistant {
         let segments = get_thinking_segments(m);
-        let has_thinking_content = segments
-            .iter()
-            .any(|s| !s.content.trim().is_empty());
+        let has_thinking_content = segments.iter().any(|s| !s.content.trim().is_empty());
         if has_thinking_content && !matches!(session.display, ThinkingDisplay::Hide) {
             for seg in &segments {
                 let offset = clamp_char_boundary(raw, seg.offset.min(raw.len()));
@@ -301,9 +296,7 @@ pub fn build_message_lines(session: &Session, msg_idx: usize, width: usize) -> V
         a.offset
             .cmp(&b.offset)
             .then_with(|| match (&a.kind, &b.kind) {
-                (RenderItemKind::Thinking(_), RenderItemKind::Tool(_)) => {
-                    std::cmp::Ordering::Less
-                }
+                (RenderItemKind::Thinking(_), RenderItemKind::Tool(_)) => std::cmp::Ordering::Less,
                 (RenderItemKind::Tool(_), RenderItemKind::Thinking(_)) => {
                     std::cmp::Ordering::Greater
                 }
@@ -363,18 +356,12 @@ pub fn build_message_lines(session: &Session, msg_idx: usize, width: usize) -> V
                         // Ctrl+O.
                         let t_vis = match session.tool_display {
                             ToolResultDisplay::Show => tool.visible,
-                            ToolResultDisplay::ShowWhileStreaming => {
-                                m.streaming || tool.visible
-                            }
+                            ToolResultDisplay::ShowWhileStreaming => m.streaming || tool.visible,
                             _ => false,
                         };
                         ensure_gap_before_block(&mut msg_lines);
-                        let rows = build_tool_block_rows(
-                            tool,
-                            t_vis,
-                            session.tool_preview_lines,
-                            width,
-                        );
+                        let rows =
+                            build_tool_block_rows(tool, t_vis, session.tool_preview_lines, width);
                         push_block_rows(&mut msg_lines, rows);
                         msg_lines.push(Line::from(""));
                     }
@@ -446,6 +433,12 @@ pub fn build_message_lines(session: &Session, msg_idx: usize, width: usize) -> V
 /// Build only the lines that intersect the visible viewport.
 /// `start_line` and `end_line` are absolute line indices into the
 /// full rendered output.
+///
+/// No session-wide trailing blank is appended here: the visual gap
+/// between the session and the input/function panel below is the
+/// `final spacer` of the last message (a blank line emitted by
+/// `build_message_lines`). Removing the extra blank avoids the
+/// double-gap that appeared when both were present.
 fn build_lines_viewport(
     session: &Session,
     width: usize,
@@ -455,6 +448,12 @@ fn build_lines_viewport(
     let mut out: Vec<Line<'static>> = Vec::new();
     let mut global_line: u32 = 0;
 
+    // The last message's `final spacer` (the blank line emitted by
+    // `build_message_lines`) is the visual gap between the session and
+    // the input block below, so no extra session-wide trailing blank is
+    // pushed here.
+    let msg_end_line = end_line;
+
     for msg_idx in 0..session.messages.len() {
         let m = &session.messages[msg_idx];
 
@@ -463,10 +462,8 @@ fn build_lines_viewport(
         // Must match the structure produced by `build_message_lines` exactly:
         //   content (post-markdown) + (thinking rows + 1 trailing blank per
         //   segment) + (tool rows + 1 trailing blank per block) + 1 leading
-        //   gap if a block precedes empty content + 1 final spacer.
-        // The session-wide trailing blank line appended below this
-        // loop is accounted for separately in
-        // `Session::compute_total_lines` (and the scroll math).
+        //   gap if a block precedes empty content + 1 final spacer
+        //   (this final spacer is also the visual gap to the input).
         let content_lines = read_cached_content_count_at(m, width as u16);
         let mut msg_total: u32 = content_lines;
         let mut thinking_blocks: u32 = 0;
@@ -522,33 +519,26 @@ fn build_lines_viewport(
 
         let msg_end = global_line + msg_total;
 
-        // Does this message intersect the viewport?
-        if msg_end > start_line && global_line < end_line {
+        // Does this message intersect the viewport (excluding the
+        // reserved trailing-blank slot)?
+        if msg_end > start_line && global_line < msg_end_line {
             // Full render this message (maybe from cache).
             let rendered = build_message_lines(session, msg_idx, width);
-            // Compute the slice of this message's lines that overlap the viewport.
+            // Compute the slice of this message's lines that overlap
+            // the message portion of the viewport.
             let local_start = start_line.saturating_sub(global_line) as usize;
-            let local_end =
-                (end_line.saturating_sub(global_line)).min(rendered.len() as u32) as usize;
+            let local_end = msg_end_line
+                .saturating_sub(global_line)
+                .min(rendered.len() as u32) as usize;
             if local_start < local_end {
                 out.extend(rendered[local_start..local_end].iter().cloned());
             }
         }
 
         global_line = msg_end;
-        if global_line >= end_line {
+        if global_line >= msg_end_line {
             break;
         }
-    }
-
-    // One extra trailing blank line at the bottom of the session,
-    // intentionally rendered (not just counted). This visually
-    // separates the chat from the input/function panel below. The
-    // count and viewport math above already account for it via the
-    // per-message final spacer; this final empty line is the
-    // session-wide gap.
-    if !out.is_empty() {
-        out.push(Line::from(""));
     }
 
     out
@@ -661,12 +651,8 @@ pub fn total_thinking_line_count(m: &super::Message, session: &Session, width: u
             crate::config::ThinkingDisplay::ShowWhileStreaming => m.streaming || m.thinking_visible,
             _ => false,
         };
-        total += thinking_block_line_count(
-            &seg.content,
-            visible,
-            session.tool_preview_lines,
-            width,
-        );
+        total +=
+            thinking_block_line_count(&seg.content, visible, session.tool_preview_lines, width);
     }
     total
 }
@@ -955,8 +941,7 @@ fn build_shell_command_rows(
             rows.extend(box_row_lines(footer, width, bg));
         }
     } else {
-        let (preview, skipped) =
-            collapsed_output_lines(output, preview_lines, width, bg);
+        let (preview, skipped) = collapsed_output_lines(output, preview_lines, width, bg);
         rows.extend(preview);
         match (skipped, footer.is_empty()) {
             (n, false) if n > 0 => {
@@ -1010,8 +995,7 @@ fn build_output_block_rows(
             rows.extend(box_row_lines(footer, width, bg));
         }
     } else {
-        let (preview, skipped) =
-            collapsed_output_lines(output, preview_lines, width, bg);
+        let (preview, skipped) = collapsed_output_lines(output, preview_lines, width, bg);
         rows.extend(preview);
         if skipped > 0 {
             rows.push(ctrl_o_hint_line(skipped, width, bg));
@@ -1071,12 +1055,7 @@ fn ctrl_o_hint_line(skipped: usize, width: usize, bg: Color) -> Line<'static> {
 /// like a `box_row_line`. When the chunks would overflow the
 /// available inner width, both are shown full-width stacked on
 /// separate rows by the caller.
-fn box_row_line_two(
-    left: &str,
-    right: &str,
-    width: usize,
-    bg: Color,
-) -> Line<'static> {
+fn box_row_line_two(left: &str, right: &str, width: usize, bg: Color) -> Line<'static> {
     let inner_w = width.saturating_sub(4);
     let left_w = visible_width(left);
     let right_w = visible_width(right);
@@ -1218,8 +1197,7 @@ fn build_python_command_rows(
             rows.extend(body_rows);
         }
     } else {
-        let (preview, skipped) =
-            collapsed_output_lines(&output, preview_lines, width, bg);
+        let (preview, skipped) = collapsed_output_lines(&output, preview_lines, width, bg);
         rows.extend(preview);
         if skipped > 0 {
             rows.push(ctrl_o_hint_line(skipped, width, bg));
@@ -1314,8 +1292,7 @@ fn build_write_file_diff_rows(
             }
         }
     } else {
-        let (preview, skipped) =
-            collapsed_output_lines(&body, preview_lines, width, bg);
+        let (preview, skipped) = collapsed_output_lines(&body, preview_lines, width, bg);
         rows.extend(preview);
         if skipped > 0 {
             rows.push(ctrl_o_hint_line(skipped, width, bg));
@@ -1691,7 +1668,10 @@ mod content_line_count_tests {
         let rendered = content_line_count(&s.messages[0].content, 80);
         // The recomputed cache count must reflect the new content,
         // not the old cached value.
-        assert_eq!(s.messages[0].cached_content_line_count.map(|c| c.count), Some(rendered));
+        assert_eq!(
+            s.messages[0].cached_content_line_count.map(|c| c.count),
+            Some(rendered)
+        );
         // And the total must include the new content's rendered lines.
         assert!(total > 0);
     }
@@ -1797,9 +1777,9 @@ mod tool_block_count_tests {
     }
 
     /// The exact total returned by `compute_total_lines` must equal
-    /// the number of lines `build_message_lines` produces for that
-    /// single message (because the message is the only thing in the
-    /// session apart from the prompt).
+    /// the sum of lines `build_message_lines` produces for each
+    /// message (each message already includes its own `final spacer`,
+    /// and there is no session-wide trailing blank).
     #[test]
     fn tool_block_count_matches_rendered_no_content() {
         let mut s = session_with_tool(make_write_file_tool(), false);
@@ -1807,11 +1787,10 @@ mod tool_block_count_tests {
         let total = count_all(&mut s, width);
         let user_lines = lines_for_msg(&s, 0, width as usize).len() as u32;
         let asst_lines = lines_for_msg(&s, 1, width as usize).len() as u32;
-        // The `Session` adds 1 trailing gap line at the end.
-        let expected = user_lines + asst_lines + 1;
+        let expected = user_lines + asst_lines;
         assert_eq!(
             total, expected,
-            "total={total} but user={user_lines} + asst={asst_lines} + 1 trailing = {expected}"
+            "total={total} but user={user_lines} + asst={asst_lines} = {expected}"
         );
     }
 
@@ -1822,7 +1801,7 @@ mod tool_block_count_tests {
         let total = count_all(&mut s, width);
         let user_lines = lines_for_msg(&s, 0, width as usize).len() as u32;
         let asst_lines = lines_for_msg(&s, 1, width as usize).len() as u32;
-        let expected = user_lines + asst_lines + 1;
+        let expected = user_lines + asst_lines;
         assert_eq!(total, expected);
     }
 
@@ -1834,7 +1813,7 @@ mod tool_block_count_tests {
         let total = count_all(&mut s, width);
         let asst_lines = lines_for_msg(&s, 1, width as usize).len() as u32;
         let user_lines = lines_for_msg(&s, 0, width as usize).len() as u32;
-        let expected = user_lines + asst_lines + 1;
+        let expected = user_lines + asst_lines;
         assert_eq!(total, expected);
     }
 
@@ -1856,7 +1835,7 @@ mod tool_block_count_tests {
         let total = count_all(&mut s, width);
         let asst_lines = lines_for_msg(&s, 1, width as usize).len() as u32;
         let user_lines = lines_for_msg(&s, 0, width as usize).len() as u32;
-        let expected = user_lines + asst_lines + 1;
+        let expected = user_lines + asst_lines;
         assert_eq!(total, expected);
     }
 
@@ -1882,14 +1861,84 @@ mod tool_block_count_tests {
         let end = total;
         let rendered = build_lines_viewport(&s, width, start as u32, end as u32);
         let text = lines_to_text(&rendered);
-        let last_text_line = text.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("");
+        let last_text_line = text
+            .lines()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("");
         assert!(
             last_text_line.starts_with('+') && last_text_line.contains("---"),
             "last visible line should be the tool block's bottom border, got: {last_text_line:?}"
         );
     }
 
-/// Regression test for the "thinking fragmented into one box per
+    /// Regression test for the "trailing gap clipped" bug. The blank
+    /// line that visually separates the chat from the input/function
+    /// panel is now the LAST message's `final spacer` (a blank line
+    /// emitted by `build_message_lines`); it must still be the LAST
+    /// line of `build_lines_viewport`'s output even when the total
+    /// session height exceeds the viewport. Previously, the
+    /// session-wide trailing blank was the source of the gap, and
+    /// Paragraph clipped it when the rendered output had `inner_h + 1`
+    /// lines.
+    #[test]
+    fn trailing_gap_line_is_always_last() {
+        // Build a session with enough message content to overflow a
+        // 5-row viewport.
+        let mut s = Session::default();
+        s.push(Message::new(Role::User, "go"));
+        let asst_content = (0..30)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        s.push(Message::new(Role::Assistant, asst_content));
+        let width: usize = 80;
+
+        // Warm caches.
+        let total = count_all(&mut s, width as u16) as usize;
+
+        // Force the viewport to be SMALLER than the total: the
+        // last rendered line MUST be the final-spacer blank.
+        let inner_h = 5usize;
+        let start = total.saturating_sub(inner_h);
+        let end = total;
+        let rendered = build_lines_viewport(&s, width, start as u32, end as u32);
+        assert_eq!(
+            rendered.len(),
+            inner_h,
+            "viewport overflow case must render exactly inner_h lines, got {}",
+            rendered.len()
+        );
+        // The very last line must be an empty blank.
+        let last = rendered.last().expect("rendered non-empty");
+        assert!(
+            last.spans.iter().all(|s| s.content.is_empty()),
+            "last rendered line should be the trailing blank, got: {last:?}"
+        );
+
+        // And the count from `compute_total_lines` must match the
+        // actual viewport-rendered line count when the viewport is
+        // big enough: `inner_h = total` fits everything, last line
+        // is still the final-spacer blank.
+        let full_rendered = build_lines_viewport(&s, width, 0, total as u32);
+        assert_eq!(
+            full_rendered.len(),
+            total,
+            "full-viewport render must produce `total` lines (got {})",
+            full_rendered.len()
+        );
+        assert!(
+            full_rendered
+                .last()
+                .unwrap()
+                .spans
+                .iter()
+                .all(|s| s.content.is_empty()),
+            "final spacer must be the very last line in full-viewport mode too"
+        );
+    }
+
+    /// Regression test for the "thinking fragmented into one box per
     /// delta" problem. The model streams thinking in many small SSE
     /// deltas, and each one used to become its own Thinking box in
     /// the rendered chat. The fix: `append_thinking_to_last` only
@@ -2022,13 +2071,14 @@ mod tool_block_count_tests {
         s.streaming_id = Some(1);
         // Simulate: a content_block_start fired before any delta
         // arrived, leaving an empty in-flight segment.
-        asst.thinking_segments.push(crate::session::ThinkingSegment {
-            offset: 0,
-            content: String::new(),
-            closed: false,
-            cached_line_count_expanded: None,
-            cached_line_count_collapsed: None,
-        });
+        asst.thinking_segments
+            .push(crate::session::ThinkingSegment {
+                offset: 0,
+                content: String::new(),
+                closed: false,
+                cached_line_count_expanded: None,
+                cached_line_count_collapsed: None,
+            });
         s.messages[1] = asst;
         assert_eq!(s.messages[1].thinking_segments.len(), 1);
         s.begin_thinking_segment();
@@ -2490,19 +2540,17 @@ mod tests {
 
         let width: u16 = 130;
         let total = s.count_all_lines_with_width(width as usize);
-        let asst_lines =
-            crate::session::render::build_message_lines(&s, 1, width as usize);
-        let user_lines =
-            crate::session::render::build_message_lines(&s, 0, width as usize);
+        let asst_lines = crate::session::render::build_message_lines(&s, 1, width as usize);
+        let user_lines = crate::session::render::build_message_lines(&s, 0, width as usize);
         eprintln!(
-            "counted total={total}, asst rendered={}, user rendered={}, asst+user+1trailing = {}",
+            "counted total={total}, asst rendered={}, user rendered={}, asst+user = {}",
             asst_lines.len(),
             user_lines.len(),
-            asst_lines.len() + user_lines.len() + 1
+            asst_lines.len() + user_lines.len()
         );
         assert_eq!(
             total as usize,
-            asst_lines.len() + user_lines.len() + 1,
+            asst_lines.len() + user_lines.len(),
             "viewport line count must match the rendered output line for line"
         );
     }

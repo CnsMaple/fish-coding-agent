@@ -247,9 +247,7 @@ impl Default for Session {
             tool_display: crate::config::ToolResultDisplay::default(),
             tool_preview_lines: 10,
             line_cache: std::sync::Mutex::new(Vec::new()),
-            message_lines_cache: std::sync::Mutex::new(
-                crate::session::lru::BoundedCache::default(),
-            ),
+            message_lines_cache: std::sync::Mutex::new(crate::session::lru::BoundedCache::default()),
             cached_total_lines: None,
             layout_version: 0,
             render_cache: std::sync::Mutex::new(None),
@@ -777,12 +775,6 @@ impl Session {
             }
 
             // Spacer (final blank line emitted by `build_message_lines`).
-            n += 1;
-        }
-        if !self.messages.is_empty() {
-            // One trailing blank line rendered at the very bottom of
-            // the session by `build_lines_viewport` to give the chat a
-            // visible gap from the input/function panel below.
             n += 1;
         }
         n

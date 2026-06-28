@@ -25,7 +25,11 @@ pub fn render(f: &mut Frame, app: &mut App) {
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Min(0),
-                Constraint::Percentage(30),
+                // Function panel takes 20% of the remaining space (after
+                // input/cwd); the session area gets the leftover so long
+                // tables (12 rows + final spacer = 13) fit in a 24-row
+                // terminal without clipping the bottom border.
+                Constraint::Percentage(20),
                 Constraint::Length(input_height),
                 Constraint::Length(CWD_HEIGHT),
             ])
@@ -124,10 +128,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     //   - no phantom role prefix line
     //   - +1 for each thinking/tool block (the trailing blank)
     //   - +1 leading gap if a block appears with empty content
-    //   - +1 final spacer
-    // The session-wide trailing blank line at the very bottom of
-    // `build_lines_viewport` is *not* added here because there are no
-    // toggles on that row.
+    //   - +1 final spacer (this is also the visual gap to the input)
     let mut line_idx: usize = 0;
     for (msg_idx, m) in app.session.messages.iter().enumerate() {
         // Thinking segments.
@@ -158,10 +159,8 @@ pub fn render(f: &mut Frame, app: &mut App) {
         }
 
         // Content (post-markdown rendered count, cached by width).
-        let content_lines = crate::session::render::read_cached_content_count_at(
-            m,
-            width_u16,
-        ) as usize;
+        let content_lines =
+            crate::session::render::read_cached_content_count_at(m, width_u16) as usize;
         line_idx += content_lines;
 
         // Tool result blocks.
@@ -274,6 +273,10 @@ fn render_session_scrollbar(
     }
 
     let x = area.right().saturating_sub(1);
+    // Scrollbar uses the full session area height. The thumb lands at
+    // the bottom when `scroll == 0`, overwriting the last message's
+    // final spacer (a blank line) with `█` — that's a no-op visually
+    // because the spacer was empty anyway.
     let track_height = area.height as usize;
     if track_height == 0 {
         return;
