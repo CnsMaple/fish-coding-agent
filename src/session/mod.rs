@@ -488,10 +488,19 @@ impl Session {
                 let mut extended = false;
                 if let Some(last) = m.thinking_segments.last_mut() {
                     if !last.closed {
-                        last.content.push_str(chunk);
-                        last.cached_line_count_expanded = None;
-                        last.cached_line_count_collapsed = None;
-                        extended = true;
+                        // If content has grown past the segment's offset,
+                        // auto-close it so the new thinking lands at the
+                        // current content position rather than extending
+                        // an older block that visually sits above the
+                        // already-streamed text.
+                        if m.content.len() > last.offset {
+                            last.closed = true;
+                        } else {
+                            last.content.push_str(chunk);
+                            last.cached_line_count_expanded = None;
+                            last.cached_line_count_collapsed = None;
+                            extended = true;
+                        }
                     }
                 }
                 if !extended {
