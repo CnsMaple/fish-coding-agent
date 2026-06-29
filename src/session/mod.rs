@@ -337,6 +337,7 @@ impl Session {
                     tool.title = title;
                     tool.cached_line_count_visible = None;
                     tool.cached_line_count_collapsed = None;
+                    m.cached_content_line_count = None;
                     m.bump_version();
                     if let Ok(mut c) = self.line_cache.lock() {
                         if id < c.len() {
@@ -373,6 +374,7 @@ impl Session {
                     cached_line_count_visible: None,
                     cached_line_count_collapsed: None,
                 });
+                m.cached_content_line_count = None;
                 m.bump_version();
                 self.invalidate_layout_cache();
             }
@@ -396,6 +398,7 @@ impl Session {
                     cached_line_count_visible: None,
                     cached_line_count_collapsed: None,
                 });
+                m.cached_content_line_count = None;
                 m.bump_version();
                 self.invalidate_layout_cache();
             }
@@ -409,6 +412,7 @@ impl Session {
                     tool.content.push_str(delta);
                     tool.cached_line_count_visible = None;
                     tool.cached_line_count_collapsed = None;
+                    m.cached_content_line_count = None;
                     m.bump_version();
                     if let Ok(mut c) = self.line_cache.lock() {
                         if id < c.len() {
@@ -500,6 +504,7 @@ impl Session {
                         cached_line_count_collapsed: None,
                     });
                 }
+                m.cached_content_line_count = None;
                 m.bump_version();
                 self.invalidate_layout_cache();
             }
@@ -902,7 +907,12 @@ fn render_cached_content_lines(m: &mut Message, width: u16) -> u32 {
             return c.count;
         }
     }
-    let n = crate::session::render::content_line_count(&m.content, width as usize);
+    let n = crate::session::render::content_line_count_segmented(
+        &m.content,
+        width as usize,
+        &m.thinking_segments,
+        &m.tool_results,
+    );
     m.cached_content_line_count = Some(CachedLineCount { width, count: n });
     n
 }
@@ -917,7 +927,12 @@ fn read_cached_content_lines(m: &Message, width: u16) -> u32 {
             return c.count;
         }
     }
-    crate::session::render::content_line_count(&m.content, width as usize)
+    crate::session::render::content_line_count_segmented(
+        &m.content,
+        width as usize,
+        &m.thinking_segments,
+        &m.tool_results,
+    )
 }
 
 /// Remove text-based tool call JSON fallback lines from content.

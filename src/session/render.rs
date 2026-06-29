@@ -198,7 +198,12 @@ pub(crate) fn read_cached_content_count_at(m: &super::Message, width: u16) -> u3
             return c.count;
         }
     }
-    content_line_count(&m.content, width as usize)
+    content_line_count_segmented(
+        &m.content,
+        width as usize,
+        &m.thinking_segments,
+        &m.tool_results,
+    )
 }
 
 /// Toggle label text used by older tests / callers.
@@ -552,23 +557,12 @@ fn build_lines_viewport(
         }
     }
 
-    // Ensure the visual gap between the session and the input block.
-    // `build_message_lines` already pushes a `final spacer` blank line
-    // at the end of the last message, but when the content overflows
-    // the viewport the slice above can land on a non-blank line (e.g.
-    // the bottom border of a code block) and the spacer sits one row
-    // past the viewport. Pushing an extra blank would push `out.len()`
-    // to `inner_h + 1` and Ratatui's `Paragraph` clips at
-    // `y >= area.height`, dropping the new row entirely. Replace the
-    // last line in-place instead: this keeps `out.len()` within the
-    // viewport budget and guarantees the bottom row is blank.
-    if let Some(last) = out.last_mut() {
-        let is_blank = last.spans.iter().all(|s| s.content.is_empty());
-        if !is_blank {
-            *last = Line::from("");
-        }
-    }
-
+    // The `final spacer` emitted by `build_message_lines` is the visual
+    // gap between the session and the input block below. With the
+    // segmented line-count fix (`content_line_count_segmented`) the
+    // viewport boundary calculation is now consistent with the actual
+    // rendered output, so the last line of a properly-sized viewport is
+    // always this blank spacer.
     out
 }
 
@@ -715,11 +709,17 @@ pub fn content_line_count(content: &str, width: usize) -> u32 {
     if text.trim().is_empty() {
         return 0;
     }
-    // Match `render_content_segment`: the content gets a 3-space indent
-    // before being handed to markdown, and lines wider than `inner_w`
-    // are wrapped.
     let inner_w = width.saturating_sub(3).max(1);
-    let md_lines = crate::session::markdown::render_with_width(&text, inner_w);
+    count_md_lines(&text, inner_w)
+}
+
+/// Count rendered markdown lines for a text at the given inner width.
+/// Does NOT strip tool calls or legacy markers — caller must pre-process.
+fn count_md_lines(text: &str, inner_w: usize) -> u32 {
+    if text.is_empty() {
+        return 0;
+    }
+    let md_lines = crate::session::markdown::render_with_width(text, inner_w);
     let mut count: u32 = 0;
     for line in &md_lines {
         if line.width() <= inner_w {
@@ -730,6 +730,89 @@ pub fn content_line_count(content: &str, width: usize) -> u32 {
         }
     }
     count
+}
+
+/// Count content lines matching the **segmented** rendering of
+/// `build_message_lines`.  Instead of rendering the full content
+/// through markdown (which can disagree with the per-segment rendering
+/// when a thinking/tool offset splits a markdown construct such as a
+/// table or fenced code block), this function splits the content at
+/// the same offsets as `build_message_lines` and counts each segment
+/// separately.
+///
+/// The result is the number of content-only display lines that
+/// `build_message_lines` would produce for the text portions of the
+/// message (excluding thinking/tool block rows, spacers, user-bg
+/// padding, and the leading gap).
+pub fn content_line_count_segmented(
+    raw: &str,
+    width: usize,
+    thinking_segments: &[ThinkingSegment],
+    tool_results: &[ToolResultBlock],
+) -> u32 {
+    #[allow(dead_code)]
+    enum ItemKind {
+        Thinking,
+        Tool,
+    }
+    #[allow(dead_code)]
+    struct Item {
+        offset: usize,
+        kind: ItemKind,
+    }
+
+    let mut items: Vec<Item> = Vec::new();
+    for seg in thinking_segments {
+        let offset = clamp_char_boundary(raw, seg.offset.min(raw.len()));
+        items.push(Item {
+            offset,
+            kind: ItemKind::Thinking,
+        });
+    }
+    for tool in tool_results.iter() {
+        let offset = clamp_char_boundary(raw, tool.content_offset.min(raw.len()));
+        items.push(Item {
+            offset,
+            kind: ItemKind::Tool,
+        });
+    }
+    // Sort by offset; stable sort keeps thinking before tools at the
+    // same offset, matching `build_message_lines`.
+    items.sort_by(|a, b| a.offset.cmp(&b.offset));
+
+    let inner_w = width.saturating_sub(3).max(1);
+    let mut cursor = 0usize;
+    let mut total: u32 = 0;
+
+    for item in &items {
+        let offset = item.offset;
+        if offset < cursor {
+            continue;
+        }
+        if offset > cursor {
+            total += count_md_segment(&raw[cursor..offset], inner_w);
+            cursor = offset;
+        }
+    }
+    if cursor < raw.len() {
+        total += count_md_segment(&raw[cursor..], inner_w);
+    }
+
+    total
+}
+
+/// Apply the same pre-processing as `render_content_segment` (legacy
+/// markers + text tool calls) and return the markdown line count.
+fn count_md_segment(text: &str, inner_w: usize) -> u32 {
+    if text.is_empty() {
+        return 0;
+    }
+    let text = strip_legacy_markers(text);
+    let text = crate::session::strip_text_tool_calls(&text);
+    if text.trim().is_empty() {
+        return 0;
+    }
+    count_md_lines(&text, inner_w)
 }
 
 fn ensure_gap_before_block(msg_lines: &mut Vec<Line<'static>>) {
@@ -1750,6 +1833,84 @@ mod content_line_count_tests {
     fn empty_content_returns_zero() {
         assert_eq!(content_line_count("", 80), 0);
         assert_eq!(content_line_count("   \n  \t  \n", 80), 0);
+    }
+
+    #[test]
+    fn segmented_count_matches_build_message_lines_with_table_split() {
+        // Regression: when a thinking/tool offset splits a markdown
+        // table, `content_line_count_segmented` must produce the same
+        // count of content lines as `build_message_lines` produces.
+        // The old `content_line_count` (full-content) counted table
+        // borders/rows that the split segments no longer render,
+        // causing a mismatch in viewport total vs actual output.
+        let width = 80usize;
+        let table = "| A | B |\n| --- | --- |\n| X | Y |\n| Z | W |";
+        // Capture text AFTER the first row to simulate a thinking
+        // segment whose offset falls inside the table.
+        let mut s = crate::session::Session::default();
+        let mut asst = crate::session::Message::new(
+            crate::session::Role::Assistant,
+            format!("text\n\n{table}"),
+        );
+        // Thinking segment at an offset that splits the table
+        // (inside the header area, after "text\n\n| A | B |").
+        asst.thinking_segments.push(crate::session::ThinkingSegment {
+            offset: "text\n\n| A | B |".len(),
+            content: "thinking content".to_string(),
+            closed: false,
+            cached_line_count_expanded: None,
+            cached_line_count_collapsed: None,
+        });
+        asst.thinking_visible = true;
+        s.push(asst);
+
+        s.display = crate::config::ThinkingDisplay::Show;
+        s.tool_preview_lines = 10;
+        s.count_all_lines_with_width(width);
+
+        // Verify: the content line count from segmented counting
+        // matches what build_message_lines actually renders.
+        let rendered = crate::session::render::build_message_lines(&s, 0, width);
+        let rendered_content_count = rendered.len() as u32;
+
+        // Re-compute the msg_total components (content + thinking
+        // blocks + trailing blanks + leading gap + spacer) to isolate
+        // just the content portion.
+        let msg = &s.messages[0];
+        let seg_count = content_line_count_segmented(
+            &msg.content,
+            width,
+            &msg.thinking_segments,
+            &msg.tool_results,
+        );
+
+        // The rendered message has:
+        //   content lines (seg_count) +
+        //   thinking block rows (for 1 segment, expanded) +
+        //   1 trailing blank after thinking +
+        //   1 leading gap +
+        //   1 final spacer
+        // We verify that seg_count matches by subtracting the
+        // known overhead from the total.
+        let think_lines = thinking_block_line_count("thinking content", true, 10, width) as u32;
+        let overhead = think_lines + 1 + 1 + 1; // thinking rows + trailing blank + leading gap + spacer
+        assert_eq!(
+            seg_count + overhead,
+            rendered_content_count,
+            "segmented content count ({seg_count}) + overhead ({overhead}) = {} \
+             should match rendered total ({rendered_content_count}). \
+             Full render:\n{}",
+            seg_count + overhead,
+            rendered
+                .iter()
+                .map(|l| l
+                    .spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>())
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
     }
 }
 
