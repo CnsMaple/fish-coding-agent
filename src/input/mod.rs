@@ -677,6 +677,7 @@ pub const COMMAND_LIST: &[&str] = &[
     "/retry",
     "/continue",
     "/plan",
+    "/build",
     "/quit",
     "/exit",
     "/help",
@@ -810,9 +811,8 @@ pub fn sidebar_tab_name(t: &SidebarTab) -> &'static str {
         SidebarTab::TimelinePicker(_) => "timeline",
         SidebarTab::SessionPicker(_) => "sessions",
         SidebarTab::SessionRename(_) => "rename",
-        SidebarTab::Ask(_) => "ask",
-        SidebarTab::Todo(_) => "todo",
         SidebarTab::Plan(_) => "plan",
+        SidebarTab::Ask(_) => "ask",
         SidebarTab::Hotkey => "hotkey",
     }
 }

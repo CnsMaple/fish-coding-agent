@@ -235,6 +235,17 @@ pub fn build_message_lines(session: &Session, msg_idx: usize, width: usize) -> V
         }
     }
 
+    // Ask snapshots: assistant messages whose content starts with
+    // `---ask---` are the merged-list bodies of a `ChatDone` flush,
+    // not raw chat. Render them as a single `+--- Ask ---+` block
+    // so concurrent ask calls in one assistant turn collapse into
+    // one block instead of N. Also bypass the normal thinking /
+    // tool-result pipeline.
+    if m.content.trim_start().starts_with("---ask---") {
+        let rendered = render_ask_snapshot_message(&m.content, width, m.streaming, m.display_cursor);
+        return rendered;
+    }
+
     let mut msg_lines: Vec<Line<'static>> = Vec::new();
     if let Some(skill_ref) = &m.skill_ref {
         let rows = build_skill_block_rows(skill_ref, width);
@@ -883,6 +894,13 @@ fn build_tool_block_rows(
         } else {
             return vec![];
         }
+    } else if tool.name == "ask" {
+        // Individual ask tool calls do NOT render as independent
+        // blocks. The `App::flush_ask_snapshot` method collapses
+        // all ask calls from one assistant turn into a single
+        // `+--- Ask ---+` block in the session — that is the only
+        // ask block the user sees per turn.
+        vec![]
     } else {
         let (output, footer) = tool_display_content(tool);
         let title_highlighted = tool.name == "shell_command" || tool.name == "command";
@@ -1142,6 +1160,38 @@ fn box_row_line_spans(spans: Vec<Span<'static>>, width: usize, bg: Color) -> Lin
     Line::from(all_spans)
 }
 
+/// Render an ask-snapshot message (content starts with `---ask---`)
+/// as a single `+--- Ask ---+` block. One block per assistant turn,
+/// regardless of how many ask tool calls the model emitted in
+/// parallel. Each line is wrapped and clipped to the panel width.
+fn render_ask_snapshot_message(
+    content: &str,
+    width: usize,
+    _streaming: bool,
+    _display_cursor: usize,
+) -> Vec<Line<'static>> {
+    let width = width.max(8);
+    let colors = active_colors();
+    let bg = colors.tool_success_bg;
+    let mut out: Vec<Line<'static>> = Vec::new();
+    out.push(border_with_label_line(width, " Ask ", bg));
+    // Strip the leading `---ask---` header line (it just signals the
+    // snapshot; the border title already says Ask).
+    let body = content
+        .lines()
+        .skip_while(|l| l.trim_start().starts_with("---ask---"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    for line in body.lines() {
+        let wrapped = wrap_line(line, width.saturating_sub(4));
+        for w in wrapped {
+            out.push(box_row_line(&w, width, bg));
+        }
+    }
+    out.push(border_line(width, bg));
+    out
+}
+
 fn box_row_lines(text: &str, width: usize, bg: Color) -> Vec<Line<'static>> {
     wrap_line(text, width.saturating_sub(4))
         .into_iter()
@@ -1227,54 +1277,57 @@ fn build_python_command_rows(
     Some(rows)
 }
 
+
+
 fn tool_display_content(tool: &ToolResultBlock) -> (String, String) {
     if tool.name == "shell_command" || tool.name == "command" {
         return command_display_content(&tool.content);
     }
-    if matches!(tool.name.as_str(), "ask" | "todo" | "plan") {
-        if let Some(display) = interaction_tool_display(&tool.content) {
-            return (display, "[shown in function panel]".to_string());
+    if tool.name == "plan" {
+        if let Some((body, footer)) = plan_tool_display(&tool.content) {
+            return (body, footer);
         }
     }
-
     (tool.content.trim_end().to_string(), String::new())
 }
 
-fn interaction_tool_display(content: &str) -> Option<String> {
-    let value: serde_json::Value = serde_json::from_str(content).ok()?;
-    match value.get("kind")?.as_str()? {
-        "ask" => {
-            let question = value.get("question").and_then(|v| v.as_str()).unwrap_or("");
-            let mut out = format!("? {question}");
-            if let Some(options) = value.get("options").and_then(|v| v.as_array()) {
-                for opt in options.iter().filter_map(|v| v.as_str()) {
-                    out.push_str("\n- ");
-                    out.push_str(opt);
-                }
-            }
-            Some(out)
-        }
-        "todo" => {
-            let mut out = String::new();
-            for item in value.get("items")?.as_array()? {
-                let content = item.get("content").and_then(|v| v.as_str()).unwrap_or("");
-                let status = item
-                    .get("status")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("pending");
-                out.push_str(&format!("[{status}] {content}\n"));
-            }
-            Some(out.trim_end().to_string())
-        }
-        "plan" => Some(
-            value
-                .get("content")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-        ),
-        _ => None,
+/// Render a `plan` tool result in the session. The plan body is shown
+/// directly so the user can read it without opening a sidebar tab;
+/// the sidebar still surfaces the approve/reject actions.
+fn plan_tool_display(content: &str) -> Option<(String, String)> {
+    // Tool results come back wrapped in `{"ok":true,"result":"…"}`;
+    // unwrap first so we can read the inner JSON the tool itself
+    // emitted ({"kind":"plan",…}).
+    let inner = unwrap_tool_result_content(content);
+    let value: serde_json::Value = serde_json::from_str(&inner).ok()?;
+    if value.get("kind").and_then(|v| v.as_str()) != Some("plan") {
+        return None;
     }
+    let title = value
+        .get("title")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Plan")
+        .trim();
+    let body = value
+        .get("content")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let rendered = if title.is_empty() || title.eq_ignore_ascii_case("plan") {
+        body
+    } else {
+        format!("# {title}\n\n{body}")
+    };
+    let status = value
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("pending");
+    let footer = match status {
+        "approved" => "approved — proceeding in build mode".to_string(),
+        "rejected" => "rejected — awaiting a revised plan".to_string(),
+        _ => "↳ approve / reject in the plan tab".to_string(),
+    };
+    Some((rendered, footer))
 }
 
 fn build_write_file_diff_rows(
@@ -2192,6 +2245,79 @@ mod tests {
             "exit code missing:\n{text}"
         );
         assert!(!text.contains("{\"ok\":"), "json wrapper leaked:\n{text}");
+    }
+
+    /// Individual ask tool calls do NOT render as independent
+    /// blocks — they are consumed by the snapshot mechanism.
+    #[test]
+    fn ask_individual_tool_block_is_empty() {
+        let tool = ToolResultBlock {
+            name: "ask".to_string(),
+            title: "Ask".to_string(),
+            content: serde_json::json!({
+                "ok": true,
+                "result": "{\"kind\":\"ask\",\"question\":\"theme?\",\"options\":[\"dark\",\"light\"]}"
+            })
+            .to_string(),
+            content_offset: 0,
+            visible: true,
+            running: false,
+            cached_line_count_visible: None,
+            cached_line_count_collapsed: None,
+        };
+        let rows = build_tool_block_rows(&tool, true, 10, 100);
+        assert!(rows.is_empty(), "ask tool block must be empty, got {rows:?}");
+    }
+
+    /// The snapshot message (pushed by `flush_ask_snapshot`) must
+    /// render as a single `+--- Ask ---+` block containing the
+    /// merged-list body.
+    #[test]
+    fn ask_snapshot_block_renders_merged_list() {
+        let body = concat!(
+            "---ask---\n",
+            "q1: 你希望使用什么主题?\n",
+            "   - 深色\n",
+            "   - 浅色\n",
+            "   - 跟随系统\n",
+            "q2: 你偏好什么语言?\n",
+            "   - 中文\n",
+        );
+        let lines =
+            render_ask_snapshot_message(body, 60, false, 0);
+        let text = lines_to_text(&lines);
+        assert!(text.contains("Ask"), "missing header:\n{text}");
+        assert!(text.contains("q1:"), "missing q1:\n{text}");
+        assert!(text.contains("深色"), "missing option:\n{text}");
+        assert!(text.contains("q2:"), "missing q2:\n{text}");
+        assert!(text.contains("中文"), "missing option:\n{text}");
+    }
+
+    /// The plan tool's session block must unwrap the outer
+    /// `{"ok":true,"result":"…"}` envelope and read the inner
+    /// `kind:plan` payload.
+    #[test]
+    fn plan_block_unwraps_result_envelope() {
+        let tool = ToolResultBlock {
+            name: "plan".to_string(),
+            title: "Plan: test".to_string(),
+            content: serde_json::json!({
+                "ok": true,
+                "result": "{\"kind\":\"plan\",\"title\":\"test\",\"content\":\"# hello\\n\\nbody\"}"
+            })
+            .to_string(),
+            content_offset: 0,
+            visible: true,
+            running: false,
+            cached_line_count_visible: None,
+            cached_line_count_collapsed: None,
+        };
+        let rows = build_tool_block_rows(&tool, true, 10, 100);
+        let text = lines_to_text(&rows);
+        assert!(text.contains("hello"), "body missing:\n{text}");
+        assert!(text.contains("body"), "body missing:\n{text}");
+        assert!(!text.contains("{\"ok\":"), "json envelope leaked:\n{text}");
+        assert!(!text.contains("\"kind\":\"plan\""), "raw inner JSON leaked:\n{text}");
     }
 
     #[test]

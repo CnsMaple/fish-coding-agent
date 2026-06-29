@@ -1,6 +1,5 @@
 use crate::config::{Config, ProviderId, ProviderKind};
 use crate::function::notifications::{HitRate, ModelCache, Notifications, TokenRate};
-pub use crate::session::TodoItem;
 use crate::session::{Role, Session};
 use chrono::{DateTime, Utc};
 use std::collections::VecDeque;
@@ -57,9 +56,7 @@ impl CompletionState {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppMode {
-    Ask,
     Plan,
-    Todo,
     Yolo,
     Shell,
     ShellContext,
@@ -70,9 +67,7 @@ pub enum AppMode {
 impl AppMode {
     pub fn as_str(self) -> &'static str {
         match self {
-            AppMode::Ask => "ask",
             AppMode::Plan => "plan",
-            AppMode::Todo => "todo",
             AppMode::Yolo => "yolo",
             AppMode::Shell => "shell",
             AppMode::ShellContext => "shell_context",
@@ -94,9 +89,8 @@ pub enum SidebarTab {
     TimelinePicker(TimelinePickerState),
     SessionPicker(SessionPickerState),
     SessionRename(SessionRenameState),
-    Ask(AskState),
-    Todo(TodoState),
     Plan(PlanState),
+    Ask(AskState),
     Hotkey,
 }
 
@@ -662,6 +656,9 @@ pub struct ThinkingPickerState {
     pub cursor: usize,
     pub query: String,
     pub filtered: Vec<usize>,
+    /// Vertical scroll offset (top visible row in the list) so the
+    /// focused row stays in view.
+    pub scroll: usize,
 }
 
 impl ThinkingPickerState {
@@ -670,6 +667,7 @@ impl ThinkingPickerState {
             cursor: 0,
             query: String::new(),
             filtered: Vec::new(),
+            scroll: 0,
         };
         s.rebuild_filter();
         s
@@ -694,6 +692,21 @@ impl ThinkingPickerState {
             .collect();
         if self.cursor >= self.filtered.len() {
             self.cursor = self.filtered.len().saturating_sub(1);
+        }
+        if self.scroll > self.cursor {
+            self.scroll = self.cursor;
+        }
+    }
+
+    /// Move `scroll` so that `cursor` is inside the visible window.
+    pub fn ensure_cursor_visible(&mut self, visible_rows: usize) {
+        if visible_rows == 0 {
+            return;
+        }
+        if self.cursor < self.scroll {
+            self.scroll = self.cursor;
+        } else if self.cursor >= self.scroll + visible_rows {
+            self.scroll = self.cursor + 1 - visible_rows;
         }
     }
 }
@@ -983,80 +996,17 @@ impl SessionRenameState {
 }
 
 #[derive(Debug, Clone)]
-pub struct AskState {
-    pub question: String,
-    pub options: Vec<String>,
-    pub cursor: usize,
-    pub answered: Option<String>,
-    pub input: String,
-    pub input_cursor: usize,
-}
-
-impl AskState {
-    pub fn new(question: String, options: Vec<String>) -> Self {
-        Self {
-            question,
-            options,
-            cursor: 0,
-            answered: None,
-            input: String::new(),
-            input_cursor: 0,
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct TodoState {
-    pub items: Vec<TodoItem>,
-    pub cursor: usize,
-    /// Index of the item being edited inline, or None.
-    pub editing: Option<usize>,
-    /// Buffer for the in-progress edit.
-    pub edit_buffer: String,
-}
-
-impl TodoState {
-    pub fn new(items: Vec<TodoItem>) -> Self {
-        Self {
-            items,
-            cursor: 0,
-            editing: None,
-            edit_buffer: String::new(),
-        }
-    }
-
-    /// Start editing the item at `idx`. Returns false if out of bounds.
-    pub fn start_edit(&mut self, idx: usize) -> bool {
-        if idx >= self.items.len() {
-            return false;
-        }
-        self.editing = Some(idx);
-        self.edit_buffer = self.items[idx].content.clone();
-        true
-    }
-
-    /// Commit the edit buffer to the item.
-    pub fn commit_edit(&mut self) {
-        if let Some(idx) = self.editing {
-            if idx < self.items.len() {
-                self.items[idx].content = std::mem::take(&mut self.edit_buffer);
-            }
-        }
-        self.editing = None;
-    }
-
-    /// Cancel the edit (discard buffer).
-    pub fn cancel_edit(&mut self) {
-        self.editing = None;
-        self.edit_buffer.clear();
-    }
-}
-
-#[derive(Debug, Clone)]
 pub struct PlanState {
     pub title: String,
     pub content: String,
     pub approved: Option<bool>,
+    /// Absolute path of the file the plan was written to. `None`
+    /// until the user explicitly saves the plan with the `S` key.
+    pub path: Option<std::path::PathBuf>,
+    /// `true` when the plan has unsaved changes — i.e. it has not
+    /// been persisted to disk yet. The tab is rendered with a "press
+    /// S to save" hint while this is set.
+    pub dirty: bool,
 }
 
 impl PlanState {
@@ -1065,7 +1015,167 @@ impl PlanState {
             title,
             content,
             approved: None,
+            path: None,
+            dirty: true,
         }
+    }
+
+    pub fn with_path(mut self, path: std::path::PathBuf) -> Self {
+        self.path = Some(path);
+        self.dirty = false;
+        self
+    }
+}
+
+/// One question in the AskState stack. Options are the model-supplied
+/// choices; the last visible row in the picker for THIS question is
+/// the implicit "Type your own answer…" choice, which is not stored
+/// here. `cursor` is the per-question picker row (only meaningful in
+/// `AskPhase::Asking`).
+#[derive(Debug, Clone)]
+pub struct AskItem {
+    pub question: String,
+    pub options: Vec<String>,
+    pub cursor: usize,
+    pub answered: Option<String>,
+}
+
+impl AskItem {
+    pub fn new(question: String, options: Vec<String>) -> Self {
+        Self {
+            question,
+            options,
+            // 0 is the first option; the final row (the implicit
+            // freeform input) is index `options.len()`.
+            cursor: 0,
+            answered: None,
+        }
+    }
+
+    /// Number of rows in the picker for THIS question: every option
+    /// plus one for the implicit "Type your own answer…" row.
+    pub fn row_count(&self) -> usize {
+        self.options.len() + 1
+    }
+}
+
+/// Phase of the ask picker.
+///
+/// - `Asking` — the user is picking an answer for the active
+///   question. Enter writes the answer (advancing or going to
+///   Reviewing when every question is answered), Up/Down moves the
+///   picker row, Left/Right switches the active question.
+/// - `Reviewing` — every question has an answer; the tab shows a
+///   read-only preview of all Q/A pairs. Enter sends the whole batch
+///   to the LLM; Esc goes back to `Asking` so the user can fix one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AskPhase {
+    Asking,
+    Reviewing,
+}
+
+/// Multiple `ask` tool calls (possibly issued in parallel) are
+/// queued into a single `AskState`. The tab strip in the UI shows
+/// every question as a sub-tab (`Q1 Q2 Q3 Confirm`) and one
+/// question is rendered at a time.
+#[derive(Debug, Clone)]
+pub struct AskState {
+    pub items: Vec<AskItem>,
+    /// Active question in `Asking` phase; the picker shows this
+    /// question's options.
+    pub active: usize,
+    pub phase: AskPhase,
+}
+
+impl AskState {
+    pub fn new(question: String, options: Vec<String>) -> Self {
+        Self {
+            items: vec![AskItem::new(question, options)],
+            active: 0,
+            phase: AskPhase::Asking,
+        }
+    }
+
+    /// Append a new question (typically from a parallel `ask` tool
+    /// call). The new question becomes the active one so the user
+    /// can answer it next.
+    pub fn push(&mut self, question: String, options: Vec<String>) {
+        self.items.push(AskItem::new(question, options));
+        self.active = self.items.len() - 1;
+        // Adding a question puts us back in the asking phase: the
+        // user has at least one new thing to answer.
+        self.phase = AskPhase::Asking;
+    }
+
+    /// Number of rows in the picker for the active question
+    /// (options + implicit "Type your own…" choice).
+    pub fn row_count(&self) -> usize {
+        self.items
+            .get(self.active)
+            .map(|it| it.row_count())
+            .unwrap_or(0)
+    }
+
+    /// True if every question in the queue has an answer.
+    pub fn all_answered(&self) -> bool {
+        !self.items.is_empty() && self.items.iter().all(|it| it.answered.is_some())
+    }
+
+    /// Find the next unanswered question after `from`, wrapping.
+    /// Returns `None` if everything is already answered.
+    pub fn next_unanswered(&self, from: usize) -> Option<usize> {
+        let n = self.items.len();
+        if n == 0 {
+            return None;
+        }
+        for offset in 0..n {
+            let idx = (from + offset) % n;
+            if self.items[idx].answered.is_none() {
+                return Some(idx);
+            }
+        }
+        None
+    }
+
+    /// Build the user-message that gets sent to the LLM in the
+    /// reviewing phase. One paragraph per Q/A pair, in the original
+    /// order. Free-form answers are stored verbatim (the user typed
+    /// them in the main input, prefixed with the question by the
+    /// `submit_input` flow that triggered the answer).
+    pub fn build_summary(&self) -> String {
+        let mut out = String::from("(Answers to your questions:)\n");
+        for (i, it) in self.items.iter().enumerate() {
+            if let Some(ans) = &it.answered {
+                out.push_str(&format!("\nQ{}. {}\n   A. {}\n", i + 1, it.question, ans));
+            }
+        }
+        out.push_str("\n(All questions answered. Proceed.)");
+        out
+    }
+
+    /// Build the dismiss message for Esc. Includes any answers the
+    /// user already gave (they were on record), and notes each
+    /// unanswered question as "dismissed" so the LLM knows to fill
+    /// in defaults or proceed.
+    pub fn build_dismiss_summary(&self) -> String {
+        let mut out = String::from("(Ask round dismissed by the user.)\n");
+        for (i, it) in self.items.iter().enumerate() {
+            match &it.answered {
+                Some(ans) => out.push_str(&format!(
+                    "\nQ{}. {}\n   A. {}\n",
+                    i + 1,
+                    it.question,
+                    ans
+                )),
+                None => out.push_str(&format!(
+                    "\nQ{}. {}\n   A. (dismissed — no explicit answer)\n",
+                    i + 1,
+                    it.question
+                )),
+            }
+        }
+        out.push_str("\n(Proceed using the answers above, or sensible defaults.)");
+        out
     }
 }
 
@@ -1095,9 +1205,8 @@ impl FunctionPanel {
             Some(SidebarTab::TimelinePicker(_)) => "timeline",
             Some(SidebarTab::SessionPicker(_)) => "sessions",
             Some(SidebarTab::SessionRename(_)) => "rename",
-            Some(SidebarTab::Ask(_)) => "ask",
-            Some(SidebarTab::Todo(_)) => "todo",
             Some(SidebarTab::Plan(_)) => "plan",
+            Some(SidebarTab::Ask(_)) => "ask",
             Some(SidebarTab::Hotkey) => "hotkey",
             None => "?",
         }
@@ -1145,6 +1254,9 @@ pub struct App {
     pub session_id: String,
     pub session_title: String,
     pub mode: AppMode,
+    /// Active agent role. Drives the tool permission gate and the
+    /// system prompt template. Synced with `mode` by `set_mode`.
+    pub active_agent: crate::permission::Agent,
     pub function: FunctionPanel,
     pub input: crate::input::InputState,
     pub status: crate::input::status::StatusBar,
@@ -1217,6 +1329,14 @@ pub struct App {
     /// conhost-style pastes (which arrive as individual `KeyEvent`s)
     /// can be folded into a `[paste N lines]` block.
     pub burst_buf: String,
+
+    /// Pending ask-snapshot content. The model may emit several
+    /// `ask` tool calls in one turn; we accumulate their merged
+    /// `q1: …` / ` - opt` lines here and flush one consolidated
+    /// message into the session on `ChatDone`, so the user sees a
+    /// single `+--- Ask ---+` block per assistant turn instead of
+    /// one block per question.
+    pub pending_ask_snapshot: String,
 
     /// Snapshot of cursor position and buffer length taken when the
     /// current burst started, so we can undo the inserted characters
@@ -1291,6 +1411,7 @@ impl App {
             session_title,
             mode: AppMode::Yolo,
             function: FunctionPanel::new(),
+            active_agent: crate::permission::Agent::Build,
             input: crate::input::InputState::new(),
             status,
             function_visible: false,
@@ -1328,6 +1449,7 @@ impl App {
             paste_key_quota: 0,
             burst_buf: String::new(),
             burst_snapshot: None,
+            pending_ask_snapshot: String::new(),
         };
         app.refresh_status_model_context();
         app
@@ -1411,13 +1533,6 @@ impl App {
     }
 
     pub fn save_current_session(&mut self) {
-        // Sync todo items from the function panel to the session.
-        for tab in &self.function.tabs {
-            if let crate::function::SidebarTab::Todo(state) = tab {
-                self.session.todo_items = state.items.clone();
-                break;
-            }
-        }
         if self.session.messages.is_empty() {
             return;
         }
@@ -1485,9 +1600,6 @@ impl App {
                     render_cache: Default::default(),
                 };
                 self.session.invalidate_layout_cache();
-                if !stored.todo_items.is_empty() {
-                    self.open_todo(stored.todo_items);
-                }
                 self.session_id = stored.id;
                 self.session_title = stored.title;
                 self.notify(
@@ -1575,51 +1687,18 @@ impl App {
 
     pub fn set_mode(&mut self, mode: AppMode) {
         self.mode = mode;
+        self.active_agent = match mode {
+            AppMode::Plan => crate::permission::Agent::Plan,
+            _ => crate::permission::Agent::Build,
+        };
         self.status.set_mode(mode.as_str());
-    }
-
-    pub fn open_ask(&mut self, question: String, options: Vec<String>) {
-        self.set_mode(AppMode::Ask);
-        // Reuse existing Ask tab if present, otherwise push a new one.
-        if let Some((i, _)) = self
-            .function
-            .tabs
-            .iter_mut()
-            .enumerate()
-            .find(|(_, t)| matches!(t, SidebarTab::Ask(_)))
-        {
-            self.function.tabs[i] = SidebarTab::Ask(AskState::new(question, options));
-            self.function.active = i;
-        } else {
-            self.function
-                .push(SidebarTab::Ask(AskState::new(question, options)));
-        }
-        self.function_visible = true;
-        self.acknowledge_panel();
-    }
-
-    pub fn open_todo(&mut self, items: Vec<TodoItem>) {
-        self.set_mode(AppMode::Todo);
-        // Reuse existing Todo tab if present, otherwise push a new one.
-        if let Some((i, _)) = self
-            .function
-            .tabs
-            .iter_mut()
-            .enumerate()
-            .find(|(_, t)| matches!(t, SidebarTab::Todo(_)))
-        {
-            self.function.tabs[i] = SidebarTab::Todo(TodoState::new(items));
-            self.function.active = i;
-        } else {
-            self.function.push(SidebarTab::Todo(TodoState::new(items)));
-        }
-        self.function_visible = true;
-        self.acknowledge_panel();
     }
 
     pub fn open_plan(&mut self, title: String, content: String) {
         self.set_mode(AppMode::Plan);
-        // Reuse existing Plan tab if present, otherwise push a new one.
+        // Plans are not auto-saved: the user reviews the plan in the
+        // session and presses S in the plan tab to persist it.
+        let state = PlanState::new(title, content);
         if let Some((i, _)) = self
             .function
             .tabs
@@ -1627,14 +1706,185 @@ impl App {
             .enumerate()
             .find(|(_, t)| matches!(t, SidebarTab::Plan(_)))
         {
-            self.function.tabs[i] = SidebarTab::Plan(PlanState::new(title, content));
+            self.function.tabs[i] = SidebarTab::Plan(state);
             self.function.active = i;
         } else {
-            self.function
-                .push(SidebarTab::Plan(PlanState::new(title, content)));
+            self.function.push(SidebarTab::Plan(state));
         }
         self.function_visible = true;
         self.acknowledge_panel();
+    }
+
+    /// Persist the active plan tab to `<config_dir>/plans/<ts>-<slug>.md`.
+    /// Sets `dirty = false` and stores the resulting path on the state.
+    /// Returns true on success.
+    pub fn save_active_plan(&mut self) -> bool {
+        let Some(idx) = self
+            .function
+            .tabs
+            .iter()
+            .position(|t| matches!(t, SidebarTab::Plan(_)))
+        else {
+            return false;
+        };
+        let title = match &self.function.tabs[idx] {
+            SidebarTab::Plan(s) => s.title.clone(),
+            _ => unreachable!(),
+        };
+        let content = match &self.function.tabs[idx] {
+            SidebarTab::Plan(s) => s.content.clone(),
+            _ => unreachable!(),
+        };
+        let Some(path) = self.persist_plan(&title, &content) else {
+            return false;
+        };
+        if let Some(SidebarTab::Plan(state)) = self.function.tabs.get_mut(idx) {
+            state.path = Some(path);
+            state.dirty = false;
+        }
+        true
+    }
+
+    /// Open (or extend) an ask picker tab. If an Ask tab is already
+    /// open, the new question is appended to its queue and becomes
+    /// the active one.
+    pub fn open_ask(&mut self, question: String, options: Vec<String>) {
+        // Surface a short toast summary so the user notices the ask
+        // even if the panel is hidden.
+        let summary = {
+            let s = question.trim();
+            if s.chars().count() > 60 {
+                let cut: String = s.chars().take(57).collect();
+                format!("{cut}…")
+            } else {
+                s.to_string()
+            }
+        };
+        self.notify(
+            crate::function::notifications::ToastLevel::Info,
+            format!("AI asks: {summary}"),
+        );
+
+        // Also accumulate the merged-list body so a single `+--- Ask
+        // ---+` block can land in the session at the end of the
+        // assistant turn (one block per turn, no matter how many ask
+        // tool calls the model emitted in parallel).
+        self.accumulate_ask_snapshot(&question, &options);
+
+        if let Some((i, _)) = self
+            .function
+            .tabs
+            .iter_mut()
+            .enumerate()
+            .find(|(_, t)| matches!(t, SidebarTab::Ask(_)))
+        {
+            if let SidebarTab::Ask(state) = &mut self.function.tabs[i] {
+                state.push(question, options);
+                state.active = state.items.len().saturating_sub(1);
+            }
+            self.function.active = i;
+        } else {
+            self.function.push(SidebarTab::Ask(AskState::new(question, options)));
+        }
+        self.function_visible = true;
+        self.acknowledge_panel();
+    }
+
+    /// Append one question's merged-list lines to the pending ask
+    /// snapshot. The snapshot is consumed by `flush_ask_snapshot`
+    /// when the assistant turn finishes (`ChatDone`).
+    fn accumulate_ask_snapshot(&mut self, question: &str, options: &[String]) {
+        // Each call increments the question number so the snapshot
+        // can be rendered with `q1: …`, `q2: …` etc.
+        let n = self.pending_ask_snapshot.matches("\nq").count() + 1;
+        if self.pending_ask_snapshot.is_empty() {
+            // First question — open the snapshot with the header on
+            // its own line so the renderer can detect "this is an ask
+            // snapshot" via the leading `---ask---` token.
+            self.pending_ask_snapshot.push_str("---ask---\n");
+        }
+        self.pending_ask_snapshot
+            .push_str(&format!("q{n}: {}\n", question.trim()));
+        for opt in options {
+            if !opt.trim().is_empty() {
+                self.pending_ask_snapshot
+                    .push_str(&format!("   - {}\n", opt.trim()));
+            }
+        }
+    }
+
+    /// Flush the accumulated ask snapshot into the session as one
+    /// `+--- Ask ---+` block. Called from the `ChatDone` /
+    /// `ChatError` event handlers so the snapshot only lands once
+    /// the model is done streaming.
+    pub fn flush_ask_snapshot(&mut self) {
+        if self.pending_ask_snapshot.is_empty() {
+            return;
+        }
+        let body = std::mem::take(&mut self.pending_ask_snapshot);
+        // Push as an assistant message so it sits in the same
+        // transcript turn as the tool calls; the renderer detects
+        // `---ask---` and draws the `+--- Ask ---+` block.
+        use crate::session::Message;
+        let mut msg = Message::new(crate::session::Role::Assistant, body);
+        msg.line_count = 1;
+        self.session.push(msg);
+    }
+
+    /// Write the plan to `<config_dir>/plans/<ts>-<slug>.md`.
+    /// Returns the absolute path on success, or `None` if the file
+    /// could not be written (we still show the plan in the UI — the
+    /// user just won't have a file to refer to).
+    fn persist_plan(&mut self, title: &str, content: &str) -> Option<std::path::PathBuf> {
+        use crate::function::notifications::ToastLevel;
+        let dir = match crate::config::paths::plans_dir() {
+            Ok(d) => d,
+            Err(e) => {
+                self.notify(
+                    ToastLevel::Warn,
+                    format!("plan: could not resolve plans dir: {e}"),
+                );
+                return None;
+            }
+        };
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            self.notify(
+                ToastLevel::Warn,
+                format!("plan: could not create plans dir: {e}"),
+            );
+            return None;
+        }
+        let ts = chrono::Utc::now().format("%Y%m%d-%H%M%S").to_string();
+        let slug: String = title
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' })
+            .collect();
+        let slug = slug.trim_matches('-');
+        let slug = if slug.is_empty() { "plan".to_string() } else { slug.to_string() };
+        let filename = format!("{ts}-{slug}.md");
+        let path = dir.join(filename);
+        let body = format!(
+            "# {}\n\n_Generated at {}_\n\n{}\n",
+            title,
+            chrono::Utc::now().to_rfc3339(),
+            content
+        );
+        match std::fs::write(&path, body) {
+            Ok(()) => {
+                self.notify(
+                    ToastLevel::Info,
+                    format!("plan saved to {}", path.display()),
+                );
+                Some(path)
+            }
+            Err(e) => {
+                self.notify(
+                    ToastLevel::Warn,
+                    format!("plan: could not write file: {e}"),
+                );
+                None
+            }
+        }
     }
 
     /// Mark that the panel was shown by user (Ctrl+N) so we clear pending marker.
@@ -1718,4 +1968,224 @@ pub fn active_provider_string(_kind: ProviderKind) -> &'static str {
 
 pub fn _ignore_unused() -> VecDeque<()> {
     VecDeque::new()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_test_app() -> App {
+        use crate::config::{make_id, Config, ProviderConfig, ProviderKind, ProviderMode};
+        use crate::function::notifications::Notifications;
+        let mut cfg = Config::default();
+        let kind = ProviderKind::Openai;
+        let id = make_id(kind, ProviderMode::Key);
+        cfg.entries.entry(id).or_insert_with(|| ProviderConfig {
+            api_key: String::new(),
+            api_key_env: String::new(),
+            base_url: crate::config::default_base_url(kind).to_string(),
+            model: String::new(),
+            model_display: String::new(),
+            name: String::new(),
+            access_key: String::new(),
+            secret_key: String::new(),
+        });
+        cfg.active = Some(make_id(ProviderKind::Openai, ProviderMode::Key));
+        let tmp = std::env::temp_dir().join("fish-coding-agent-fns-test.json");
+        let _ = std::fs::remove_file(&tmp);
+        let cache_file = tmp.parent().unwrap_or(&tmp).join("model-cache.json");
+        App {
+            config: cfg,
+            config_path: tmp,
+            session: Session::default(),
+            session_id: crate::session::store::new_session_id(),
+            session_title: "test".to_string(),
+            mode: AppMode::Yolo,
+            active_agent: crate::permission::Agent::Build,
+            function: FunctionPanel::new(),
+            input: crate::input::InputState::new(),
+            status: crate::input::status::StatusBar::new(),
+            function_visible: false,
+            pending_events: 0,
+            notifications: Notifications::default(),
+            model_cache: crate::function::notifications::ModelCache::default(),
+            hit_rate: crate::function::notifications::HitRate::new(50),
+            token_rate: crate::function::notifications::TokenRate::new(50),
+            response_started_at: None,
+            response_accumulated: std::time::Duration::ZERO,
+            response_output_chars: 0,
+            response_output_tokens: None,
+            reqwest: reqwest::Client::new(),
+            inflight: None,
+            cwd: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+            should_quit: false,
+            msg_tx: None,
+            input_prompt_area: None,
+            tui_selection: None,
+            selected_text: None,
+            tui_drag_start: None,
+            model_cache_path: cache_file,
+            thinking_toggle_rows: Vec::new(),
+            tool_toggle_rows: Vec::new(),
+            session_area: None,
+            input_cursor_screen: None,
+            function_panel_cursor: None,
+            paste_blocks: VecDeque::new(),
+            last_paste_text: None,
+            last_paste_at: None,
+            paste_key_quota: 0,
+            burst_buf: String::new(),
+            burst_snapshot: None,
+            pending_ask_snapshot: String::new(),
+        }
+    }
+
+    #[test]
+    fn plan_state_is_dirty_on_open_and_clears_after_save() {
+        let mut app = make_test_app();
+        app.open_plan("t".to_string(), "body".to_string());
+        let state = match app.function.tabs.first().unwrap() {
+            SidebarTab::Plan(s) => s.clone(),
+            _ => panic!("expected plan tab"),
+        };
+        assert!(state.dirty, "open_plan must start dirty");
+        assert!(state.path.is_none(), "open_plan must NOT auto-save");
+
+        // save_active_plan writes to the user's real config dir. We
+        // accept either true (write succeeded) or false (sandbox
+        // blocks disk), but if it returned true the path must be
+        // populated and dirty must be false.
+        let ok = app.save_active_plan();
+        if ok {
+            let state = match app.function.tabs.first().unwrap() {
+                SidebarTab::Plan(s) => s.clone(),
+                _ => panic!(),
+            };
+            assert!(!state.dirty);
+            assert!(state.path.is_some());
+        }
+    }
+
+    #[test]
+    fn open_ask_pushes_first_question() {
+        let mut app = make_test_app();
+        app.open_ask("Q?".to_string(), vec!["a".to_string(), "b".to_string()]);
+        let state = match app.function.tabs.first().unwrap() {
+            SidebarTab::Ask(s) => s.clone(),
+            _ => panic!("expected ask tab"),
+        };
+        assert_eq!(state.items.len(), 1);
+        assert_eq!(state.items[0].question, "Q?");
+        assert_eq!(state.items[0].options, vec!["a", "b"]);
+        // The per-question cursor starts on the first option.
+        assert_eq!(state.items[0].cursor, 0);
+    }
+
+    #[test]
+    fn open_ask_appends_to_existing_tab() {
+        let mut app = make_test_app();
+        app.open_ask("first".to_string(), vec!["a".to_string()]);
+        app.open_ask("second".to_string(), vec!["x".to_string(), "y".to_string()]);
+        let state = match app.function.tabs.first().unwrap() {
+            SidebarTab::Ask(s) => s.clone(),
+            _ => panic!(),
+        };
+        assert_eq!(state.items.len(), 2);
+        // Adding a question makes it the active one so the user
+        // answers it next.
+        assert_eq!(state.active, 1);
+        assert_eq!(state.items[1].question, "second");
+    }
+
+    #[test]
+    fn ask_row_count_includes_options_and_freeform() {
+        let s = AskState::new("q".to_string(), vec!["a".into(), "b".into(), "c".into()]);
+        // The picker for this question has 3 options + 1 implicit
+        // "Type your own answer…" row.
+        assert_eq!(s.items[0].row_count(), 4);
+        assert_eq!(s.row_count(), 4);
+    }
+
+    #[test]
+    fn ask_all_answered_after_picking_last() {
+        let mut s = AskState::new("q".to_string(), vec!["a".into()]);
+        s.items[0].answered = Some("a".to_string());
+        assert!(s.all_answered());
+    }
+
+    #[test]
+    fn ask_all_answered_false_when_pending() {
+        let s = AskState::new("q".to_string(), vec!["a".into()]);
+        assert!(!s.all_answered());
+    }
+
+    #[test]
+    fn ask_next_unanswered_wraps() {
+        let mut s = AskState::new("q1".to_string(), vec!["a".into()]);
+        s.push("q2".to_string(), vec!["b".into()]);
+        s.push("q3".to_string(), vec!["c".into()]);
+        s.items[0].answered = Some("a".to_string());
+        s.items[2].answered = Some("c".to_string());
+        // From index 1, the next unanswered is index 1 itself.
+        assert_eq!(s.next_unanswered(1), Some(1));
+        // From index 2 (answered), wrap and find index 1.
+        assert_eq!(s.next_unanswered(2), Some(1));
+        // From index 0 (answered), wrap and find index 1.
+        assert_eq!(s.next_unanswered(0), Some(1));
+    }
+
+    #[test]
+    fn ask_build_summary_lists_all_pairs() {
+        let mut s = AskState::new("Q1?".to_string(), vec!["a".into()]);
+        s.push("Q2?".to_string(), vec!["x".into()]);
+        s.items[0].answered = Some("a".to_string());
+        s.items[1].answered = Some("x".to_string());
+        let summary = s.build_summary();
+        assert!(summary.contains("Q1"));
+        assert!(summary.contains("Q2"));
+        assert!(summary.contains("a"));
+        assert!(summary.contains("x"));
+        assert!(summary.contains("Proceed"));
+    }
+
+    #[test]
+    fn thinking_picker_ensure_cursor_visible_scrolls_down() {
+        use crate::function::ThinkingPickerState;
+        let mut s = ThinkingPickerState::new();
+        // 5 levels (off/low/med/high/adaptive), 3 visible.
+        s.cursor = 4;
+        s.ensure_cursor_visible(3);
+        assert_eq!(s.scroll, 2, "scroll should jump so cursor is last visible row");
+    }
+
+    #[test]
+    fn thinking_picker_ensure_cursor_visible_scrolls_up() {
+        use crate::function::ThinkingPickerState;
+        let mut s = ThinkingPickerState::new();
+        s.scroll = 4;
+        s.cursor = 0;
+        s.ensure_cursor_visible(3);
+        assert_eq!(s.scroll, 0, "scroll should follow cursor up to top");
+    }
+
+    #[test]
+    fn thinking_picker_no_scroll_when_fits() {
+        use crate::function::ThinkingPickerState;
+        let mut s = ThinkingPickerState::new();
+        s.scroll = 0;
+        s.cursor = 1;
+        s.ensure_cursor_visible(3);
+        assert_eq!(s.scroll, 0, "no scroll needed when total fits visible");
+    }
+
+    /// `push` places the new question at the end and makes it
+    /// active so the user can answer it next.
+    #[test]
+    fn ask_push_makes_new_question_active() {
+        let mut s = AskState::new("q1".to_string(), vec!["a".into()]);
+        s.items[0].cursor = 1; // user has scrolled within q1
+        s.push("q2".to_string(), vec!["x".into()]);
+        assert_eq!(s.active, 1);
+        assert_eq!(s.items[1].cursor, 0);
+    }
 }

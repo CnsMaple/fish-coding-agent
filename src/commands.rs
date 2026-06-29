@@ -67,18 +67,25 @@ pub fn dispatch(app: &mut App, cmd: &str, arg: &str) {
         "continue" => continue_response(app, arg),
         "plan" => {
             let arg = arg.trim().to_lowercase();
-            if matches!(arg.as_str(), "exit" | "off" | "yolo") {
+            if matches!(arg.as_str(), "exit" | "off" | "yolo" | "build") {
                 app.set_mode(crate::function::AppMode::Yolo);
-                app.notify(ToastLevel::Info, "mode: yolo");
+                app.notify(ToastLevel::Info, "mode: build");
             } else if arg.is_empty() {
                 app.set_mode(crate::function::AppMode::Plan);
-                app.notify(ToastLevel::Info, "mode: plan");
+                app.notify(
+                    ToastLevel::Info,
+                    "mode: plan (read-only — use /build to switch back)",
+                );
             } else {
                 app.notify(
                     ToastLevel::Fail,
                     "unknown plan command: use /plan or /plan exit",
                 );
             }
+        }
+        "build" => {
+            app.set_mode(crate::function::AppMode::Yolo);
+            app.notify(ToastLevel::Info, "mode: build");
         }
         "quit" | "exit" | "q" => {
             app.should_quit = true;
@@ -459,9 +466,10 @@ pub fn open_session_rename(app: &mut App, target_id: Option<String>, title: Stri
 /// System prompt instructing the model about available tools.
 /// Stresses using the structured tool_calls API, and provides a
 /// text-based fallback format for providers that don't support it.
-fn system_prompt() -> String {
-    format!(
-        "\
+fn system_prompt(agent: crate::permission::Agent) -> String {
+    match agent {
+        crate::permission::Agent::Build => format!(
+            "\
 You are a coding assistant with access to the following tools in the user's workspace:
 
   - read_file(path, start_line?, end_line?)
@@ -471,8 +479,6 @@ You are a coding assistant with access to the following tools in the user's work
   - python_command(code) - runs Python source code directly
   - grep(pattern, path?) - search text in files
   - list(path?) - list files under a directory
-  - ask(question, options?) - ask the user in the function panel
-  - todo(items) - update the visible todo list in the function panel
   - plan(title?, content, steps?) - present a plan for user confirmation
 
 When a task requires one of these actions you MUST invoke the appropriate tool via the API's structured tool_calls mechanism. Never describe using a tool without actually calling it.
@@ -481,9 +487,68 @@ If your API does not support structured tool_calls, describe each tool call as a
   >>> {{\"name\": \"tool_name\", \"arguments\": {{...}}}} <<<
 
 Do NOT claim a tool was used unless you actually see its result.",
-        shell = crate::tools::shell_description(),
-        shell_details = crate::tools::shell_guidance()
-    )
+            shell = crate::tools::shell_description(),
+            shell_details = crate::tools::shell_guidance()
+        ),
+        crate::permission::Agent::Plan => String::from(
+            "\
+## Responsibility
+
+You are operating in **plan mode**, a read-only research and planning role. \
+Your job is to understand the user's task, gather only the evidence you need, \
+and present a concrete plan the user can approve before any code is written.
+
+## What you can do
+
+Read-only exploration:
+
+  - read_file(path, start_line?, end_line?)
+  - grep(pattern, path?) — search text in files
+  - list(path?) — list files under a directory
+
+Communication with the user:
+
+  - ask(question, options?) — ask a clarifying question. Use this when \
+    weighing tradeoffs, when the request is ambiguous, or when a single \
+    decision is blocking the plan. The question is shown in the session; \
+    the user types their answer into the main input and the conversation \
+    resumes automatically. Don't overuse it — batch independent questions.
+  - plan(title?, content, steps?) — present a plan for approval. The plan \
+    body is rendered in the session; the user approves / rejects / closes \
+    in the plan tab. Call this exactly once when you have enough \
+    information to act.
+
+## What you must NOT do
+
+The runtime will reject (with an error) any attempt to:
+
+  - write_file (no file edits)
+  - shell_command (no arbitrary shell)
+  - python_command (no code execution)
+
+If a task truly requires running a command or mutating a file, hand it back \
+to the user — they can switch to build mode with `/build` and re-send. Do \
+not pretend to invoke these tools; never claim a tool ran unless you saw \
+its result.
+
+## Important
+
+1. **Always use the structured tool_calls API** (or the `>>> {{\"name\":...}} \
+   <<<` text fallback). Never describe a plan in prose without actually \
+   calling the `plan` tool — the user only sees your plan when the tool \
+   result is rendered.
+2. **Explore before you plan.** If the request touches code you have not \
+   read, use read_file/grep/list to ground the plan in the actual \
+   repository. Do not invent file paths, function names, or behaviour.
+3. **Be concise.** The plan body should be actionable: what changes, where, \
+   and why. Numbered steps are good. Skip preamble and apologies.
+4. **Prefer asking over guessing.** When two reasonable interpretations \
+   exist and the choice meaningfully changes the plan, call `ask`. When \
+   the choice is cosmetic, pick one and note it in the plan.
+5. **Stop after the plan tool.** Do not call additional tools after `plan`; \
+   wait for the user's decision.",
+        ),
+    }
 }
 pub fn send_chat(app: &mut App, user_text: String) {
     send_message(app, Message::new(Role::User, user_text));
@@ -603,12 +668,13 @@ pub fn send_message(app: &mut App, user_msg: Message) {
         model,
         messages,
         thinking,
-        system: Some(system_prompt()),
+        system: Some(system_prompt(app.active_agent)),
     };
 
     if let Some(tx) = app.msg_tx.clone() {
         let client = app.reqwest.clone();
         let cwd = app.cwd.clone();
+        let agent = app.active_agent;
         tokio::spawn(async move {
             let mut req = req;
             let mut stream_retries = 0u32;
@@ -739,7 +805,8 @@ pub fn send_message(app: &mut App, user_msg: Message) {
                         name: call.name.clone(),
                         title: title.clone(),
                     });
-                    let result = crate::tools::execute_tool_streaming(
+                    let result = crate::tools::execute_tool_streaming_with_agent(
+                        agent,
                         &call.name,
                         &call.arguments,
                         &cwd,
@@ -759,10 +826,14 @@ pub fn send_message(app: &mut App, user_msg: Message) {
                         content: display_text,
                     });
                 }
-                // If any tool was "ask" or "plan", stop auto-continue and wait for user input
+                // If the model emitted an interaction tool (plan or
+                // ask), stop the auto-continue loop and let the user
+                // respond. The plan agent surfaces the question in the
+                // session; the user types the answer in the input
+                // prompt and the conversation resumes.
                 let has_interaction_tool = tool_calls
                     .iter()
-                    .any(|c| c.name == "ask" || c.name == "plan");
+                    .any(|c| c.name == "plan" || c.name == "ask");
                 if has_interaction_tool {
                     let _ = tx.send(crate::event::AppMsg::ChatDone);
                     return;
@@ -804,6 +875,27 @@ fn tool_result_title(call: &ToolCall) -> String {
     }
     if call.name == "python_command" {
         return "python".to_string();
+    }
+    if call.name == "plan" {
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&call.arguments) {
+            if let Some(title) = val.get("title").and_then(|v| v.as_str()) {
+                if !title.trim().is_empty() {
+                    return format!("Plan: {}", title.trim());
+                }
+            }
+        }
+        return "Plan".to_string();
+    }
+    if call.name == "ask" {
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&call.arguments) {
+            if let Some(q) = val.get("question").and_then(|v| v.as_str()) {
+                let q = q.trim();
+                if !q.is_empty() {
+                    return format!("Ask: {}", q);
+                }
+            }
+        }
+        return "Ask".to_string();
     }
 
     format!("[tool:{}]", call.name)

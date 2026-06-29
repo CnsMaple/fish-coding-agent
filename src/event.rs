@@ -415,62 +415,44 @@ fn open_tool_function_panel(app: &mut App, name: &str, content: &str) {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(content) else {
         return;
     };
-    match value.get("kind").and_then(|v| v.as_str()).unwrap_or(name) {
-        "ask" => {
-            let question = value
-                .get("question")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let options = value
-                .get("options")
-                .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                        .collect()
-                })
-                .unwrap_or_default();
-            if !question.trim().is_empty() {
-                app.open_ask(question, options);
-            }
+    let kind = value.get("kind").and_then(|v| v.as_str()).unwrap_or(name);
+    if kind == "plan" {
+        let title = value
+            .get("title")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Plan")
+            .to_string();
+        let content = value
+            .get("content")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        if !content.trim().is_empty() {
+            app.open_plan(title, content);
         }
-        "todo" => {
-            let items = value
-                .get("items")
-                .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|item| {
-                            let content = item.get("content").and_then(|v| v.as_str())?.to_string();
-                            let status = item
-                                .get("status")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("pending")
-                                .to_string();
-                            Some(crate::function::TodoItem { content, status })
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-            app.open_todo(items);
+        return;
+    }
+    if kind == "ask" {
+        let question = value
+            .get("question")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if question.is_empty() {
+            return;
         }
-        "plan" => {
-            let title = value
-                .get("title")
-                .and_then(|v| v.as_str())
-                .unwrap_or("Plan")
-                .to_string();
-            let content = value
-                .get("content")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            if !content.trim().is_empty() {
-                app.open_plan(title, content);
-            }
-        }
-        _ => {}
+        let options: Vec<String> = value
+            .get("options")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.trim().to_string()))
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+        app.open_ask(question, options);
     }
 }
 
@@ -541,6 +523,7 @@ fn handle_msg(msg: AppMsg, app: &mut App) {
         }
         AppMsg::ChatDone => {
             finish_model_output_rate(app);
+            app.flush_ask_snapshot();
             app.session.finish_streaming();
             app.save_current_session();
             app.inflight = None;
@@ -549,6 +532,7 @@ fn handle_msg(msg: AppMsg, app: &mut App) {
         }
         AppMsg::ChatError(e) => {
             finish_model_output_rate(app);
+            app.flush_ask_snapshot();
             app.session.finish_streaming();
             app.save_current_session();
             app.inflight = None;
@@ -1612,9 +1596,8 @@ async fn dispatch_to_active_tab(k: crossterm::event::KeyEvent, app: &mut App) ->
         crate::function::SidebarTab::SessionRename(state) => {
             handle_session_rename_key(k, app, state)
         }
-        crate::function::SidebarTab::Ask(state) => handle_ask_key(k, app, state).await,
-        crate::function::SidebarTab::Todo(state) => handle_todo_key(k, app, state),
         crate::function::SidebarTab::Plan(state) => handle_plan_key(k, app, state).await,
+        crate::function::SidebarTab::Ask(state) => handle_ask_key(k, app, state).await,
         _ => false,
     };
     if active < app.function.tabs.len()
@@ -1678,228 +1661,6 @@ fn handle_notifications_key(k: crossterm::event::KeyEvent, app: &mut App) -> boo
     }
 }
 
-async fn handle_ask_key(
-    k: crossterm::event::KeyEvent,
-    app: &mut App,
-    state: &mut crate::function::AskState,
-) -> bool {
-    use crossterm::event::KeyCode;
-
-    // When options are present, the picker owns Enter: pick the
-    // highlighted option. When there are no options, the free-form
-    // input buffer owns Enter: submit whatever the user typed.
-    let freeform_mode = state.options.is_empty();
-
-    match k.code {
-        KeyCode::Up => {
-            if freeform_mode {
-                // In free-form mode, Up/Down move the input cursor
-                // (the picker is hidden so cursor is unused, but
-                // we keep the gesture consistent).
-                return true;
-            }
-            state.cursor = state.cursor.saturating_sub(1);
-            true
-        }
-        KeyCode::Down => {
-            if freeform_mode {
-                return true;
-            }
-            if !state.options.is_empty() {
-                state.cursor = (state.cursor + 1).min(state.options.len().saturating_sub(1));
-            }
-            true
-        }
-        KeyCode::Char(c) => {
-            if freeform_mode
-                && (k.modifiers.is_empty() || k.modifiers == crossterm::event::KeyModifiers::SHIFT)
-            {
-                state.input.insert(state.input_cursor, c);
-                state.input_cursor += c.len_utf8();
-                true
-            } else {
-                false
-            }
-        }
-        KeyCode::Backspace => {
-            if freeform_mode && state.input_cursor > 0 {
-                // Find the previous char boundary and remove the
-                // char that ends at input_cursor.
-                let prev = state.input[..state.input_cursor]
-                    .char_indices()
-                    .next_back()
-                    .map(|(i, _)| i)
-                    .unwrap_or(0);
-                state.input.replace_range(prev..state.input_cursor, "");
-                state.input_cursor = prev;
-                true
-            } else {
-                false
-            }
-        }
-        KeyCode::Left => {
-            if freeform_mode && state.input_cursor > 0 {
-                let prev = state.input[..state.input_cursor]
-                    .char_indices()
-                    .next_back()
-                    .map(|(i, _)| i)
-                    .unwrap_or(0);
-                state.input_cursor = prev;
-                true
-            } else {
-                false
-            }
-        }
-        KeyCode::Right => {
-            if freeform_mode && state.input_cursor < state.input.len() {
-                let next = state.input[state.input_cursor..]
-                    .char_indices()
-                    .nth(1)
-                    .map(|(i, c)| state.input_cursor + i + c.len_utf8())
-                    .unwrap_or(state.input.len());
-                state.input_cursor = next;
-                true
-            } else {
-                false
-            }
-        }
-        KeyCode::Enter => {
-            let answer = if freeform_mode {
-                let trimmed = state.input.trim().to_string();
-                if trimmed.is_empty() {
-                    app.notify(
-                        crate::function::notifications::ToastLevel::Warn,
-                        "type an answer or press Esc to dismiss",
-                    );
-                    return true;
-                }
-                trimmed
-            } else {
-                match state.options.get(state.cursor).cloned() {
-                    Some(a) => a,
-                    None => return true,
-                }
-            };
-            state.answered = Some(answer.clone());
-            let prompt = format!("Answer: {answer}");
-            // Close the tab BEFORE dispatching the follow-up chat so
-            // the user sees a clean panel when the new response
-            // starts streaming. The message is added to the session
-            // and sent to the model by send_chat below.
-            close_active_function_tab(app);
-            app.set_mode(crate::function::AppMode::Yolo);
-            app.notify(
-                crate::function::notifications::ToastLevel::Ok,
-                "answer recorded",
-            );
-            crate::commands::send_chat(app, prompt);
-            true
-        }
-        KeyCode::Esc => {
-            close_active_function_tab(app);
-            app.set_mode(crate::function::AppMode::Yolo);
-            true
-        }
-        _ => false,
-    }
-}
-
-fn handle_todo_key(
-    k: crossterm::event::KeyEvent,
-    _app: &mut App,
-    state: &mut crate::function::TodoState,
-) -> bool {
-    use crossterm::event::{KeyCode, KeyModifiers};
-    // When editing an item, most keys go to the edit buffer.
-    if state.editing.is_some() {
-        match k.code {
-            KeyCode::Esc => {
-                state.cancel_edit();
-                true
-            }
-            KeyCode::Enter => {
-                state.commit_edit();
-                true
-            }
-            KeyCode::Backspace => {
-                state.edit_buffer.pop();
-                true
-            }
-            KeyCode::Char(c)
-                if !k
-                    .modifiers
-                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
-            {
-                state.edit_buffer.push(c);
-                true
-            }
-            _ => false,
-        }
-    } else {
-        match k.code {
-            KeyCode::Up => {
-                state.cursor = state.cursor.saturating_sub(1);
-                true
-            }
-            KeyCode::Down => {
-                if !state.items.is_empty() {
-                    state.cursor = (state.cursor + 1).min(state.items.len().saturating_sub(1));
-                }
-                true
-            }
-            KeyCode::Enter => {
-                if !state.items.is_empty() {
-                    let item = &mut state.items[state.cursor];
-                    match item.status.as_str() {
-                        "pending" | "" => item.status = "in_progress".to_string(),
-                        "in_progress" | "running" => item.status = "completed".to_string(),
-                        _ => item.status = "pending".to_string(),
-                    }
-                }
-                true
-            }
-            KeyCode::Char('d') if k.modifiers == KeyModifiers::CONTROL => {
-                state.cursor += 1;
-                state.items.insert(
-                    state.cursor,
-                    crate::function::TodoItem {
-                        content: String::new(),
-                        status: "pending".to_string(),
-                    },
-                );
-                state.start_edit(state.cursor);
-                true
-            }
-            KeyCode::Char('u') if k.modifiers == KeyModifiers::CONTROL => {
-                let idx = state.cursor;
-                state.items.insert(
-                    idx,
-                    crate::function::TodoItem {
-                        content: String::new(),
-                        status: "pending".to_string(),
-                    },
-                );
-                state.start_edit(idx);
-                true
-            }
-            KeyCode::Delete => {
-                if !state.items.is_empty() {
-                    state.items.remove(state.cursor);
-                    if state.cursor >= state.items.len() && !state.items.is_empty() {
-                        state.cursor = state.items.len() - 1;
-                    }
-                }
-                true
-            }
-            KeyCode::Char('e') if k.modifiers == KeyModifiers::CONTROL => {
-                state.start_edit(state.cursor);
-                true
-            }
-            _ => false,
-        }
-    }
-}
-
 async fn handle_plan_key(
     k: crossterm::event::KeyEvent,
     app: &mut App,
@@ -1910,10 +1671,9 @@ async fn handle_plan_key(
         KeyCode::Enter => {
             state.approved = Some(true);
             let prompt = "Plan approved. Please proceed.".to_string();
-            app.session.push(crate::session::Message::new(
-                crate::session::Role::User,
-                prompt.clone(),
-            ));
+            // send_chat -> send_message pushes the user message into
+            // the session; do NOT push it here too, otherwise the
+            // message appears twice in the session.
             close_active_function_tab(app);
             app.set_mode(crate::function::AppMode::Yolo);
             app.notify(
@@ -1926,10 +1686,6 @@ async fn handle_plan_key(
         KeyCode::Char('r') | KeyCode::Char('R') => {
             state.approved = Some(false);
             let prompt = "Plan rejected. Please revise or ask a follow-up question.".to_string();
-            app.session.push(crate::session::Message::new(
-                crate::session::Role::User,
-                prompt.clone(),
-            ));
             close_active_function_tab(app);
             app.set_mode(crate::function::AppMode::Yolo);
             app.notify(
@@ -1939,9 +1695,141 @@ async fn handle_plan_key(
             crate::commands::send_chat(app, prompt);
             true
         }
+        KeyCode::Char('s') | KeyCode::Char('S') => {
+            if state.dirty {
+                app.save_active_plan();
+            } else {
+                app.notify(
+                    crate::function::notifications::ToastLevel::Info,
+                    "plan already saved",
+                );
+            }
+            true
+        }
         KeyCode::Esc => {
             close_active_function_tab(app);
             app.set_mode(crate::function::AppMode::Yolo);
+            true
+        }
+        _ => false,
+    }
+}
+
+async fn handle_ask_key(
+    k: crossterm::event::KeyEvent,
+    app: &mut App,
+    state: &mut crate::function::AskState,
+) -> bool {
+    use crate::function::AskPhase;
+    use crossterm::event::KeyCode;
+
+    let total_rows = match state.phase {
+        AskPhase::Asking => state.row_count(),
+        AskPhase::Reviewing => 0,
+    };
+
+    match k.code {
+        KeyCode::Up => {
+            if state.phase == AskPhase::Reviewing {
+                // Up in the review phase pops back to Asking so the
+                // user can fix an answer. We jump to the first
+                // unanswered question to be helpful.
+                state.phase = AskPhase::Asking;
+                if let Some(idx) = state.next_unanswered(0) {
+                    state.active = idx;
+                }
+                return true;
+            }
+            if let Some(it) = state.items.get_mut(state.active) {
+                if it.cursor == 0 {
+                    it.cursor = total_rows.saturating_sub(1);
+                } else {
+                    it.cursor -= 1;
+                }
+            }
+            true
+        }
+        KeyCode::Down => {
+            if state.phase == AskPhase::Reviewing {
+                return true;
+            }
+            if let Some(it) = state.items.get_mut(state.active) {
+                it.cursor = (it.cursor + 1) % total_rows;
+            }
+            true
+        }
+        KeyCode::Left => {
+            if state.phase == AskPhase::Reviewing {
+                return true;
+            }
+            if state.active > 0 {
+                state.active -= 1;
+            }
+            true
+        }
+        KeyCode::Right => {
+            if state.phase == AskPhase::Reviewing {
+                return true;
+            }
+            if state.active + 1 < state.items.len() {
+                state.active += 1;
+            } else if state.all_answered() {
+                // Past the last question and everything is answered:
+                // jump to the review step.
+                state.phase = AskPhase::Reviewing;
+            }
+            true
+        }
+        KeyCode::Enter => {
+            if state.phase == AskPhase::Reviewing {
+                // Whole batch approved. Send a single summary turn
+                // and close the tab.
+                let summary = state.build_summary();
+                close_active_function_tab(app);
+                crate::commands::send_chat(app, summary);
+                return true;
+            }
+
+            // Asking phase: dispatch on the cursor row.
+            let q_idx = state.active;
+            let cursor = state.items[q_idx].cursor;
+            let is_freeform = cursor >= state.items[q_idx].options.len();
+
+            if is_freeform {
+                // Tell the LLM to wait for the user's free-form
+                // input. The state stays in Asking with the
+                // question still unanswered, so the user can
+                // re-pick an option if they change their mind.
+                let question = state.items[q_idx].question.clone();
+                let prompt = format!(
+                    "(Question: {question})\nPlease wait — the user is typing a free-form answer."
+                );
+                crate::commands::send_chat(app, prompt);
+                return true;
+            }
+
+            // Picked a model-supplied option. Write the answer,
+            // advance to the next unanswered question, or flip to
+            // the review step if everything is answered.
+            let answer = state.items[q_idx].options[cursor].clone();
+            state.items[q_idx].answered = Some(answer);
+            if state.all_answered() {
+                state.phase = AskPhase::Reviewing;
+            } else if let Some(next) = state.next_unanswered(q_idx + 1) {
+                state.active = next;
+                state.items[next].cursor = 0;
+            }
+            true
+        }
+        KeyCode::Esc => {
+            // Esc dismisses the entire ask round. We synthesize a
+            // user turn summarising the answered questions (if any)
+            // and the unanswered ones (as dismissed), so the LLM has
+            // a complete picture of what the user did and didn't
+            // answer.
+            let summary = state.build_dismiss_summary();
+            close_active_function_tab(app);
+            crate::commands::send_chat(app, summary);
             true
         }
         _ => false,
@@ -3379,6 +3267,7 @@ mod tests {
     use crate::function::notifications::Notifications;
     use crate::function::SidebarTab;
     use crate::function::{FunctionPanel, ModelPickerState};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     fn make_app() -> App {
         let mut cfg = Config::default();
@@ -3414,6 +3303,7 @@ mod tests {
             session_id: crate::session::store::new_session_id(),
             session_title: "test".to_string(),
             mode: crate::function::AppMode::Yolo,
+            active_agent: crate::permission::Agent::Build,
             function: FunctionPanel::new(),
             input: crate::input::InputState::new(),
             status: crate::input::status::StatusBar::new(),
@@ -3448,6 +3338,7 @@ mod tests {
             paste_key_quota: 0,
             burst_buf: String::new(),
             burst_snapshot: None,
+            pending_ask_snapshot: String::new(),
         }
     }
 
@@ -5570,5 +5461,399 @@ mod tests {
         assert!(!sel.active, "Up must finalize the selection");
         assert_eq!(sel.start, (2, 2));
         assert_eq!(sel.end, (10, 2));
+    }
+
+    fn esc_key() -> KeyEvent {
+        KeyEvent::new(KeyCode::Esc, KeyModifiers::empty())
+    }
+
+    fn enter_key() -> KeyEvent {
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::empty())
+    }
+
+    /// Esc on a single-question ask tab must surface a synthetic
+    /// user turn so the LLM knows the user moved on. We use a
+    /// valid-looking test provider but no `msg_tx`, so `send_chat`
+    /// reaches the `app.session.push(user_msg)` step before
+    /// short-circuiting on the missing event channel. To avoid the
+    /// `close_active_function_tab` helper deleting the wrong slot,
+    /// we set `function.active` past the end so the helper is a
+    /// no-op for this test.
+    #[tokio::test]
+    async fn ask_esc_dismisses_and_emits_user_turn() {
+        let mut app = make_app_with_provider();
+        app.open_ask("Which language?".to_string(), vec!["a".into(), "b".into()]);
+        assert!(app
+            .function
+            .tabs
+            .iter()
+            .any(|t| matches!(t, SidebarTab::Ask(_))));
+
+        let mut state = match app.function.tabs.remove(0) {
+            SidebarTab::Ask(s) => s,
+            _ => unreachable!(),
+        };
+        // Move `active` out of bounds so `close_active_function_tab`
+        // is a no-op (we already moved the state out ourselves).
+        app.function.active = 99;
+        let consumed = handle_ask_key(esc_key(), &mut app, &mut state).await;
+        assert!(consumed, "Esc must be consumed by the ask handler");
+
+        // The dismiss message made it into the session as a User turn.
+        let last_user = app
+            .session
+            .messages
+            .iter()
+            .rev()
+            .find(|m| matches!(m.role, crate::session::Role::User))
+            .expect("dismiss must push a User message");
+        assert!(
+            last_user.content.contains("dismissed"),
+            "got: {}",
+            last_user.content
+        );
+        assert!(last_user.content.contains("Which language?"));
+    }
+
+    /// Enter on a non-freeform option must (1) write the answer into
+    /// the item, (2) NOT send anything to the LLM yet, and (3) flip
+    /// to the review phase if every question is now answered.
+    #[tokio::test]
+    async fn ask_enter_marks_answered_and_advances() {
+        use crate::function::AskPhase;
+        let mut app = make_app_with_provider();
+        app.open_ask(
+            "Pick one".to_string(),
+            vec!["first".into(), "second".into()],
+        );
+
+        let before = app.session.messages.len();
+
+        let mut state = match app.function.tabs.remove(0) {
+            SidebarTab::Ask(s) => s,
+            _ => unreachable!(),
+        };
+        // cursor starts at 0 ("first").
+        let consumed = handle_ask_key(enter_key(), &mut app, &mut state).await;
+        assert!(consumed);
+
+        // No chat round triggered yet.
+        assert_eq!(
+            app.session.messages.len(),
+            before,
+            "Enter on a single question must not push any new message"
+        );
+
+        // The single question is now answered; phase flips to Reviewing.
+        assert_eq!(state.phase, AskPhase::Reviewing);
+        assert_eq!(
+            state.items[0].answered.as_deref(),
+            Some("first"),
+            "the picked option should be recorded"
+        );
+
+        // Tab still open so the user can confirm.
+        app.function.tabs.insert(0, SidebarTab::Ask(state));
+        assert!(app
+            .function
+            .tabs
+            .iter()
+            .any(|t| matches!(t, SidebarTab::Ask(_))));
+    }
+
+    /// Multi-question: picking the last question's answer must NOT
+    /// send immediately. It must flip to Reviewing and leave the
+    /// send step to the user's next Enter on the review page.
+    #[tokio::test]
+    async fn ask_enter_last_question_enters_reviewing() {
+        use crate::function::AskPhase;
+        let mut app = make_app_with_provider();
+        app.open_ask("Q1?".to_string(), vec!["a".into()]);
+        app.open_ask("Q2?".to_string(), vec!["b".into()]);
+
+        // open_ask lands on the latest question; pull active back to
+        // the first question so the test exercises the advance path.
+        match &mut app.function.tabs[0] {
+            SidebarTab::Ask(s) => s.active = 0,
+            _ => unreachable!(),
+        }
+        let before = app.session.messages.len();
+
+        let mut state = match app.function.tabs.remove(0) {
+            SidebarTab::Ask(s) => s,
+            _ => unreachable!(),
+        };
+        app.function.active = 99;
+
+        // Answer Q1 → advance to Q2.
+        handle_ask_key(enter_key(), &mut app, &mut state).await;
+        assert_eq!(state.active, 1, "active moves to the next question");
+        assert_eq!(state.phase, AskPhase::Asking);
+
+        // Answer Q2 → all answered → Reviewing.
+        handle_ask_key(enter_key(), &mut app, &mut state).await;
+        assert_eq!(state.phase, AskPhase::Reviewing);
+        assert_eq!(state.items[0].answered.as_deref(), Some("a"));
+        assert_eq!(state.items[1].answered.as_deref(), Some("b"));
+
+        // Nothing was sent to the LLM yet.
+        assert_eq!(app.session.messages.len(), before);
+    }
+
+    /// Enter in the Reviewing phase must send a single summary
+    /// containing every Q/A pair and close the tab.
+    #[tokio::test]
+    async fn ask_reviewing_enter_sends_summary() {
+        let mut app = make_app_with_provider();
+        app.open_ask("Q1?".to_string(), vec!["a".into()]);
+        app.open_ask("Q2?".to_string(), vec!["x".into(), "y".into()]);
+        match &mut app.function.tabs[0] {
+            SidebarTab::Ask(s) => s.active = 0,
+            _ => unreachable!(),
+        }
+        let mut state = match app.function.tabs.remove(0) {
+            SidebarTab::Ask(s) => s,
+            _ => unreachable!(),
+        };
+        app.function.active = 99;
+
+        // Answer both questions.
+        handle_ask_key(enter_key(), &mut app, &mut state).await;
+        handle_ask_key(enter_key(), &mut app, &mut state).await;
+        assert_eq!(state.phase, crate::function::AskPhase::Reviewing);
+
+        // Now Enter on the review page must send the summary and
+        // close the tab.
+        handle_ask_key(enter_key(), &mut app, &mut state).await;
+
+        let last_user = app
+            .session
+            .messages
+            .iter()
+            .rev()
+            .find(|m| matches!(m.role, crate::session::Role::User))
+            .expect("summary must push a User message");
+        assert!(last_user.content.contains("Q1"));
+        assert!(last_user.content.contains("a"));
+        assert!(last_user.content.contains("Q2"));
+        assert!(last_user.content.contains("x"));
+        assert!(last_user.content.contains("Proceed"));
+
+        // The dismiss/summary path closes the tab, but since we set
+        // `active = 99` the helper is a no-op — instead, we just
+        // verify the function tabs no longer contain the ask state
+        // (we removed it manually at the top of the test).
+        assert!(!state
+            .items
+            .iter()
+            .any(|it| it.answered.is_none() || it.answered.as_deref() == Some("")));
+    }
+
+    /// In the Reviewing phase Up/Down scroll the cursor (it does
+    /// NOT pop back to Asking — the user just reviews answers).
+    #[tokio::test]
+    async fn ask_reviewing_up_returns_to_asking() {
+        use crate::function::AskPhase;
+        let mut app = make_app_with_provider();
+        app.open_ask("Q1?".to_string(), vec!["a".into()]);
+        app.open_ask("Q2?".to_string(), vec!["x".into()]);
+        match &mut app.function.tabs[0] {
+            SidebarTab::Ask(s) => s.active = 0,
+            _ => unreachable!(),
+        }
+        let mut state = match app.function.tabs.remove(0) {
+            SidebarTab::Ask(s) => s,
+            _ => unreachable!(),
+        };
+        app.function.active = 99;
+        handle_ask_key(enter_key(), &mut app, &mut state).await;
+        handle_ask_key(enter_key(), &mut app, &mut state).await;
+        assert_eq!(state.phase, AskPhase::Reviewing);
+
+        // Up pops back to Asking.
+        handle_ask_key(
+            KeyEvent::new(KeyCode::Up, KeyModifiers::empty()),
+            &mut app,
+            &mut state,
+        )
+        .await;
+        assert_eq!(state.phase, AskPhase::Asking);
+    }
+
+    /// Esc at any phase dismisses the whole ask round with a single
+    /// summary (mixing answered and dismissed entries).
+    #[tokio::test]
+    async fn ask_esc_dismiss_summary_includes_answered_and_skipped() {
+        let mut app = make_app_with_provider();
+        app.open_ask("Q1?".to_string(), vec!["a".into()]);
+        app.open_ask("Q2?".to_string(), vec!["x".into()]);
+        match &mut app.function.tabs[0] {
+            SidebarTab::Ask(s) => s.active = 0,
+            _ => unreachable!(),
+        }
+        let mut state = match app.function.tabs.remove(0) {
+            SidebarTab::Ask(s) => s,
+            _ => unreachable!(),
+        };
+        app.function.active = 99;
+
+        // Answer Q1; leave Q2 unanswered; then Esc.
+        handle_ask_key(enter_key(), &mut app, &mut state).await;
+        handle_ask_key(esc_key(), &mut app, &mut state).await;
+
+        let last_user = app
+            .session
+            .messages
+            .iter()
+            .rev()
+            .find(|m| matches!(m.role, crate::session::Role::User))
+            .expect("dismiss must push a User message");
+        assert!(last_user.content.contains("Q1"));
+        assert!(last_user.content.contains("a"));
+        assert!(last_user.content.contains("Q2"));
+        assert!(last_user.content.contains("dismissed"));
+    }
+
+    /// Down moves the cursor through the merged list. With two
+    /// questions and 2 options each the rows are
+    ///   0: q1 header, 1: opt0, 2: opt1, 3: freeform,
+    ///   4: q2 header, 5: opt0, 6: opt1, 7: freeform.
+    /// Up/Down move the per-question cursor (wrap around). The
+    /// picker is per-question; Left/Right switch `active` (see
+    /// `ask_left_right_cycles_questions` below).
+    #[tokio::test]
+    async fn ask_up_down_moves_per_question_cursor() {
+        let mut app = make_app_with_provider();
+        app.open_ask("Q1?".to_string(), vec!["a".into(), "b".into()]);
+        let mut state = match app.function.tabs.remove(0) {
+            SidebarTab::Ask(s) => s,
+            _ => unreachable!(),
+        };
+        app.function.active = 99;
+
+        // Per-question cursor starts at row 0 ("first option").
+        assert_eq!(state.items[state.active].cursor, 0);
+
+        let total = state.row_count();
+        for expected in 1..total {
+            handle_ask_key(
+                KeyEvent::new(KeyCode::Down, KeyModifiers::empty()),
+                &mut app,
+                &mut state,
+            )
+            .await;
+            assert_eq!(state.items[state.active].cursor, expected);
+        }
+        // One more Down wraps to 0.
+        handle_ask_key(
+            KeyEvent::new(KeyCode::Down, KeyModifiers::empty()),
+            &mut app,
+            &mut state,
+        )
+        .await;
+        assert_eq!(state.items[state.active].cursor, 0, "Down wraps to top");
+
+        // Up wraps to the last row.
+        handle_ask_key(
+            KeyEvent::new(KeyCode::Up, KeyModifiers::empty()),
+            &mut app,
+            &mut state,
+        )
+        .await;
+        assert_eq!(
+            state.items[state.active].cursor,
+            total - 1,
+            "Up wraps to bottom"
+        );
+    }
+
+    /// Right steps through the questions; Left steps back. The
+    /// per-question cursor is independent of `active`.
+    #[tokio::test]
+    async fn ask_left_right_cycles_questions() {
+        let mut app = make_app_with_provider();
+        app.open_ask("Q1?".to_string(), vec!["a".into()]);
+        app.open_ask("Q2?".to_string(), vec!["x".into()]);
+        let mut state = match app.function.tabs.remove(0) {
+            SidebarTab::Ask(s) => s,
+            _ => unreachable!(),
+        };
+        app.function.active = 99;
+        // open_ask lands on the latest question (Q2).
+        assert_eq!(state.active, 1);
+
+        handle_ask_key(
+            KeyEvent::new(KeyCode::Left, KeyModifiers::empty()),
+            &mut app,
+            &mut state,
+        )
+        .await;
+        assert_eq!(state.active, 0, "Left steps to Q1");
+
+        handle_ask_key(
+            KeyEvent::new(KeyCode::Left, KeyModifiers::empty()),
+            &mut app,
+            &mut state,
+        )
+        .await;
+        assert_eq!(state.active, 0, "Left doesn't wrap below 0");
+
+        handle_ask_key(
+            KeyEvent::new(KeyCode::Right, KeyModifiers::empty()),
+            &mut app,
+            &mut state,
+        )
+        .await;
+        assert_eq!(state.active, 1);
+        // Past the last question: no wrap.
+        handle_ask_key(
+            KeyEvent::new(KeyCode::Right, KeyModifiers::empty()),
+            &mut app,
+            &mut state,
+        )
+        .await;
+        assert_eq!(state.active, 1, "Right doesn't wrap past end");
+    }
+
+    /// Answering the last unanswered question flips phase to
+    /// Reviewing. Enter in Reviewing sends the summary.
+    #[tokio::test]
+    async fn ask_enter_on_option_records_and_advances_to_reviewing() {
+        let mut app = make_app_with_provider();
+        app.open_ask("Q1?".to_string(), vec!["a".into()]);
+        app.open_ask("Q2?".to_string(), vec!["x".into()]);
+        match &mut app.function.tabs[0] {
+            SidebarTab::Ask(s) => s.active = 0,
+            _ => unreachable!(),
+        }
+        let mut state = match app.function.tabs.remove(0) {
+            SidebarTab::Ask(s) => s,
+            _ => unreachable!(),
+        };
+        app.function.active = 99;
+
+        // Cursor on Q1 at row 0 ("a").
+        assert_eq!(state.active, 0);
+        assert_eq!(state.items[state.active].cursor, 0);
+        handle_ask_key(enter_key(), &mut app, &mut state).await;
+        assert_eq!(state.items[0].answered.as_deref(), Some("a"));
+        assert_eq!(state.active, 1, "advanced to Q2");
+        assert_eq!(state.phase, crate::function::AskPhase::Asking);
+
+        // Answer Q2 → Reviewing.
+        handle_ask_key(enter_key(), &mut app, &mut state).await;
+        assert_eq!(state.items[1].answered.as_deref(), Some("x"));
+        assert_eq!(state.phase, crate::function::AskPhase::Reviewing);
+
+        // Enter in Reviewing sends the summary.
+        handle_ask_key(enter_key(), &mut app, &mut state).await;
+        let last_user = app
+            .session
+            .messages
+            .iter()
+            .rev()
+            .find(|m| matches!(m.role, crate::session::Role::User))
+            .expect("summary must push a User message");
+        assert!(last_user.content.contains("All questions answered"));
     }
 }

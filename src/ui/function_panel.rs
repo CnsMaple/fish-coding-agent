@@ -12,11 +12,16 @@ pub fn render(area: Rect, buf: &mut Buffer, app: &mut App) {
     if area.width < 4 || area.height < 4 {
         return;
     }
+    // Title shows the active sidebar tab name, drawn into the top
+    // border itself — no separate title row in the body, so we save
+    // one line compared to a normal titled block. Matches the
+    // `+--- ask ---+` style in the screenshots.
+    let title = format!(" {} ", app.function.active_kind_name());
     let block = Block::default()
         .borders(Borders::ALL)
         .border_set(app.config.border_type.ratatui_set())
         .border_style(Theme::unfocused_border())
-        .title(Span::styled(" function ", Theme::dim()));
+        .title(Line::from(Span::styled(title, Theme::bold())));
     let inner = block.inner(area);
     block.render(area, buf);
     if inner.height < 2 {
@@ -37,36 +42,35 @@ pub fn render(area: Rect, buf: &mut Buffer, app: &mut App) {
     if function_tab_indices.is_empty() {
         // No function tab is open. The body is the Notifications content
         // (or empty if there are no toasts). No tabs row.
-        if let Some(tab) = app.function.tabs.get_mut(app.function.active) {
-            let cfg = &app.config;
-            let cursor = match tab {
-                SidebarTab::Notifications => {
-                    render_notifications(inner, buf, app);
-                    None
-                }
-                SidebarTab::Completion(s) => {
-                    render_completion(inner, buf, s);
-                    None
-                }
-                SidebarTab::Settings(s) => render_settings(inner, buf, cfg, s),
-                SidebarTab::ModelPicker(s) => render_picker(inner, buf, s),
-                SidebarTab::ProviderPicker(s) => render_provider_picker(inner, buf, s),
-                SidebarTab::ThinkingPicker(s) => render_thinking_picker(inner, buf, s),
-                SidebarTab::TimelinePicker(s) => render_timeline_picker(inner, buf, s),
-                SidebarTab::SessionPicker(s) => render_session_picker(inner, buf, s),
-                SidebarTab::SessionRename(s) => render_session_rename(inner, buf, s),
-                SidebarTab::Ask(s) => render_ask(inner, buf, s),
-                SidebarTab::Todo(s) => render_todo(inner, buf, s),
-                SidebarTab::Plan(s) => render_plan(inner, buf, s),
-                SidebarTab::Hotkey => {
-                    render_hotkey(inner, buf);
-                    None
-                }
-            };
-            app.function_panel_cursor = cursor;
+            if let Some(tab) = app.function.tabs.get_mut(app.function.active) {
+                let cfg = &app.config;
+                let cursor = match tab {
+                    SidebarTab::Notifications => {
+                        render_notifications(inner, buf, app);
+                        None
+                    }
+                    SidebarTab::Completion(s) => {
+                        render_completion(inner, buf, s);
+                        None
+                    }
+                    SidebarTab::Settings(s) => render_settings(inner, buf, cfg, s),
+                    SidebarTab::ModelPicker(s) => render_picker(inner, buf, s),
+                    SidebarTab::ProviderPicker(s) => render_provider_picker(inner, buf, s),
+                    SidebarTab::ThinkingPicker(s) => render_thinking_picker(inner, buf, s),
+                    SidebarTab::TimelinePicker(s) => render_timeline_picker(inner, buf, s),
+                    SidebarTab::SessionPicker(s) => render_session_picker(inner, buf, s),
+                    SidebarTab::SessionRename(s) => render_session_rename(inner, buf, s),
+                    SidebarTab::Plan(s) => render_plan(inner, buf, s),
+                    SidebarTab::Ask(s) => render_ask(inner, buf, s),
+                    SidebarTab::Hotkey => {
+                        render_hotkey(inner, buf);
+                        None
+                    }
+                };
+                app.function_panel_cursor = cursor;
+            }
+            return;
         }
-        return;
-    }
 
     // Function tab is active. Show the tabs row (function tabs only) above
     // the body.
@@ -89,9 +93,8 @@ pub fn render(area: Rect, buf: &mut Buffer, app: &mut App) {
                 SidebarTab::TimelinePicker(_) => "timeline",
                 SidebarTab::SessionPicker(_) => "sessions",
                 SidebarTab::SessionRename(_) => "rename",
-                SidebarTab::Ask(_) => "ask",
-                SidebarTab::Todo(_) => "todo",
                 SidebarTab::Plan(_) => "plan",
+                SidebarTab::Ask(_) => "ask",
                 SidebarTab::Hotkey => "hotkey",
             };
             if orig_idx == active_idx {
@@ -135,9 +138,8 @@ pub fn render(area: Rect, buf: &mut Buffer, app: &mut App) {
             SidebarTab::TimelinePicker(s) => render_timeline_picker(rows[1], buf, s),
             SidebarTab::SessionPicker(s) => render_session_picker(rows[1], buf, s),
             SidebarTab::SessionRename(s) => render_session_rename(rows[1], buf, s),
-            SidebarTab::Ask(s) => render_ask(rows[1], buf, s),
-            SidebarTab::Todo(s) => render_todo(rows[1], buf, s),
             SidebarTab::Plan(s) => render_plan(rows[1], buf, s),
+            SidebarTab::Ask(s) => render_ask(rows[1], buf, s),
             SidebarTab::Hotkey => {
                 render_hotkey(rows[1], buf);
                 None
@@ -753,7 +755,8 @@ fn render_hotkey(area: Rect, buf: &mut Buffer) {
         ("/session", "Manage and resume sessions"),
         ("/retry", "Retry previous prompt"),
         ("/continue", "Continue interrupted output"),
-        ("/plan", "Switch to plan mode"),
+        ("/plan", "Switch to plan mode (read-only)"),
+        ("/build", "Switch back to build mode"),
         ("Mouse wheel", "Scroll session"),
     ];
     let lines: Vec<Line> = rows
@@ -774,7 +777,7 @@ fn render_hotkey(area: Rect, buf: &mut Buffer) {
 fn render_thinking_picker(
     area: Rect,
     buf: &mut Buffer,
-    s: &crate::function::ThinkingPickerState,
+    s: &mut crate::function::ThinkingPickerState,
 ) -> Option<(u16, u16)> {
     if area.height < 1 {
         return None;
@@ -795,25 +798,36 @@ fn render_thinking_picker(
         crate::function::PickerFocus::Search,
     );
 
-    // List
+    // List — scroll the visible window so the cursor row is always
+    // in view (same pattern as the model / provider / session pickers).
     use crate::function::ThinkingPickerState as TPS;
-    let mut list_lines: Vec<Line> = Vec::new();
+    let list_area = rows[1];
     if s.filtered.is_empty() {
-        list_lines.push(Line::from(Span::styled("  [no matches]", Theme::dim())));
+        Paragraph::new(Line::from(Span::styled("  [no matches]", Theme::dim())))
+            .wrap(Wrap { trim: false })
+            .render(list_area, buf);
     } else {
-        for (pos, &model_idx) in s.filtered.iter().enumerate() {
+        let visible_rows = list_area.height as usize;
+        s.ensure_cursor_visible(visible_rows);
+        let total = s.filtered.len();
+        let start = s.scroll.min(total);
+        let end = (start + visible_rows).min(total);
+        for row in start..end {
+            let model_idx = s.filtered[row];
             let level = TPS::LEVELS[model_idx];
-            if pos == s.cursor {
-                list_lines.push(Line::from(vec![
+            let is_cursor = row == s.cursor;
+            let y = list_area.y + (row - start) as u16;
+            let line = if is_cursor {
+                Line::from(vec![
                     Span::styled("> ", Theme::bold()),
                     Span::raw(level.to_string()),
-                ]));
+                ])
             } else {
-                list_lines.push(Line::from(Span::raw(format!("  {level}"))));
-            }
+                Line::from(Span::raw(format!("  {level}")))
+            };
+            buf.set_line(list_area.x, y, &line, list_area.width);
         }
     }
-    Paragraph::new(list_lines).render(rows[1], buf);
     search_cursor
 }
 
@@ -1009,123 +1023,13 @@ fn render_session_rename(
     Some((cursor_x.min(rows[0].right().saturating_sub(1)), rows[0].y))
 }
 
-fn render_ask(area: Rect, buf: &mut Buffer, s: &crate::function::AskState) -> Option<(u16, u16)> {
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1), Constraint::Length(1)])
-        .split(area);
-    let mut lines = Vec::new();
-    lines.push(Line::from(vec![
-        Span::styled("? ", Theme::bold()),
-        Span::raw(s.question.clone()),
-    ]));
-    lines.push(Line::from(""));
-    if s.options.is_empty() {
-        // Free-form mode: the user types into `s.input` directly in
-        // this panel (no options to pick). Show a one-line input
-        // box and return its cursor so the OS-level IME / cursor
-        // placement still works.
-        lines.push(Line::from(vec![
-            Span::styled("> ", Theme::bold()),
-            Span::raw(s.input.clone()),
-        ]));
-    } else {
-        for (i, opt) in s.options.iter().enumerate() {
-            if i == s.cursor {
-                lines.push(Line::from(vec![
-                    Span::styled("> ", Theme::bold()),
-                    Span::raw(opt.clone()),
-                ]));
-            } else {
-                lines.push(Line::from(Span::raw(format!("  {opt}"))));
-            }
-        }
-    }
-    if let Some(ans) = &s.answered {
-        lines.push(Line::from(""));
-        lines.push(Line::from(vec![
-            Span::styled("answered: ", Theme::status_ok()),
-            Span::raw(ans.clone()),
-        ]));
-    }
-    Paragraph::new(lines)
-        .wrap(Wrap { trim: false })
-        .render(rows[0], buf);
-    let hint = if s.options.is_empty() {
-        " Enter: submit | Left/Right: move cursor | Backspace: delete | Ctrl+E: edit | Esc: close "
-    } else {
-        " Enter: answer | Up/Down: nav | Ctrl+E: edit | Esc: close "
-    };
-    Paragraph::new(Line::from(Span::styled(hint, Theme::dim()))).render(rows[1], buf);
-
-    // For free-form mode, expose the text cursor so position_ime_cursor
-    // can place the hardware cursor on top of the input. The visible
-    // "> " prefix is 2 cells wide, and we add a small left margin of
-    // 1 cell so the cursor lines up with the first character of input.
-    if s.options.is_empty() {
-        // Find the y coordinate of the input line — it is the
-        // third Line we pushed (index 2: question, blank, input).
-        let y = rows[0].y + 2;
-        // Convert input_cursor (byte offset) to a display column.
-        let prefix_cols: u16 = 2; // "> "
-        let cursor_col = s.input[..s.input_cursor.min(s.input.len())].chars().count() as u16;
-        let x = (rows[0].x + prefix_cols + cursor_col).min(rows[0].right().saturating_sub(1));
-        return Some((x, y));
-    }
-    None
-}
-
-fn render_todo(area: Rect, buf: &mut Buffer, s: &crate::function::TodoState) -> Option<(u16, u16)> {
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1), Constraint::Length(1)])
-        .split(area);
-    let mut lines = Vec::new();
-    if s.items.is_empty() {
-        lines.push(Line::from(Span::styled("[no todos]", Theme::dim())));
-    } else {
-        for (i, item) in s.items.iter().enumerate() {
-            let mark = match item.status.as_str() {
-                "completed" | "done" => "[x]",
-                "in_progress" | "running" => "[>]",
-                _ => "[ ]",
-            };
-            let prefix = if i == s.cursor { "> " } else { "  " };
-            let display_content = if Some(i) == s.editing {
-                format!("{}█", s.edit_buffer)
-            } else {
-                item.content.clone()
-            };
-            lines.push(Line::from(vec![
-                Span::styled(
-                    prefix,
-                    if i == s.cursor {
-                        Theme::bold()
-                    } else {
-                        Theme::base()
-                    },
-                ),
-                Span::styled(format!("{mark} "), Theme::dim()),
-                Span::raw(display_content),
-            ]));
-        }
-    }
-    Paragraph::new(lines)
-        .wrap(Wrap { trim: false })
-        .render(rows[0], buf);
-    let help = if s.editing.is_some() {
-        " Enter: confirm | Esc: cancel "
-    } else {
-        " Up/Down: nav | Enter: cycle | Ctrl+D: below | Ctrl+U: above | Del: delete | Ctrl+E: edit | Esc: close "
-    };
-    Paragraph::new(Line::from(Span::styled(help, Theme::dim()))).render(rows[1], buf);
-    None
-}
-
 fn render_plan(area: Rect, buf: &mut Buffer, s: &crate::function::PlanState) -> Option<(u16, u16)> {
+    // The plan body is shown in the session area. This tab is a slim
+    // action bar: title, status, saved-to path, and the key hints.
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
+            Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Min(1),
             Constraint::Length(1),
@@ -1146,18 +1050,178 @@ fn render_plan(area: Rect, buf: &mut Buffer, s: &crate::function::PlanState) -> 
         ]),
         rows[0].width,
     );
-    let lines: Vec<Line> = s
-        .content
-        .lines()
-        .map(|line| Line::from(Span::raw(line.to_string())))
-        .collect();
-    Paragraph::new(lines)
-        .wrap(Wrap { trim: false })
-        .render(rows[1], buf);
+    let saved_line = if s.dirty {
+        Line::from(vec![Span::styled(
+            "not saved — press S to save",
+            Theme::dim(),
+        )])
+    } else if let Some(p) = &s.path {
+        Line::from(vec![
+            Span::styled("saved: ", Theme::dim()),
+            Span::raw(p.display().to_string()),
+        ])
+    } else {
+        Line::from(Span::styled("not saved", Theme::dim()))
+    };
+    buf.set_line(rows[1].x, rows[1].y, &saved_line, rows[1].width);
     Paragraph::new(Line::from(Span::styled(
-        " Enter: approve | R: reject | Ctrl+E: edit | Esc: close ",
+        "Read the plan in the session. Use the keys below to act on it.",
         Theme::dim(),
     )))
+    .wrap(Wrap { trim: false })
     .render(rows[2], buf);
+    Paragraph::new(Line::from(Span::styled(
+        " Enter: approve | R: reject | S: save | Esc: close ",
+        Theme::dim(),
+    )))
+    .render(rows[3], buf);
     None
+}
+
+fn render_ask(area: Rect, buf: &mut Buffer, s: &mut crate::function::AskState) -> Option<(u16, u16)> {
+    use crate::function::AskPhase;
+
+    // Layout matches the screenshot the user picked:
+    //
+    //     q1 q2 q3 confirm         ← tab strip (every question + confirm)
+    //     <question text>          ← current question header
+    //      - <option>              ← options for the current question
+    //      - <option>
+    //      - Type your own answer… ← implicit freeform row
+    //     ↑/↓: navigate | Enter: pick | Esc: cancel | ←/→: switch
+    //
+    // The function panel already has its outer border + title;
+    // this tab is rendered inside that area.
+    if area.height < 3 {
+        return None;
+    }
+
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // tab strip
+            Constraint::Min(1),    // picker body
+            Constraint::Length(1), // hint
+        ])
+        .split(area);
+
+    // --- tab strip: Q1 Q2 Q3 Confirm (with ✓ / active highlight) ---
+    let total = s.items.len();
+    let active_idx = s.active.min(total.saturating_sub(1));
+    let mut tab_spans: Vec<Span> = Vec::new();
+    for (i, it) in s.items.iter().enumerate() {
+        let answered = it.answered.is_some();
+        let label = format!("q{}", i + 1);
+        let (style, mark) = if s.phase == AskPhase::Asking && i == active_idx {
+            (
+                Theme::underlined().add_modifier(ratatui::style::Modifier::BOLD),
+                " ",
+            )
+        } else if answered {
+            (Theme::dim(), "✓")
+        } else {
+            (Theme::base(), " ")
+        };
+        tab_spans.push(Span::styled(format!(" {mark}{label} "), style));
+    }
+    if total > 0 && (s.all_answered() || s.phase == AskPhase::Reviewing) {
+        let style = if s.phase == AskPhase::Reviewing {
+            Theme::underlined().add_modifier(ratatui::style::Modifier::BOLD)
+        } else {
+            Theme::dim()
+        };
+        tab_spans.push(Span::styled(" confirm ", style));
+    }
+    if !tab_spans.is_empty() {
+        buf.set_line(
+            rows[0].x,
+            rows[0].y,
+            &Line::from(tab_spans),
+            rows[0].width,
+        );
+    }
+
+    // --- body ---
+    let body_lines: Vec<Line> = match s.phase {
+        AskPhase::Asking => ask_active_question_lines(s, active_idx),
+        AskPhase::Reviewing => ask_review_lines(s),
+    };
+    Paragraph::new(body_lines)
+        .wrap(Wrap { trim: false })
+        .render(rows[1], buf);
+
+    // --- hint ---
+    let hint = match s.phase {
+        AskPhase::Asking => {
+            if total > 1 {
+                " ↑/↓: navigate | ←/→: switch | Enter: pick | Esc: cancel "
+            } else {
+                " ↑/↓: navigate | Enter: pick | Esc: cancel "
+            }
+        }
+        AskPhase::Reviewing => " ↑/↓: scroll | Enter: send all | Esc: cancel ",
+    };
+    Paragraph::new(Line::from(Span::styled(hint, Theme::dim()))).render(rows[2], buf);
+    None
+}
+
+/// Body lines for the Asking phase: the active question + its
+/// options. Cursor is marked with `>` and rendered bold; the
+/// implicit "Type your own answer…" row is appended as the last
+/// row.
+///
+///     <question>
+///     >  - <option>
+///        - <option>
+fn ask_active_question_lines(
+    s: &crate::function::AskState,
+    active_idx: usize,
+) -> Vec<Line<'static>> {
+    let Some(it) = s.items.get(active_idx) else {
+        return vec![Line::from(Span::styled("(no question)", Theme::dim()))];
+    };
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(Span::raw(it.question.clone())));
+    for (j, opt) in it.options.iter().enumerate() {
+        if j == it.cursor {
+            lines.push(Line::from(vec![
+                Span::styled(">  - ", Theme::bold()),
+                Span::styled(opt.clone(), Theme::bold()),
+            ]));
+        } else {
+            lines.push(Line::from(Span::raw(format!("   - {opt}"))));
+        }
+    }
+    let freeform_idx = it.options.len();
+    if freeform_idx == it.cursor {
+        lines.push(Line::from(vec![
+            Span::styled(">  - ", Theme::bold()),
+            Span::styled("Type your own answer…", Theme::dim()),
+        ]));
+    } else {
+        lines.push(Line::from(Span::styled(
+            "   - Type your own answer…",
+            Theme::dim(),
+        )));
+    }
+    lines
+}
+
+/// Body lines for the Reviewing phase: one Q/A pair per question.
+///
+///     Q1. <question>
+///        A. <answer>
+///     Q2. <question>
+///        A. <answer>
+fn ask_review_lines(s: &crate::function::AskState) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line> = Vec::new();
+    for (i, it) in s.items.iter().enumerate() {
+        let ans = it.answered.as_deref().unwrap_or("(no answer)");
+        lines.push(Line::from(Span::styled(
+            format!("Q{}. {}", i + 1, it.question),
+            Theme::bold(),
+        )));
+        lines.push(Line::from(Span::raw(format!("   A. {ans}"))));
+    }
+    lines
 }

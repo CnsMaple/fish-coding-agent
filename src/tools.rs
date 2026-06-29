@@ -133,46 +133,6 @@ fn tool_defs() -> Vec<ToolDef> {
             }),
         },
         ToolDef {
-            name: "ask",
-            description: "Ask the user a question in the function panel. Use when you need a decision before proceeding.".to_string(),
-            schema: json!({
-                "type": "object",
-                "properties": {
-                    "question": { "type": "string" },
-                    "options": { "type": "array", "items": { "type": "string" }, "minItems": 1 }
-                },
-                "required": ["question"],
-                "additionalProperties": false
-            }),
-        },
-        ToolDef {
-            name: "todo",
-            description: "Publish or update a todo list in the function panel.".to_string(),
-            schema: json!({
-                "type": "object",
-                "properties": {
-                    "items": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "content": { "type": "string" },
-                                "status": {
-                                    "type": "string",
-                                    "enum": ["completed", "in_progress", "pending"],
-                                    "description": "Status of the item. Default: pending."
-                                }
-                            },
-                            "required": ["content"],
-                            "additionalProperties": false
-                        }
-                    }
-                },
-                "required": ["items"],
-                "additionalProperties": false
-            }),
-        },
-        ToolDef {
             name: "plan",
             description: "Present a plan for user confirmation in the function panel before executing it.".to_string(),
             schema: json!({
@@ -186,20 +146,49 @@ fn tool_defs() -> Vec<ToolDef> {
                 "additionalProperties": false
             }),
         },
+        ToolDef {
+            name: "ask",
+            description: "Ask the user a clarifying question. The question is shown in the session and as a toast. The user types their answer into the main input; the conversation resumes when they submit. Use this in plan mode to confirm tradeoffs before drafting a plan, and in build mode when a single decision blocks the next step.".to_string(),
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "question": { "type": "string", "description": "The question to present to the user." },
+                    "options": { "type": "array", "items": { "type": "string" }, "description": "Optional list of suggested answers; rendered as bullets under the question." }
+                },
+                "required": ["question"],
+                "additionalProperties": false
+            }),
+        },
     ]
 }
 
 pub async fn execute_tool(name: &str, args: &str, cwd: &Path) -> String {
+    execute_tool_with_agent(crate::permission::Agent::Build, name, args, cwd).await
+}
+
+pub async fn execute_tool_with_agent(
+    agent: crate::permission::Agent,
+    name: &str,
+    args: &str,
+    cwd: &Path,
+) -> String {
+    use crate::permission::{tool as t, Action};
+    if matches!(crate::permission::check(agent, name), Action::Deny) {
+        return json!({
+            "ok": false,
+            "error": format!("tool `{name}` is not allowed in {} mode", agent.as_str()),
+        })
+        .to_string();
+    }
     let result = match name {
-        "read_file" => read_file(args, cwd).await,
-        "write_file" => write_file(args, cwd).await,
-        "shell_command" | "command" => run_command(args, cwd).await,
-        "python_command" => run_python_command(args, cwd).await,
-        "grep" => grep_text(args, cwd).await,
-        "list" => list_path(args, cwd).await,
-        "ask" => ask_user(args).await,
-        "todo" => todo_items(args).await,
-        "plan" => plan_review(args).await,
+        t::READ_FILE => read_file(args, cwd).await,
+        t::WRITE_FILE => write_file(args, cwd).await,
+        t::SHELL_COMMAND | "command" => run_command(args, cwd).await,
+        t::PYTHON_COMMAND => run_python_command(args, cwd).await,
+        t::GREP => grep_text(args, cwd).await,
+        t::LIST => list_path(args, cwd).await,
+        t::PLAN => plan_review(args).await,
+        t::ASK => ask_question(args).await,
         _ => Err(anyhow!("unknown tool: {name}")),
     };
 
@@ -218,17 +207,41 @@ pub async fn execute_tool_streaming(
     cwd: &Path,
     tx: UnboundedSender<AppMsg>,
 ) -> String {
+    execute_tool_streaming_with_agent(
+        crate::permission::Agent::Build,
+        name,
+        args,
+        cwd,
+        tx,
+    )
+    .await
+}
+
+pub async fn execute_tool_streaming_with_agent(
+    agent: crate::permission::Agent,
+    name: &str,
+    args: &str,
+    cwd: &Path,
+    tx: UnboundedSender<AppMsg>,
+) -> String {
+    use crate::permission::{tool as t, Action};
+    if matches!(crate::permission::check(agent, name), Action::Deny) {
+        return json!({
+            "ok": false,
+            "error": format!("tool `{name}` is not allowed in {} mode", agent.as_str()),
+        })
+        .to_string();
+    }
     let result = match name {
-        "shell_command" | "command" => run_command_streaming(args, cwd, tx)
+        t::SHELL_COMMAND | "command" => run_command_streaming(args, cwd, tx)
             .await
             .unwrap_or_else(|e| json!({ "ok": false, "error": e.to_string() }).to_string()),
-        "python_command" => run_python_streaming(args, cwd, tx)
+        t::PYTHON_COMMAND => run_python_streaming(args, cwd, tx)
             .await
             .unwrap_or_else(|e| json!({ "ok": false, "error": e.to_string() }).to_string()),
-        _ => execute_tool(name, args, cwd).await,
+        _ => execute_tool_with_agent(agent, name, args, cwd).await,
     };
 
-    // Result is already a JSON-wrapped string at this point
     result
 }
 
@@ -586,44 +599,6 @@ async fn list_path(args: &str, cwd: &Path) -> Result<String> {
     Ok(rows.join("\n"))
 }
 
-async fn ask_user(args: &str) -> Result<String> {
-    let value: serde_json::Value = serde_json::from_str(args)?;
-    let question = value
-        .get("question")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .trim();
-    if question.is_empty() {
-        return Err(anyhow!("question is empty"));
-    }
-    let options = value
-        .get("options")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    Ok(json!({
-        "kind": "ask",
-        "question": question,
-        "options": options,
-        "status": "pending",
-        "instruction": "Do not call this tool again. The question is now shown to the user in the function panel. Stop and wait for the user to pick an option or type a free-form answer. The user will submit their answer and the conversation will resume automatically -- you will be re-prompted with the user's response."
-    }).to_string())
-}
-
-async fn todo_items(args: &str) -> Result<String> {
-    let value: serde_json::Value = serde_json::from_str(args)?;
-    let items = value
-        .get("items")
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
-    Ok(json!({ "kind": "todo", "items": items }).to_string())
-}
-
 async fn plan_review(args: &str) -> Result<String> {
     let value: serde_json::Value = serde_json::from_str(args)?;
     let title = value
@@ -658,6 +633,36 @@ async fn plan_review(args: &str) -> Result<String> {
         "status": "pending",
         "instruction": "Do not call this tool again. The plan is now shown to the user in the function panel. Stop and wait for the user to approve, reject, or request changes. The user will submit their decision and the conversation will resume automatically -- you will be re-prompted with the user's response."
     }).to_string())
+}
+
+async fn ask_question(args: &str) -> Result<String> {
+    let value: serde_json::Value = serde_json::from_str(args)?;
+    let question = value
+        .get("question")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .unwrap_or("");
+    if question.is_empty() {
+        return Err(anyhow!("question is empty"));
+    }
+    let options: Vec<String> = value
+        .get("options")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.trim().to_string()))
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(json!({
+        "kind": "ask",
+        "question": question,
+        "options": options,
+        "status": "pending",
+        "instruction": "Do not call this tool again. The question is now shown to the user in the session. Stop and wait for the user to type their answer into the main input. Their reply will be sent back to you automatically -- you will be re-prompted with the user's response."
+    })
+    .to_string())
 }
 
 async fn run_command(args: &str, cwd: &Path) -> Result<String> {
@@ -877,9 +882,8 @@ pub fn is_valid_tool(name: &str) -> bool {
             | "python_command"
             | "grep"
             | "list"
-            | "ask"
-            | "todo"
             | "plan"
+            | "ask"
             | "command"
     )
 }
@@ -894,4 +898,115 @@ fn truncate(mut text: String, limit: usize) -> String {
     }
     text.push_str("\n[truncated]");
     text
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Plan agent must be denied any tool that could mutate the
+    /// user's tree, even when the tool name is well-formed.
+    #[tokio::test]
+    async fn plan_mode_denies_write_file() {
+        let result = execute_tool_with_agent(
+            crate::permission::Agent::Plan,
+            "write_file",
+            r#"{"path":"x","content":"y"}"#,
+            Path::new("."),
+        )
+        .await;
+        let v: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(v.get("ok").and_then(|s| s.as_bool()), Some(false));
+        let err = v.get("error").and_then(|s| s.as_str()).unwrap_or("");
+        assert!(err.contains("not allowed"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn plan_mode_denies_shell_command() {
+        let result = execute_tool_with_agent(
+            crate::permission::Agent::Plan,
+            "shell_command",
+            r#"{"command":"echo hi"}"#,
+            Path::new("."),
+        )
+        .await;
+        let v: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(v.get("ok").and_then(|s| s.as_bool()), Some(false));
+    }
+
+    #[tokio::test]
+    async fn build_mode_allows_write_file() {
+        let dir = std::env::temp_dir().join("fish-coding-agent-perm-test");
+        let _ = std::fs::create_dir_all(&dir);
+        let target = dir.join("perm_test.txt");
+        let _ = std::fs::remove_file(&target);
+        let args = serde_json::json!({
+            "path": target.file_name().unwrap().to_string_lossy(),
+            "content": "ok"
+        })
+        .to_string();
+        let result =
+            execute_tool_with_agent(crate::permission::Agent::Build, "write_file", &args, &dir)
+                .await;
+        let v: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(v.get("ok").and_then(|s| s.as_bool()), Some(true));
+        let _ = std::fs::remove_file(&target);
+    }
+
+    #[tokio::test]
+    async fn plan_tool_payload_contains_kind() {
+        let result = execute_tool_with_agent(
+            crate::permission::Agent::Plan,
+            "plan",
+            r#"{"title":"t","content":"hello"}"#,
+            Path::new("."),
+        )
+        .await;
+        let v: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(v.get("ok").and_then(|s| s.as_bool()), Some(true));
+        let inner: serde_json::Value =
+            serde_json::from_str(v.get("result").and_then(|s| s.as_str()).unwrap()).unwrap();
+        assert_eq!(inner.get("kind").and_then(|s| s.as_str()), Some("plan"));
+        assert_eq!(inner.get("title").and_then(|s| s.as_str()), Some("t"));
+    }
+
+    #[tokio::test]
+    async fn ask_tool_payload_contains_kind_and_question() {
+        let result = execute_tool_with_agent(
+            crate::permission::Agent::Plan,
+            "ask",
+            r#"{"question":"which API?","options":["v1","v2"]}"#,
+            Path::new("."),
+        )
+        .await;
+        let v: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(v.get("ok").and_then(|s| s.as_bool()), Some(true));
+        let inner: serde_json::Value =
+            serde_json::from_str(v.get("result").and_then(|s| s.as_str()).unwrap()).unwrap();
+        assert_eq!(inner.get("kind").and_then(|s| s.as_str()), Some("ask"));
+        assert_eq!(
+            inner.get("question").and_then(|s| s.as_str()),
+            Some("which API?")
+        );
+        let options = inner.get("options").and_then(|s| s.as_array()).unwrap();
+        assert_eq!(options.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn ask_tool_rejects_empty_question() {
+        let result = execute_tool_with_agent(
+            crate::permission::Agent::Build,
+            "ask",
+            r#"{"question":"   "}"#,
+            Path::new("."),
+        )
+        .await;
+        let v: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(v.get("ok").and_then(|s| s.as_bool()), Some(false));
+        assert!(v
+            .get("error")
+            .and_then(|s| s.as_str())
+            .unwrap_or("")
+            .contains("empty"));
+    }
 }

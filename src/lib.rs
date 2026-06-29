@@ -7,6 +7,7 @@ pub mod fuzzy;
 pub mod input;
 pub mod mcp;
 pub mod net;
+pub mod permission;
 pub mod providers;
 pub mod session;
 pub mod skill;

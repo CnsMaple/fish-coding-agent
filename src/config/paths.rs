@@ -9,3 +9,7 @@ pub fn config_dir() -> Result<PathBuf> {
 pub fn config_file_path() -> Result<PathBuf> {
     Ok(config_dir()?.join("config.json"))
 }
+
+pub fn plans_dir() -> Result<PathBuf> {
+    Ok(config_dir()?.join("plans"))
+}
