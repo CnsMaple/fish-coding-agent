@@ -300,20 +300,20 @@ pub fn build_message_lines(session: &Session, msg_idx: usize, width: usize) -> V
         });
     }
 
-    // Sort by offset; at the same offset, thinking comes before
-    // tools. This matches the natural order of the model stream:
-    // the model typically thinks first, then issues a tool call.
-    // Using a stable sort + the natural insertion order of the
-    // items (thinking segments first, then tools, each in
-    // creation order) means multiple thinking events that share an
-    // offset with a tool are still rendered in their natural
-    // grouping.
+    // Sort by offset; at the same offset, tools come before
+    // thinking. Without this tiebreaker, a thinking segment
+    // created after a tool block at the same content position
+    // (e.g. the model thinks after seeing a tool result) would
+    // be rendered before the already-visible tool block, causing
+    // the tool block to jump down visually.
     items.sort_by(|a, b| {
         a.offset
             .cmp(&b.offset)
             .then_with(|| match (&a.kind, &b.kind) {
-                (RenderItemKind::Thinking(_), RenderItemKind::Tool(_)) => std::cmp::Ordering::Less,
                 (RenderItemKind::Tool(_), RenderItemKind::Thinking(_)) => {
+                    std::cmp::Ordering::Less
+                }
+                (RenderItemKind::Thinking(_), RenderItemKind::Tool(_)) => {
                     std::cmp::Ordering::Greater
                 }
                 _ => std::cmp::Ordering::Equal,
@@ -2255,13 +2255,13 @@ mod tool_block_count_tests {
         assert_eq!(asst.thinking_segments[1].content, "phase two");
     }
 
-    /// The thinking block must appear BEFORE the tool block in the
-    /// rendered output, matching the natural model order
-    /// (think → tool → think → tool …). Before the fix, tools
-    /// were sorted first so all thinking landed after the last
-    /// tool.
+    /// At the same offset, the tool block appears BEFORE the thinking
+    /// block. This matches the user's visual expectation: when a tool
+    /// result arrives first and the model subsequently thinks about
+    /// the result, the thinking block should not be inserted before
+    /// the already-visible tool block.
     #[test]
-    fn thinking_block_appears_before_tool_block() {
+    fn tool_block_appears_before_thinking_at_same_offset() {
         let mut s = Session::default();
         s.push(Message::new(Role::User, "do it"));
         let mut asst = Message::new(Role::Assistant, "");
@@ -2278,14 +2278,14 @@ mod tool_block_count_tests {
         let width = 80;
         let rendered = build_message_lines(&s, 1, width);
         let text = lines_to_text(&rendered);
-        let think_idx = text.find("Thinking").expect("Thinking block missing");
         let tool_idx = text
             .find("Edit:")
             .or_else(|| text.find("Output"))
             .expect("tool block missing");
+        let think_idx = text.find("Thinking").expect("Thinking block missing");
         assert!(
-            think_idx < tool_idx,
-            "Thinking block must appear before the tool block, but thinking at {think_idx} came after tool at {tool_idx}.\nRendered:\n{text}"
+            tool_idx < think_idx,
+            "Tool block must appear before the thinking block at the same offset, but tool at {tool_idx} came after thinking at {think_idx}.\nRendered:\n{text}"
         );
     }
 
