@@ -50,6 +50,13 @@ impl<V> BoundedCache<V> {
         self.map.contains_key(key)
     }
 
+    /// Iterate over all cached keys. Used by callers that need to
+    /// selectively evict entries (e.g. invalidating indices that
+    /// shifted after a `truncate` / `remove` on the source list).
+    pub fn iter_keys(&self) -> impl Iterator<Item = &usize> {
+        self.map.keys()
+    }
+
     /// Insert `value` for `key`. If the cache is at capacity, evict
     /// the oldest entry. Returns the evicted key/value, if any.
     pub fn put(&mut self, key: usize, value: V) -> Option<(usize, V)> {

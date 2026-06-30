@@ -249,6 +249,8 @@ fn retry_last_prompt(app: &mut App) {
     };
     let prompt = app.session.messages[idx].content.clone();
     app.session.messages.truncate(idx);
+    app.session.invalidate_message_cache_from(idx);
+    app.session.invalidate_layout_cache();
     crate::commands::send_chat(app, prompt);
 }
 
@@ -268,6 +270,8 @@ fn continue_response(app: &mut App, arg: &str) {
         let idx = app.session.messages.len() - 2;
         if app.session.messages[idx].role == Role::User {
             app.session.messages.remove(idx);
+            app.session.invalidate_message_cache_from(idx);
+            app.session.invalidate_layout_cache();
         }
     }
 }

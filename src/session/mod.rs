@@ -271,6 +271,23 @@ impl Session {
         }
     }
 
+    /// Drop any per-message render-LRU entries whose index is
+    /// `>= from_idx`. Call this immediately after truncating or
+    /// removing messages so a later `push` cannot reuse a stale
+    /// render for a now-different (or removed) message slot.
+    pub fn invalidate_message_cache_from(&mut self, from_idx: usize) {
+        if let Ok(mut lru) = self.message_lines_cache.lock() {
+            let stale: Vec<usize> = lru
+                .iter_keys()
+                .filter(|&&k| k >= from_idx)
+                .copied()
+                .collect();
+            for k in stale {
+                lru.remove(&k);
+            }
+        }
+    }
+
     /// Read the cached total line count for a specific width, if
     /// available. `None` means the caller must compute it first via
     /// `count_all_lines_with_width(width)` (which needs `&mut self`).
@@ -608,6 +625,9 @@ impl Session {
         self.scroll = 0;
         self.todo_items.clear();
         if let Ok(mut c) = self.line_cache.lock() {
+            c.clear();
+        }
+        if let Ok(mut c) = self.message_lines_cache.lock() {
             c.clear();
         }
         self.invalidate_layout_cache();

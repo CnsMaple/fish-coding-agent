@@ -17,6 +17,11 @@ pub struct CachedMessageLines {
     pub content_version: u64,
     pub width: u16,
     pub display_cursor: usize,
+    /// Byte length of `Message::content` when this entry was cached.
+    /// Used as a cheap belt-and-braces guard against stale entries
+    /// that survived a missed invalidation: a length mismatch proves
+    /// the slot now belongs to a different message.
+    pub content_len: usize,
     pub lines: Vec<Line<'static>>,
 }
 
@@ -85,12 +90,17 @@ pub fn render(
     let total = session
         .cached_total_lines_for(width)
         .unwrap_or_else(|| count_lines_estimate(session));
-    let total_u16 = total.min(u16::MAX as u32) as u16;
-    let max_scroll = total_u16.saturating_sub(inner_h as u16);
-    let scroll = session.scroll.min(max_scroll);
-    let offset_from_top = max_scroll.saturating_sub(scroll);
-    let start = offset_from_top;
-    let end = (offset_from_top + inner_h as u16).min(total_u16);
+    // Do the viewport math in u32 so a session that overflows u16
+    // (10M+ token threads) still scrolls correctly. `session.scroll`
+    // is u16 because it stores "scroll offset from bottom" which is
+    // bounded by viewport height in practice; clamp it here against
+    // the true u32 max so the offset is derived from the real total.
+    let total_u32: u32 = total;
+    let max_scroll_u32: u32 = total_u32.saturating_sub(inner_h as u32);
+    let scroll_u32: u32 = (session.scroll as u32).min(max_scroll_u32);
+    let offset_from_top: u32 = max_scroll_u32.saturating_sub(scroll_u32);
+    let start: u32 = offset_from_top;
+    let end: u32 = (offset_from_top + inner_h as u32).min(total_u32);
 
     tool_toggle_rows.clear();
 
@@ -99,7 +109,7 @@ pub fn render(
     // session live outside the viewport, so this is the dominant
     // win for Phase B.
     let visible: Vec<Line> = if start < end {
-        build_lines_viewport(session, width, start as u32, end as u32)
+        build_lines_viewport(session, width, start, end)
     } else {
         vec![]
     };
@@ -228,12 +238,18 @@ pub fn build_message_lines(session: &Session, msg_idx: usize, width: usize) -> V
     // messages use the same cache. Streaming messages are keyed by
     // content_version + display_cursor so that the progressive reveal
     // (tick handler) correctly invalidates the cache.
+    //
+    // `content_len` is a cheap extra guard: if a stale entry survived
+    // a `truncate` / `remove` / `clear` (e.g. because the caller
+    // forgot to invalidate), a length mismatch will force a rebuild
+    // instead of returning the wrong render.
     {
         let lru = session.message_lines_cache.lock().unwrap();
         if let Some(cached) = lru.get(&msg_idx) {
             if cached.content_version == m.content_version
                 && cached.width == width as u16
                 && cached.display_cursor == m.display_cursor
+                && cached.content_len == m.content.len()
             {
                 return cached.lines.clone();
             }
@@ -438,6 +454,7 @@ pub fn build_message_lines(session: &Session, msg_idx: usize, width: usize) -> V
                 content_version: m.content_version,
                 width: width as u16,
                 display_cursor: m.display_cursor,
+                content_len: m.content.len(),
                 lines: msg_lines.clone(),
             },
         );
@@ -2856,6 +2873,135 @@ mod tests {
             total as usize,
             asst_lines.len() + user_lines.len(),
             "viewport line count must match the rendered output line for line"
+        );
+    }
+
+    // --- Regression tests for the "long user message renders only
+    //     half until AI replies" bug. The fix lives in three places:
+    //     1. `Session::clear` must drop the per-message render LRU.
+    //     2. `Session::invalidate_message_cache_from` must drop LRU
+    //        entries whose slot was shifted by a `truncate` / `remove`.
+    //     3. The LRU hit must also compare `content.len()` so a
+    //        forgotten invalidation cannot return a stale render.
+
+    #[test]
+    fn clear_drops_message_render_lru() {
+        use crate::session::Message;
+        let mut s = Session::default();
+        s.push(Message::new(Role::User, "first session message"));
+        s.push(Message::new(Role::Assistant, "first session reply"));
+
+        // Warm the LRU by rendering both messages.
+        let _ = build_message_lines(&s, 0, 80);
+        let _ = build_message_lines(&s, 1, 80);
+        {
+            let lru = s.message_lines_cache.lock().unwrap();
+            assert_eq!(lru.len(), 2, "LRU should hold entries for both messages");
+        }
+
+        // Start a new session. The LRU must be wiped so a brand-new
+        // message at index 0 cannot hit the old render.
+        s.clear();
+        let lru = s.message_lines_cache.lock().unwrap();
+        assert_eq!(lru.len(), 0, "clear() must drop the per-message LRU");
+    }
+
+    #[test]
+    fn invalidate_from_drops_shifted_slots() {
+        use crate::session::Message;
+        let mut s = Session::default();
+        s.push(Message::new(Role::User, "msg 0"));
+        s.push(Message::new(Role::Assistant, "msg 1"));
+        s.push(Message::new(Role::User, "msg 2"));
+        s.push(Message::new(Role::Assistant, "msg 3"));
+
+        for i in 0..4 {
+            let _ = build_message_lines(&s, i, 80);
+        }
+        assert_eq!(s.message_lines_cache.lock().unwrap().len(), 4);
+
+        // Simulate `/retry` truncating at index 2: the user wants
+        // the last user message + everything after it gone. Slots 2
+        // and 3 will be reused by the retried prompt, so their
+        // cached renders must be dropped.
+        s.invalidate_message_cache_from(2);
+        let lru = s.message_lines_cache.lock().unwrap();
+        assert_eq!(lru.len(), 2, "only slots 0 and 1 should remain cached");
+        assert!(lru.contains(&0));
+        assert!(lru.contains(&1));
+        assert!(!lru.contains(&2));
+        assert!(!lru.contains(&3));
+    }
+
+    #[test]
+    fn lru_check_rejects_stale_length() {
+        // Even if a caller forgets to invalidate the LRU after a
+        // truncate, a `content.len()` mismatch must force a rebuild
+        // instead of returning the wrong render.
+        use crate::session::Message;
+        let mut s = Session::default();
+        s.push(Message::new(Role::User, "original long content"));
+        let _ = build_message_lines(&s, 0, 80);
+        // Sanity: the LRU has one entry after rendering.
+        assert_eq!(s.message_lines_cache.lock().unwrap().len(), 1);
+
+        // Simulate a forgotten invalidation: mutate the message in
+        // place WITHOUT bumping `content_version` and WITHOUT
+        // clearing the LRU. The only thing that changed is
+        // `content` (and therefore `content.len()`).
+        let new_content = "x".to_string();
+        let new_len = new_content.len();
+        s.messages[0].content = new_content;
+        s.messages[0].line_count = 1;
+        s.messages[0].cached_content_line_count = None;
+        // Intentionally leave content_version and display_cursor as
+        // they were — a real regression would let them collide.
+        s.messages[0].display_cursor = s.messages[0].content.len();
+
+        let rebuilt = build_message_lines(&s, 0, 80);
+        // The LRU must have been missed and a fresh render produced.
+        // A stale hit would still carry the old content version's
+        // `line_count` (raw-newline based) reflected in the line
+        // count, but more importantly the rebuild path is the only
+        // way to get the new short content — verify the rebuilt
+        // span content is the new "x", not the old "original long
+        // content".
+        let content_chars: usize = rebuilt
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .filter(|s| !s.is_empty() && !s.chars().all(|c| c == ' '))
+            .map(|s| s.chars().count())
+            .sum();
+        // The rebuilt content should reflect the new short text.
+        // Old content "original long content" is 21 chars; new is 1.
+        assert!(
+            content_chars <= new_len + 2,
+            "rebuild should show the new short content (got {content_chars} content chars)"
+        );
+    }
+
+    #[test]
+    fn long_chinese_message_does_not_truncate_viewport() {
+        // Regression: a long single-block user message containing
+        // CJK text (each char is width 2) used to underflow the
+        // viewport math because the count was off vs. what
+        // `build_message_lines` actually emitted. Verify the counted
+        // total matches the rendered line count for a realistic
+        // Chinese message that wraps to many display rows.
+        use crate::session::Message;
+        let mut s = Session::default();
+        let long_zh = "中文测试 ".repeat(200);
+        s.push(Message::new(Role::User, &long_zh));
+
+        let width: u16 = 80;
+        let total = s.count_all_lines_with_width(width as usize);
+        let rendered = build_message_lines(&s, 0, width as usize);
+        assert_eq!(
+            total as usize,
+            rendered.len(),
+            "viewport total ({total}) must equal rendered line count ({})",
+            rendered.len()
         );
     }
 }
