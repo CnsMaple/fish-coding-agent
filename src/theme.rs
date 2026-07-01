@@ -95,7 +95,7 @@ impl ThemeColors {
             // Soothing pastel backgrounds for a light theme
             tool_pending_bg: Color::Rgb(230, 245, 243), // #E6F5F3
             tool_success_bg: Color::Rgb(232, 245, 233), // #E8F5E9
-            tool_error_bg: Color::Rgb(232, 245, 233),   // #E8F5E9 (same as success)
+            tool_error_bg: Color::Rgb(255, 235, 238),   // #FFEBEE
             tool_error_fg: Color::Rgb(202, 67, 67),     // #CA4343
             cursor_fg: Color::Rgb(5, 150, 105),         // emerald-600
             thinking_streaming_bg: Color::Rgb(230, 245, 243), // #E6F5F3
