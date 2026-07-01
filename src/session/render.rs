@@ -289,7 +289,16 @@ pub fn build_message_lines(session: &Session, msg_idx: usize, width: usize) -> V
 
     // Build sorted items (thinking segments + tools) for interleaved rendering
     enum RenderItemKind {
-        Thinking(String),
+        Thinking {
+            content: String,
+            /// Snapshot of `m.tool_results.len()` when this segment
+            /// was created. Used by the sort tiebreaker below to
+            /// distinguish pre-tool thinking (renders before its
+            /// sibling tool block) from post-tool thinking (renders
+            /// after it) when both items share the same content
+            /// offset.
+            tool_results_len_at_open: usize,
+        },
         Tool(usize), // index into m.tool_results
     }
     struct RenderItem {
@@ -308,7 +317,10 @@ pub fn build_message_lines(session: &Session, msg_idx: usize, width: usize) -> V
                 let offset = clamp_char_boundary(raw, seg.offset.min(raw.len()));
                 items.push(RenderItem {
                     offset,
-                    kind: RenderItemKind::Thinking(seg.content.clone()),
+                    kind: RenderItemKind::Thinking {
+                        content: seg.content.clone(),
+                        tool_results_len_at_open: seg.tool_results_len_at_open,
+                    },
                 });
             }
         }
@@ -323,21 +335,52 @@ pub fn build_message_lines(session: &Session, msg_idx: usize, width: usize) -> V
         });
     }
 
-    // Sort by offset; at the same offset, tools come before
-    // thinking. Without this tiebreaker, a thinking segment
-    // created after a tool block at the same content position
-    // (e.g. the model thinks after seeing a tool result) would
-    // be rendered before the already-visible tool block, causing
-    // the tool block to jump down visually.
+    // Sort by offset; at the same offset, disambiguate thinking vs.
+    // tool with `tool_results_len_at_open` instead of a hard-coded
+    // "tools win" rule. The hard-coded rule was wrong for the
+    // common "model thinks, then calls a tool" pattern: when the
+    // pre-tool thinking segment and the tool block both anchor at
+    // the same offset (e.g. content was empty when both happened),
+    // the pre-tool thinking should render BEFORE the tool it
+    // produced, not after. A segment created when
+    // `tool_results.len()` was `tool_results_len_at_open` came
+    // before any tool with index `>= tool_results_len_at_open` —
+    // so at the same offset, sort such a segment before that tool,
+    // and any tool with a smaller index (i.e. one that already
+    // existed when the segment opened) before the segment.
     items.sort_by(|a, b| {
         a.offset
             .cmp(&b.offset)
             .then_with(|| match (&a.kind, &b.kind) {
-                (RenderItemKind::Tool(_), RenderItemKind::Thinking(_)) => {
-                    std::cmp::Ordering::Less
+                (
+                    RenderItemKind::Tool(ti),
+                    RenderItemKind::Thinking {
+                        tool_results_len_at_open,
+                        ..
+                    },
+                ) => {
+                    if *ti >= *tool_results_len_at_open {
+                        // Tool didn't exist yet when the segment
+                        // opened → segment is pre-tool → tool after.
+                        std::cmp::Ordering::Greater
+                    } else {
+                        // Tool already existed when the segment
+                        // opened → segment is post-tool → tool before.
+                        std::cmp::Ordering::Less
+                    }
                 }
-                (RenderItemKind::Thinking(_), RenderItemKind::Tool(_)) => {
-                    std::cmp::Ordering::Greater
+                (
+                    RenderItemKind::Thinking {
+                        tool_results_len_at_open,
+                        ..
+                    },
+                    RenderItemKind::Tool(ti),
+                ) => {
+                    if *ti >= *tool_results_len_at_open {
+                        std::cmp::Ordering::Less
+                    } else {
+                        std::cmp::Ordering::Greater
+                    }
                 }
                 _ => std::cmp::Ordering::Equal,
             })
@@ -361,7 +404,7 @@ pub fn build_message_lines(session: &Session, msg_idx: usize, width: usize) -> V
         }
 
         match item.kind {
-            RenderItemKind::Thinking(content) => {
+            RenderItemKind::Thinking { content, .. } => {
                 let visible = match session.display {
                     ThinkingDisplay::Show => m.thinking_visible,
                     ThinkingDisplay::ShowWhileStreaming => m.streaming || m.thinking_visible,
@@ -374,45 +417,14 @@ pub fn build_message_lines(session: &Session, msg_idx: usize, width: usize) -> V
                     colors.thinking_done_bg
                 };
                 ensure_gap_before_block(&mut msg_lines);
-                if content.trim().is_empty() {
-                    // Empty / whitespace-only content: keep the legacy
-                    // single-box placeholder path so the user still
-                    // sees a `+--- Thinking ---+ [no thinking content]`
-                    // frame rather than a silently dropped block.
-                    let rows = build_thinking_block_rows(
-                        &content,
-                        visible,
-                        session.tool_preview_lines,
-                        width,
-                        bg,
-                    );
-                    push_block_rows(&mut msg_lines, rows);
-                } else {
-                    // A single ThinkingSegment whose `content` already
-                    // contains paragraph breaks (i.e. two-or-more
-                    // consecutive newlines) is rendered as multiple
-                    // bordered boxes — one per paragraph — separated
-                    // by blank lines. This prevents the model from
-                    // streaming its entire chain-of-thought in one
-                    // burst and having it collapse into a single
-                    // giant `+--- Thinking ---+` box that buries the
-                    // interspersed tool results.
-                    let mut emitted = false;
-                    for_each_thinking_paragraph(&content, |para| {
-                        if emitted {
-                            msg_lines.push(Line::from(""));
-                        }
-                        emitted = true;
-                        let rows = build_thinking_block_rows(
-                            para,
-                            visible,
-                            session.tool_preview_lines,
-                            width,
-                            bg,
-                        );
-                        push_block_rows(&mut msg_lines, rows);
-                    });
-                }
+                let rows = build_thinking_block_rows(
+                    &content,
+                    visible,
+                    session.tool_preview_lines,
+                    width,
+                    bg,
+                );
+                push_block_rows(&mut msg_lines, rows);
                 msg_lines.push(Line::from(""));
             }
             RenderItemKind::Tool(ti) => {
@@ -709,58 +721,14 @@ pub fn thinking_block_line_count(
     if content.is_empty() {
         return 0;
     }
-    let bg = active_colors().thinking_done_bg;
-    let mut total = 0usize;
-    let mut emitted = false;
-    for_each_thinking_paragraph(content, |para| {
-        if emitted {
-            total += 1; // blank line between consecutive paragraph boxes
-        }
-        emitted = true;
-        total += build_thinking_block_rows(para, visible, preview_lines, width, bg).len();
-    });
-    if !emitted {
-        // Content was non-empty but had no non-whitespace paragraphs
-        // (e.g. all whitespace). The renderer takes the legacy
-        // single-box placeholder path for this case, so the count
-        // must match that — fall back to the original single-box
-        // calculation to keep the viewport math consistent.
-        return build_thinking_block_rows(content, visible, preview_lines, width, bg).len();
-    }
-    total
-}
-
-/// Iterate the non-empty paragraphs of a thinking segment. A paragraph
-/// is a maximal run of text delimited by 2+ consecutive newlines
-/// (paragraph break in chain-of-thought output). Whitespace-only
-/// paragraphs are skipped. Used by both the renderer and the line
-/// counter so a single `ThinkingSegment` whose `content` already
-/// contains paragraph breaks renders as multiple bordered boxes
-/// instead of one giant block.
-fn for_each_thinking_paragraph(content: &str, mut f: impl FnMut(&str)) {
-    let content = content.trim();
-    if content.is_empty() {
-        return;
-    }
-    let bytes = content.as_bytes();
-    let mut start = 0usize;
-    let mut i = 0usize;
-    while i < bytes.len() {
-        if i + 1 < bytes.len() && bytes[i] == b'\n' && bytes[i + 1] == b'\n' {
-            if i > start {
-                f(&content[start..i]);
-            }
-            while i < bytes.len() && bytes[i] == b'\n' {
-                i += 1;
-            }
-            start = i;
-        } else {
-            i += 1;
-        }
-    }
-    if start < bytes.len() {
-        f(&content[start..]);
-    }
+    build_thinking_block_rows(
+        content,
+        visible,
+        preview_lines,
+        width,
+        active_colors().thinking_done_bg,
+    )
+    .len()
 }
 
 /// Count total thinking lines across all segments.
@@ -2411,11 +2379,16 @@ mod tool_block_count_tests {
         let mut s = Session::default();
         s.push(Message::new(Role::User, "do it"));
         let mut asst = Message::new(Role::Assistant, "");
+        // The tool already exists in `tool_results`, then the
+        // model thinks about the result — so the segment's
+        // `tool_results_len_at_open` must be 1 (the count at the
+        // moment the segment opened), telling the sort tiebreaker
+        // this is post-tool reasoning.
         asst.thinking_segments = vec![crate::session::ThinkingSegment {
             offset: 0,
             content: "plan".to_string(),
             closed: false,
-            tool_results_len_at_open: 0,
+            tool_results_len_at_open: 1,
             cached_line_count_expanded: None,
             cached_line_count_collapsed: None,
         }];
@@ -2515,85 +2488,71 @@ mod tool_block_count_tests {
         assert_eq!(s.messages[1].thinking_segments[1].content, "Good, that worked.");
     }
 
-    /// The renderer's `for_each_thinking_paragraph` must split on
-    /// 2+ consecutive newlines and skip whitespace-only paragraphs
-    /// so multi-paragraph chain-of-thought renders as multiple
-    /// bordered boxes instead of one giant block.
+    /// End-to-end: a tool call that lands between two reasoning
+    /// bursts must produce two `+--- Thinking ---+` boxes in the
+    /// rendered chat — one anchored at the pre-tool offset, one
+    /// anchored at the post-tool offset — with the tool block in
+    /// between. This is the regression for "all thinking crammed
+    /// into one block at the bottom of the message".
     #[test]
-    fn for_each_thinking_paragraph_splits_on_double_newlines() {
-        fn paragraphs(s: &str) -> Vec<String> {
-            let mut out = Vec::new();
-            for_each_thinking_paragraph(s, |p| out.push(p.to_string()));
-            out
-        }
-        assert_eq!(paragraphs("single paragraph"), vec!["single paragraph"]);
-        assert_eq!(
-            paragraphs("first\n\nsecond"),
-            vec!["first", "second"]
-        );
-        assert_eq!(
-            paragraphs("a\n\n\n\nb"),
-            vec!["a", "b"],
-            "runs of 2+ newlines collapse to a single paragraph break"
-        );
-        assert_eq!(
-            paragraphs("\n\nleading\n\nmiddle\n\ntrailing\n\n"),
-            vec!["leading", "middle", "trailing"]
-        );
-        assert!(paragraphs("   ").is_empty(), "whitespace-only yields no paragraphs");
-        assert!(paragraphs("\n\n\n\n").is_empty(), "only newlines yields no paragraphs");
-        assert!(paragraphs("").is_empty());
-    }
-
-    /// A `ThinkingSegment` whose `content` already contains paragraph
-    /// breaks must render as multiple `+--- Thinking ---+` boxes,
-    /// each with its own border, instead of one giant block.
-    #[test]
-    fn multi_paragraph_thinking_renders_multiple_boxes() {
+    fn thinking_flanking_tool_call_renders_two_boxes_in_correct_order() {
         let mut s = Session::default();
-        s.push(Message::new(Role::User, "go"));
-        let mut asst = Message::new(Role::Assistant, "");
-        asst.thinking_segments = vec![crate::session::ThinkingSegment {
-            offset: 0,
-            content: "First paragraph of reasoning.\n\nSecond paragraph, also reasoning.\n\nThird."
-                .to_string(),
-            closed: false,
-            tool_results_len_at_open: 0,
-            cached_line_count_expanded: None,
-            cached_line_count_collapsed: None,
-        }];
-        asst.thinking_visible = true;
-        s.push(asst);
+        s.push(Message::new(Role::User, "do it"));
+        s.push(Message::new(Role::Assistant, ""));
+        s.messages[1].streaming = true;
+        s.streaming_id = Some(1);
+
+        // 1. Pre-tool reasoning burst.
+        s.append_thinking_to_last("Let me run the tool first.");
+
+        // 2. Tool call + result arrive (in real life via
+        //    `update_last_tool_content` and a `ContentBlockStart`
+        //    for the next block). The tool_results.len() growth is
+        //    what triggers the auto-close on the next reasoning
+        //    delta.
+        s.messages[1]
+            .tool_results
+            .push(crate::session::ToolResultBlock {
+                name: "bash".to_string(),
+                title: "Bash".to_string(),
+                content: "ok".to_string(),
+                content_offset: 0,
+                visible: true,
+                running: false,
+                cached_line_count_visible: None,
+                cached_line_count_collapsed: None,
+            });
+
+        // 3. Post-tool reasoning burst. The auto-close from Layer 1
+        //    should land this in a fresh segment at the post-tool
+        //    offset.
+        s.append_thinking_to_last("Good, that worked.");
+        assert_eq!(s.messages[1].thinking_segments.len(), 2);
+
+        s.messages[1].thinking_visible = true;
         s.display = crate::config::ThinkingDisplay::Show;
         s.tool_preview_lines = 10;
 
-        let lines = build_message_lines(&s, 1, 80);
-        let text = lines_to_text(&lines);
+        let text = lines_to_text(&build_message_lines(&s, 1, 80));
         let label_count = text.matches("+--- Thinking").count();
         assert_eq!(
-            label_count, 3,
-            "expected three Thinking boxes (one per paragraph), got {label_count}.\nRendered:\n{text}"
+            label_count, 2,
+            "expected two Thinking boxes (one per reasoning burst), got {label_count}.\nRendered:\n{text}"
         );
-    }
 
-    /// `thinking_block_line_count` must account for the blank line
-    /// between consecutive paragraph boxes — otherwise the cached
-    /// line counts drift away from `build_message_lines`'s actual
-    /// output and the viewport math falls out of sync.
-    #[test]
-    fn thinking_line_count_includes_blanks_between_paragraphs() {
-        let single = thinking_block_line_count("just one paragraph", true, 10, 80);
-        let multi = thinking_block_line_count(
-            "first paragraph\n\nsecond paragraph\n\nthird paragraph",
-            true,
-            10,
-            80,
+        // The pre-tool thinking box must come BEFORE the tool block
+        // in the rendered output, and the post-tool thinking box
+        // must come AFTER it.
+        let first_thinking = text.find("+--- Thinking").expect("first Thinking box");
+        let tool_marker = text.find("Bash").expect("tool block");
+        let second_thinking = text.rfind("+--- Thinking").expect("second Thinking box");
+        assert!(
+            first_thinking < tool_marker,
+            "pre-tool thinking must render before the tool block, but thinking at {first_thinking} came after tool at {tool_marker}.\nRendered:\n{text}"
         );
-        // Multi = single*3 + 2 inter-paragraph blanks.
-        assert_eq!(
-            multi,
-            single * 3 + 2,
-            "multi-paragraph count must include 1 blank between each pair"
+        assert!(
+            tool_marker < second_thinking,
+            "post-tool thinking must render after the tool block, but tool at {tool_marker} came after thinking at {second_thinking}.\nRendered:\n{text}"
         );
     }
 }
