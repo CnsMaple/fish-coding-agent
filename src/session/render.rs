@@ -374,14 +374,45 @@ pub fn build_message_lines(session: &Session, msg_idx: usize, width: usize) -> V
                     colors.thinking_done_bg
                 };
                 ensure_gap_before_block(&mut msg_lines);
-                let rows = build_thinking_block_rows(
-                    &content,
-                    visible,
-                    session.tool_preview_lines,
-                    width,
-                    bg,
-                );
-                push_block_rows(&mut msg_lines, rows);
+                if content.trim().is_empty() {
+                    // Empty / whitespace-only content: keep the legacy
+                    // single-box placeholder path so the user still
+                    // sees a `+--- Thinking ---+ [no thinking content]`
+                    // frame rather than a silently dropped block.
+                    let rows = build_thinking_block_rows(
+                        &content,
+                        visible,
+                        session.tool_preview_lines,
+                        width,
+                        bg,
+                    );
+                    push_block_rows(&mut msg_lines, rows);
+                } else {
+                    // A single ThinkingSegment whose `content` already
+                    // contains paragraph breaks (i.e. two-or-more
+                    // consecutive newlines) is rendered as multiple
+                    // bordered boxes — one per paragraph — separated
+                    // by blank lines. This prevents the model from
+                    // streaming its entire chain-of-thought in one
+                    // burst and having it collapse into a single
+                    // giant `+--- Thinking ---+` box that buries the
+                    // interspersed tool results.
+                    let mut emitted = false;
+                    for_each_thinking_paragraph(&content, |para| {
+                        if emitted {
+                            msg_lines.push(Line::from(""));
+                        }
+                        emitted = true;
+                        let rows = build_thinking_block_rows(
+                            para,
+                            visible,
+                            session.tool_preview_lines,
+                            width,
+                            bg,
+                        );
+                        push_block_rows(&mut msg_lines, rows);
+                    });
+                }
                 msg_lines.push(Line::from(""));
             }
             RenderItemKind::Tool(ti) => {
@@ -678,14 +709,58 @@ pub fn thinking_block_line_count(
     if content.is_empty() {
         return 0;
     }
-    build_thinking_block_rows(
-        content,
-        visible,
-        preview_lines,
-        width,
-        active_colors().thinking_done_bg,
-    )
-    .len()
+    let bg = active_colors().thinking_done_bg;
+    let mut total = 0usize;
+    let mut emitted = false;
+    for_each_thinking_paragraph(content, |para| {
+        if emitted {
+            total += 1; // blank line between consecutive paragraph boxes
+        }
+        emitted = true;
+        total += build_thinking_block_rows(para, visible, preview_lines, width, bg).len();
+    });
+    if !emitted {
+        // Content was non-empty but had no non-whitespace paragraphs
+        // (e.g. all whitespace). The renderer takes the legacy
+        // single-box placeholder path for this case, so the count
+        // must match that — fall back to the original single-box
+        // calculation to keep the viewport math consistent.
+        return build_thinking_block_rows(content, visible, preview_lines, width, bg).len();
+    }
+    total
+}
+
+/// Iterate the non-empty paragraphs of a thinking segment. A paragraph
+/// is a maximal run of text delimited by 2+ consecutive newlines
+/// (paragraph break in chain-of-thought output). Whitespace-only
+/// paragraphs are skipped. Used by both the renderer and the line
+/// counter so a single `ThinkingSegment` whose `content` already
+/// contains paragraph breaks renders as multiple bordered boxes
+/// instead of one giant block.
+fn for_each_thinking_paragraph(content: &str, mut f: impl FnMut(&str)) {
+    let content = content.trim();
+    if content.is_empty() {
+        return;
+    }
+    let bytes = content.as_bytes();
+    let mut start = 0usize;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if i + 1 < bytes.len() && bytes[i] == b'\n' && bytes[i + 1] == b'\n' {
+            if i > start {
+                f(&content[start..i]);
+            }
+            while i < bytes.len() && bytes[i] == b'\n' {
+                i += 1;
+            }
+            start = i;
+        } else {
+            i += 1;
+        }
+    }
+    if start < bytes.len() {
+        f(&content[start..]);
+    }
 }
 
 /// Count total thinking lines across all segments.
@@ -928,6 +1003,7 @@ pub fn get_thinking_segments(m: &super::Message) -> Vec<ThinkingSegment> {
             offset: 0,
             content: m.thinking.clone(),
             closed: false,
+            tool_results_len_at_open: 0,
             cached_line_count_expanded: None,
             cached_line_count_collapsed: None,
         }];
@@ -1926,6 +2002,7 @@ mod content_line_count_tests {
             offset: "text\n\n| A | B |".len(),
             content: "thinking content".to_string(),
             closed: false,
+            tool_results_len_at_open: 0,
             cached_line_count_expanded: None,
             cached_line_count_collapsed: None,
         });
@@ -2126,6 +2203,7 @@ mod tool_block_count_tests {
             offset: 0,
             content: "let me think about this".to_string(),
             closed: false,
+            tool_results_len_at_open: 0,
             cached_line_count_expanded: None,
             cached_line_count_collapsed: None,
         }];
@@ -2337,6 +2415,7 @@ mod tool_block_count_tests {
             offset: 0,
             content: "plan".to_string(),
             closed: false,
+            tool_results_len_at_open: 0,
             cached_line_count_expanded: None,
             cached_line_count_collapsed: None,
         }];
@@ -2375,6 +2454,7 @@ mod tool_block_count_tests {
                 offset: 0,
                 content: String::new(),
                 closed: false,
+                tool_results_len_at_open: 0,
                 cached_line_count_expanded: None,
                 cached_line_count_collapsed: None,
             });
@@ -2385,6 +2465,135 @@ mod tool_block_count_tests {
             s.messages[1].thinking_segments.len(),
             0,
             "begin_thinking_segment should drop the in-flight empty segment"
+        );
+    }
+
+    /// `append_thinking_to_last` must auto-close the in-flight segment
+    /// once a tool call is appended to the message — so reasoning
+    /// deltas that flank a tool call land in distinct segments and
+    /// therefore distinct rendered boxes, even on OpenAI-style
+    /// providers that never fire a `ContentBlockStart` for tool calls.
+    #[test]
+    fn append_thinking_splits_segment_when_tool_result_arrives() {
+        let mut s = Session::default();
+        s.push(Message::new(Role::User, "do it"));
+        let mut asst = Message::new(Role::Assistant, "");
+        asst.streaming = true;
+        s.push(asst);
+        s.streaming_id = Some(1);
+
+        // Pre-tool reasoning: "Let me run the tool first."
+        s.append_thinking_to_last("Let me run the tool first.");
+        assert_eq!(s.messages[1].thinking_segments.len(), 1);
+        assert!(!s.messages[1].thinking_segments[0].closed);
+
+        // A tool result arrives between the two reasoning bursts.
+        s.messages[1]
+            .tool_results
+            .push(crate::session::ToolResultBlock {
+                name: "bash".to_string(),
+                title: "Bash".to_string(),
+                content: "ok".to_string(),
+                content_offset: 0,
+                visible: true,
+                running: false,
+                cached_line_count_visible: None,
+                cached_line_count_collapsed: None,
+            });
+
+        // Post-tool reasoning must land in a NEW segment, not extend
+        // the pre-tool one.
+        s.append_thinking_to_last("Good, that worked.");
+        assert_eq!(
+            s.messages[1].thinking_segments.len(),
+            2,
+            "tool-call insertion should have auto-closed the first segment"
+        );
+        assert!(s.messages[1].thinking_segments[0].closed);
+        assert!(!s.messages[1].thinking_segments[1].closed);
+        assert_eq!(s.messages[1].thinking_segments[0].content, "Let me run the tool first.");
+        assert_eq!(s.messages[1].thinking_segments[1].content, "Good, that worked.");
+    }
+
+    /// The renderer's `for_each_thinking_paragraph` must split on
+    /// 2+ consecutive newlines and skip whitespace-only paragraphs
+    /// so multi-paragraph chain-of-thought renders as multiple
+    /// bordered boxes instead of one giant block.
+    #[test]
+    fn for_each_thinking_paragraph_splits_on_double_newlines() {
+        fn paragraphs(s: &str) -> Vec<String> {
+            let mut out = Vec::new();
+            for_each_thinking_paragraph(s, |p| out.push(p.to_string()));
+            out
+        }
+        assert_eq!(paragraphs("single paragraph"), vec!["single paragraph"]);
+        assert_eq!(
+            paragraphs("first\n\nsecond"),
+            vec!["first", "second"]
+        );
+        assert_eq!(
+            paragraphs("a\n\n\n\nb"),
+            vec!["a", "b"],
+            "runs of 2+ newlines collapse to a single paragraph break"
+        );
+        assert_eq!(
+            paragraphs("\n\nleading\n\nmiddle\n\ntrailing\n\n"),
+            vec!["leading", "middle", "trailing"]
+        );
+        assert!(paragraphs("   ").is_empty(), "whitespace-only yields no paragraphs");
+        assert!(paragraphs("\n\n\n\n").is_empty(), "only newlines yields no paragraphs");
+        assert!(paragraphs("").is_empty());
+    }
+
+    /// A `ThinkingSegment` whose `content` already contains paragraph
+    /// breaks must render as multiple `+--- Thinking ---+` boxes,
+    /// each with its own border, instead of one giant block.
+    #[test]
+    fn multi_paragraph_thinking_renders_multiple_boxes() {
+        let mut s = Session::default();
+        s.push(Message::new(Role::User, "go"));
+        let mut asst = Message::new(Role::Assistant, "");
+        asst.thinking_segments = vec![crate::session::ThinkingSegment {
+            offset: 0,
+            content: "First paragraph of reasoning.\n\nSecond paragraph, also reasoning.\n\nThird."
+                .to_string(),
+            closed: false,
+            tool_results_len_at_open: 0,
+            cached_line_count_expanded: None,
+            cached_line_count_collapsed: None,
+        }];
+        asst.thinking_visible = true;
+        s.push(asst);
+        s.display = crate::config::ThinkingDisplay::Show;
+        s.tool_preview_lines = 10;
+
+        let lines = build_message_lines(&s, 1, 80);
+        let text = lines_to_text(&lines);
+        let label_count = text.matches("+--- Thinking").count();
+        assert_eq!(
+            label_count, 3,
+            "expected three Thinking boxes (one per paragraph), got {label_count}.\nRendered:\n{text}"
+        );
+    }
+
+    /// `thinking_block_line_count` must account for the blank line
+    /// between consecutive paragraph boxes — otherwise the cached
+    /// line counts drift away from `build_message_lines`'s actual
+    /// output and the viewport math falls out of sync.
+    #[test]
+    fn thinking_line_count_includes_blanks_between_paragraphs() {
+        let single = thinking_block_line_count("just one paragraph", true, 10, 80);
+        let multi = thinking_block_line_count(
+            "first paragraph\n\nsecond paragraph\n\nthird paragraph",
+            true,
+            10,
+            80,
+        );
+        // Multi = single*3 + 2 inter-paragraph blanks.
+        assert_eq!(
+            multi,
+            single * 3 + 2,
+            "multi-paragraph count must include 1 blank between each pair"
         );
     }
 }

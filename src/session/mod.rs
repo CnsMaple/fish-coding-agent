@@ -28,6 +28,16 @@ pub struct ThinkingSegment {
     /// delta.
     #[serde(default)]
     pub closed: bool,
+    /// Snapshot of `Message::tool_results.len()` when this segment was
+    /// opened. `append_thinking_to_last` auto-closes the segment as
+    /// soon as a tool call is appended (`tool_results.len()` grows),
+    /// so reasoning chunks that flank a tool call land in distinct
+    /// segments — and therefore in distinct rendered boxes at the
+    /// correct offsets — even when no `ContentBlockStart` event was
+    /// emitted (which is the case for OpenAI-style providers that
+    /// only signal reasoning↔text transitions).
+    #[serde(default)]
+    pub tool_results_len_at_open: usize,
     /// Cached rendered line count for the expanded thinking block.
     /// `None` means "needs (re)compute"; populated on first render
     /// or by `Session::recompute_layout_caches`.
@@ -512,6 +522,15 @@ impl Session {
                         // already-streamed text.
                         if m.content.len() > last.offset {
                             last.closed = true;
+                        } else if m.tool_results.len() > last.tool_results_len_at_open {
+                            // A tool call was appended to this message
+                            // since this segment opened. Close it so
+                            // the next thinking delta starts a fresh
+                            // segment at the new content position
+                            // (i.e. alongside the just-completed tool
+                            // result), instead of being glued onto the
+                            // old pre-tool reasoning block.
+                            last.closed = true;
                         } else {
                             last.content.push_str(chunk);
                             last.cached_line_count_expanded = None;
@@ -522,10 +541,12 @@ impl Session {
                 }
                 if !extended {
                     let content_len = m.content.len();
+                    let tool_results_len = m.tool_results.len();
                     m.thinking_segments.push(ThinkingSegment {
                         offset: content_len,
                         content: chunk.to_string(),
                         closed: false,
+                        tool_results_len_at_open: tool_results_len,
                         cached_line_count_expanded: None,
                         cached_line_count_collapsed: None,
                     });
