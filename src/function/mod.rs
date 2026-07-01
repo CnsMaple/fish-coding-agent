@@ -1653,6 +1653,7 @@ impl App {
                     cached_total_lines: None,
                     layout_version: 0,
                     render_cache: Default::default(),
+                    last_rendered_total: None,
                 };
                 self.session.invalidate_layout_cache();
                 self.session_id = stored.id;
@@ -1726,6 +1727,7 @@ impl App {
                     cached_total_lines: None,
                     layout_version: 0,
                     render_cache: Default::default(),
+                    last_rendered_total: None,
                 };
                 self.session.invalidate_layout_cache();
                 self.notify(

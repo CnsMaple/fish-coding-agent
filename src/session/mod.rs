@@ -236,10 +236,17 @@ pub struct Session {
     /// so callers can detect stale cached values.
     #[serde(skip)]
     pub layout_version: u64,
-    /// Cache of the last rendered viewport buffer. When nothing changed,
-    /// `render()` skips all work and just blits this buffer.
+/// Cache of the last rendered viewport buffer. When nothing changed,
+    /// `render()` skips all work and just blit this buffer.
     #[serde(skip)]
     pub render_cache: std::sync::Mutex<Option<crate::session::render::RenderCache>>,
+    /// Last `(width, total)` observed by the UI render. Used to
+    /// pin the viewport start when the user is scrolled up: when
+    /// `scroll > 0`, new content height is absorbed into `scroll` so
+    /// the view doesn't drift back toward the tail. Reset whenever
+    /// the viewport geometry changes (width change, session clear).
+    #[serde(skip)]
+    pub last_rendered_total: Option<(u16, u32)>,
 }
 
 impl Default for Session {
@@ -261,6 +268,7 @@ impl Default for Session {
             cached_total_lines: None,
             layout_version: 0,
             render_cache: std::sync::Mutex::new(None),
+            last_rendered_total: None,
         }
     }
 }
@@ -296,6 +304,26 @@ impl Session {
                 lru.remove(&k);
             }
         }
+    }
+
+    /// Absorb new streamed content height into `scroll` so the rendered
+    /// `start = total - inner_h - scroll` stays constant when the user
+    /// has scrolled up. No-op when at tail (`scroll == 0`) so the view
+    /// keeps following the latest output. `width` keys the internal
+    /// `last_rendered_total` cache so a resize resets the comparison
+    /// instead of spuriously subtracting across widths.
+    pub fn pin_scroll_for_total(&mut self, width: u16, new_total: u32) {
+        let old_total = self
+            .last_rendered_total
+            .filter(|(w, _)| *w == width)
+            .map(|(_, n)| n)
+            .unwrap_or(new_total);
+        if self.scroll > 0 && new_total > old_total {
+            let delta = (new_total - old_total) as u16;
+            let room = u16::MAX - self.scroll;
+            self.scroll = self.scroll.saturating_add(delta.min(room));
+        }
+        self.last_rendered_total = Some((width, new_total));
     }
 
     /// Read the cached total line count for a specific width, if
@@ -651,6 +679,7 @@ impl Session {
         if let Ok(mut c) = self.message_lines_cache.lock() {
             c.clear();
         }
+        self.last_rendered_total = None;
         self.invalidate_layout_cache();
     }
 
@@ -1074,4 +1103,88 @@ fn is_text_tool_call_normalized(line: &str) -> bool {
         && inner.starts_with('{')
         && inner.contains("\"name\"")
         && inner.contains("\"arguments\"")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pin: when scrolled up, the rendered `start` (total - inner_h -
+    /// scroll) must stay constant as content grows.
+    #[test]
+    fn pin_scroll_freezes_view_during_stream() {
+        let mut s = Session::default();
+        // Pretend the user has scrolled up 5 lines from the tail.
+        s.scroll = 5;
+        // Render frame N: total = 100 at width 80.
+        s.pin_scroll_for_total(80, 100);
+        assert_eq!(s.last_rendered_total, Some((80, 100)));
+        // Frame N+1: 7 lines streamed in. scroll must grow by 7 so
+        // start = (100+7) - inner_h - (5+7) = 100 - inner_h - 5
+        // stays equal to the previous frame's start.
+        s.pin_scroll_for_total(80, 107);
+        assert_eq!(s.scroll, 12, "scroll must absorb the 7 new lines");
+        // Frame N+2: another 3 lines streamed in.
+        s.pin_scroll_for_total(80, 110);
+        assert_eq!(s.scroll, 15, "scroll must keep absorbing the new height");
+    }
+
+    /// Tail: when at the bottom (scroll == 0), no pin; the user
+    /// wants to follow the latest output.
+    #[test]
+    fn pin_scroll_does_not_pin_at_tail() {
+        let mut s = Session::default();
+        s.scroll = 0;
+        s.pin_scroll_for_total(80, 100);
+        s.pin_scroll_for_total(80, 120);
+        assert_eq!(s.scroll, 0, "scroll must remain 0 at the tail");
+        assert_eq!(s.last_rendered_total, Some((80, 120)));
+    }
+
+    /// Resize: last_rendered_total is keyed by width, so a width
+    /// change resets the comparison rather than spuriously dragging
+    /// the view across unrelated widths.
+    #[test]
+    fn pin_scroll_resets_on_width_change() {
+        let mut s = Session::default();
+        s.scroll = 5;
+        s.pin_scroll_for_total(80, 100);
+        // Width change — treat the new total as the baseline, no
+        // delta applied.
+        s.pin_scroll_for_total(120, 90);
+        assert_eq!(s.scroll, 5, "width change must not adjust scroll");
+        assert_eq!(s.last_rendered_total, Some((120, 90)));
+        // Subsequent same-width frame applies the delta normally.
+        s.pin_scroll_for_total(120, 95);
+        assert_eq!(s.scroll, 10, "delta resumes on the new width");
+    }
+
+    /// Overflow: scroll saturates at u16::MAX instead of wrapping.
+    #[test]
+    fn pin_scroll_saturates_at_u16_max() {
+        let mut s = Session::default();
+        s.scroll = u16::MAX - 2;
+        s.pin_scroll_for_total(80, 100);
+        s.pin_scroll_for_total(80, 200);
+        assert_eq!(
+            s.scroll,
+            u16::MAX,
+            "scroll must saturate, never overflow"
+        );
+    }
+
+    /// Width-keyed baseline: a stale entry at a different width must
+    /// not influence the new comparison.
+    #[test]
+    fn pin_scroll_does_not_cross_widths() {
+        let mut s = Session::default();
+        s.scroll = 5;
+        s.pin_scroll_for_total(80, 50);
+        // Big jump but at a different width: must be treated as the
+        // first observation at that width.
+        s.pin_scroll_for_total(120, 1000);
+        assert_eq!(s.scroll, 5, "first observation at new width is neutral");
+        s.pin_scroll_for_total(120, 1005);
+        assert_eq!(s.scroll, 10, "delta applies normally at the new width");
+    }
 }

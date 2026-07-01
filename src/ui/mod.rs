@@ -104,6 +104,16 @@ pub fn render(f: &mut Frame, app: &mut App) {
     // `Session` on the first call per invalidation.
     let total_lines: usize = app.session.count_all_lines_with_width(width_u16 as usize) as usize;
 
+    // Pin the viewport when the user has scrolled up. New streamed
+    // content height is absorbed into `scroll` so the rendered `start`
+    // (total - inner_h - scroll) stays constant — the user keeps
+    // reading the same lines instead of being gradually pulled back
+    // to the tail. Skipped at tail (`scroll == 0`) so we keep
+    // following the latest output. `last_rendered_total` is keyed by
+    // viewport width so a resize resets the comparison instead of
+    // spuriously subtracting across widths.
+    app.session.pin_scroll_for_total(width_u16, total_lines as u32);
+
     let scroll = app
         .session
         .scroll
