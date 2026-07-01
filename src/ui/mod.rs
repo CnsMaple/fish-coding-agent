@@ -204,7 +204,19 @@ pub fn render(f: &mut Frame, app: &mut App) {
         // User messages get a background-filled padding line above
         // and below the content (`build_message_lines` inserts one
         // and pushes another). Assistant/system messages do not.
+        // When the message carries a `skill_ref`, also add the rows
+        // for the `[skill]` marker block (5-6 rows + 1 trailing
+        // blank) so the toggle hit-boxes line up with the rendered
+        // block — without this the screen y of the next block is
+        // shifted up by the undercounted rows and clicks land on
+        // the wrong message.
         if m.role == crate::session::Role::User {
+            if let Some(skill_ref) = &m.skill_ref {
+                line_idx += crate::session::render::skill_block_line_count(
+                    skill_ref,
+                    width_u16 as usize,
+                ) as usize;
+            }
             line_idx += 2;
         }
 

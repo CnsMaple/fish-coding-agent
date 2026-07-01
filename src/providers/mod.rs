@@ -68,6 +68,7 @@ impl ChatEvent {
     }
 }
 
+#[derive(Debug)]
 pub struct ChatRequest {
     pub model: String,
     pub messages: Vec<ChatMessage>,

@@ -168,6 +168,13 @@ fn count_lines_estimate(session: &Session) -> u32 {
             n += 1; // leading gap
         }
         if m.role == super::Role::User {
+            // Include the `[skill]` marker block rows when present
+            // (5-6 rows + 1 trailing blank). The estimate width
+            // (120) is the same as `read_cached_content_count` below
+            // so this stays in lockstep with the per-message count.
+            if let Some(skill_ref) = &m.skill_ref {
+                n += skill_block_line_count(skill_ref, 120);
+            }
             n += 2; // user-bg padding above and below
         }
         n += 1; // spacer
@@ -546,6 +553,13 @@ fn build_lines_viewport(
             msg_total += 1; // leading gap
         }
         if m.role == super::Role::User {
+            // Include the `[skill]` marker block rows when present
+            // (5-6 rows + 1 trailing blank) so `msg_total` matches
+            // the actual rendered line count and the slice math
+            // below advances `global_line` by the right amount.
+            if let Some(skill_ref) = &m.skill_ref {
+                msg_total += skill_block_line_count(skill_ref, width);
+            }
             msg_total += 2; // user-bg padding above and below
         }
         msg_total += 1; // final spacer
@@ -971,6 +985,43 @@ fn build_skill_block_rows(skill: &SkillRef, width: usize) -> Vec<Line<'static>> 
         bg,
     ));
     rows.push(border_line(width, bg));
+    rows
+}
+
+/// Count the rendered display lines of a `[skill]` marker block at the
+/// given viewport width, including the trailing blank line that
+/// `build_message_lines` pushes after the block.
+///
+/// This mirrors `build_skill_block_rows` exactly — any change to one
+/// must be reflected in the other. The block is:
+///   1. top border
+///   2. `[skill]`
+///   3. `name: <name>`
+///   4. `args: <args>` (only when args is non-empty)
+///   5. `context: <path>`
+///   6. bottom border
+///   7. trailing blank line (pushed by `build_message_lines`)
+///
+/// Used by the per-message line counters (`compute_total_lines`,
+/// `lines_before`, `count_lines_estimate`, `build_lines_viewport`,
+/// and the `ui` toggle-row walk) so the viewport math matches the
+/// actual rendered output. Without this, a user message with
+/// `skill_ref` was undercounted by 5-6 rows and the bottom of long
+/// skill bodies was hidden behind the input area.
+pub fn skill_block_line_count(skill: &SkillRef, _width: usize) -> u32 {
+    let mut rows = 2u32; // top + bottom borders
+    rows += 1; // "[skill]"
+    rows += 1; // "name: ..."
+    if skill
+        .args
+        .as_deref()
+        .map(|a| !a.trim().is_empty())
+        .unwrap_or(false)
+    {
+        rows += 1; // "args: ..."
+    }
+    rows += 1; // "context: ..."
+    rows += 1; // trailing blank after the block
     rows
 }
 
@@ -2334,6 +2385,143 @@ mod tool_block_count_tests {
             s.messages[1].thinking_segments.len(),
             0,
             "begin_thinking_segment should drop the in-flight empty segment"
+        );
+    }
+}
+
+#[cfg(test)]
+mod skill_block_count_tests {
+    //! Regression tests for the `[skill]` marker block line-count fix.
+    //!
+    //! The bug: `compute_total_lines` (and the matching
+    //! `lines_before`, `count_lines_estimate`, `build_lines_viewport`,
+    //! and `ui` toggle-row walk) never counted the 5-6 rows of the
+    //! `[skill]` marker block that `build_message_lines` renders for
+    //! any user message carrying `skill_ref`. A user message with a
+    //! long skill body therefore reported a `total` that was 5-6
+    //! rows short of the actual rendered output. The viewport
+    //! scrolled accordingly, hiding the bottom of the skill body
+    //! (typically the bullet list under `## Constraints`) until the
+    //! assistant started streaming extra content that pushed the
+    //! viewport back into range.
+    //!
+    //! These tests assert that `count_all_lines_with_width` returns
+    //! the same total as the sum of `build_message_lines` line
+    //! counts for both shapes (with and without `args`).
+
+    use super::*;
+    use crate::session::{Message, Role, Session, SkillRef};
+
+    fn user_with_skill(args: Option<&str>) -> Message {
+        let mut msg = Message::new(
+            Role::User,
+            "# Commit and Push All Changes\n\n\
+             Step 1: run the thing.\n\n\
+             ## Constraints\n\n\
+             - The commit message must be in English.\n\
+             - Always commit all changes.\n",
+        );
+        msg.skill_ref = Some(SkillRef {
+            name: "commit-and-push-all".to_string(),
+            context_path: "C:/Users/me/.agents/skills/commit-and-push-all/SKILL.md"
+                .to_string(),
+            args: args.map(|s| s.to_string()),
+        });
+        msg
+    }
+
+    #[test]
+    fn skill_block_count_matches_rendered_user_message() {
+        let mut s = Session::default();
+        s.push(user_with_skill(None));
+        s.push(Message::new(Role::Assistant, ""));
+
+        let width = 80usize;
+        let total = s.count_all_lines_with_width(width) as usize;
+        let user_lines = build_message_lines(&s, 0, width).len();
+        let asst_lines = build_message_lines(&s, 1, width).len();
+        let expected = user_lines + asst_lines;
+        assert_eq!(
+            total, expected,
+            "compute_total_lines returned {total} but actual rendered lines = \
+             user({user_lines}) + asst({asst_lines}) = {expected}"
+        );
+    }
+
+    #[test]
+    fn skill_block_count_with_args_matches_rendered() {
+        // Same as above but with non-empty `args` so the block has 6
+        // rows instead of 5.
+        let mut s = Session::default();
+        s.push(user_with_skill(Some("extra instruction")));
+        s.push(Message::new(Role::Assistant, ""));
+
+        let width = 80usize;
+        let total = s.count_all_lines_with_width(width) as usize;
+        let user_lines = build_message_lines(&s, 0, width).len();
+        let asst_lines = build_message_lines(&s, 1, width).len();
+        assert_eq!(total, user_lines + asst_lines);
+    }
+
+    #[test]
+    fn skill_block_line_count_matches_build_skill_block_rows() {
+        // The count helper must match the actual builder PLUS the
+        // trailing blank line that `build_message_lines` pushes
+        // after the block. Tested at a few widths to be sure the
+        // count is width-independent for the current row structure
+        // (top/bottom borders, [skill], name, optional args,
+        // context, plus the trailing blank).
+        for width in [40usize, 80, 130, 200] {
+            let skill = SkillRef {
+                name: "demo".to_string(),
+                context_path: "C:/path/to/SKILL.md".to_string(),
+                args: None,
+            };
+            let built = build_skill_block_rows(&skill, width).len() as u32;
+            let counted = skill_block_line_count(&skill, width);
+            assert_eq!(
+                built + 1,
+                counted,
+                "width={width}: build_skill_block_rows produced {built} rows + 1 trailing \
+                 blank = {}, but skill_block_line_count returned {counted}",
+                built + 1
+            );
+
+            let skill_with_args = SkillRef {
+                args: Some("extra".to_string()),
+                ..skill
+            };
+            let built_args = build_skill_block_rows(&skill_with_args, width).len() as u32;
+            let counted_args = skill_block_line_count(&skill_with_args, width);
+            assert_eq!(
+                built_args + 1,
+                counted_args,
+                "width={width} (with args): build_skill_block_rows produced {built_args} \
+                 rows + 1 trailing blank = {}, but skill_block_line_count returned \
+                 {counted_args}",
+                built_args + 1
+            );
+        }
+    }
+
+    #[test]
+    fn lines_before_accounts_for_skill_block() {
+        // `lines_before` must also count the skill block rows.
+        // Without the fix, the undercount shifts the scroll target
+        // computed by `jump_to_message` and `timeline`.
+        let mut s = Session::default();
+        s.push(user_with_skill(None));
+        s.push(Message::new(Role::Assistant, ""));
+
+        // Warm the per-message content cache that lines_before relies on.
+        let _ = s.count_all_lines_with_width(120);
+        let n = s.lines_before(1);
+        // lines_before(1) should equal the line count of the user
+        // message as rendered at width 120.
+        let user_lines = build_message_lines(&s, 0, 120).len() as u32;
+        assert_eq!(
+            n, user_lines,
+            "lines_before(1) = {n} but the user message renders as {user_lines} lines"
         );
     }
 }

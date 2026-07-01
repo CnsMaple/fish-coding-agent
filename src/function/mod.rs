@@ -1246,6 +1246,50 @@ impl Default for FunctionPanel {
     }
 }
 
+/// A request that `commands::send_message` (or
+/// `event::submit_direct_tool_input`) prepared but did not yet spawn.
+///
+/// We defer the actual `tokio::spawn` until the next `terminal.draw(...)`
+/// returns, so the freshly-pushed user message is on screen before the
+/// HTTP / tool call goes out. While the request is sitting here, the
+/// spinner / pending tool block is already visible (`inflight` is set),
+/// and Esc can be pressed to silently drop the request without
+/// dispatching it.
+///
+/// The cancel channel is split: `cancel_tx` lives in
+/// `App::inflight` (so the existing cancel UI works unchanged), and
+/// `cancel_rx` lives here so the spawned task can poll it once it
+/// actually starts.
+#[derive(Debug)]
+pub enum PendingRequest {
+    Chat(ChatPending),
+    Tool(ToolPending),
+}
+
+#[derive(Debug)]
+pub struct ChatPending {
+    pub client: reqwest::Client,
+    pub base: String,
+    pub key: String,
+    pub req: crate::providers::ChatRequest,
+    pub provider: ProviderKind,
+    pub cwd: PathBuf,
+    pub agent: crate::permission::Agent,
+    pub cancel_rx: tokio::sync::watch::Receiver<bool>,
+    pub tx: tokio::sync::mpsc::UnboundedSender<crate::event::AppMsg>,
+}
+
+#[derive(Debug)]
+pub struct ToolPending {
+    pub name: String,
+    pub title: String,
+    pub args: String,
+    pub include_context: bool,
+    pub cwd: PathBuf,
+    pub cancel_rx: tokio::sync::watch::Receiver<bool>,
+    pub tx: tokio::sync::mpsc::UnboundedSender<crate::event::AppMsg>,
+}
+
 /// Top-level app state.
 pub struct App {
     pub config: Config,
@@ -1274,6 +1318,16 @@ pub struct App {
 
     pub reqwest: reqwest::Client,
     pub inflight: Option<InflightHandle>,
+
+    /// A chat or tool request that has been fully prepared (messages
+    /// pushed, inflight set, cancel channel wired up) but not yet
+    /// dispatched. The main event loop spawns the actual `tokio::task`
+    /// after the next `terminal.draw(...)` returns, so the freshly
+    /// pushed user message is on screen before any HTTP / tool call
+    /// goes out. While `Some`, the spinner / pending tool block is
+    /// already visible (inflight is set) and Esc silently drops the
+    /// request without sending it.
+    pub pending_request: Option<PendingRequest>,
 
     pub cwd: PathBuf,
     pub should_quit: bool,
@@ -1434,6 +1488,7 @@ impl App {
                 .build()
                 .expect("reqwest client"),
             inflight: None,
+            pending_request: None,
             cwd,
             should_quit: false,
             msg_tx: None,
@@ -2017,6 +2072,7 @@ mod tests {
             response_output_tokens: None,
             reqwest: reqwest::Client::new(),
             inflight: None,
+            pending_request: None,
             cwd: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
             should_quit: false,
             msg_tx: None,

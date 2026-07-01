@@ -679,173 +679,208 @@ pub fn send_message(app: &mut App, user_msg: Message) {
         let client = app.reqwest.clone();
         let cwd = app.cwd.clone();
         let agent = app.active_agent;
-        tokio::spawn(async move {
-            let mut req = req;
-            let mut stream_retries = 0u32;
-            loop {
-                if *cancel_rx.borrow() {
-                    let _ = tx.send(crate::event::AppMsg::ChatDebug(
-                        "user cancelled".to_string(),
-                    ));
-                    let _ = tx.send(crate::event::AppMsg::ChatDone);
-                    return;
-                }
-                let (chat_tx, mut chat_rx) =
-                    tokio::sync::mpsc::unbounded_channel::<crate::providers::ChatEvent>();
-                let p = crate::providers::provider(provider);
-                let client_for_call = client.clone();
-                let base_for_call = base.clone();
-                let key_for_call = key.clone();
-                let req_for_call = crate::providers::ChatRequest {
-                    model: req.model.clone(),
-                    messages: req.messages.clone(),
-                    thinking: req.thinking,
-                    system: req.system.clone(),
-                };
-                let call = tokio::spawn(async move {
-                    p.chat_stream(
-                        &client_for_call,
-                        &base_for_call,
-                        &key_for_call,
-                        req_for_call,
-                        chat_tx,
-                    )
-                    .await
-                });
+        // Defer the actual `tokio::spawn` until after the next
+        // `terminal.draw(...)` returns, so the freshly-pushed user
+        // message is on screen before the HTTP request goes out. The
+        // main event loop pulls this in `flush_pending_request`.
+        app.pending_request = Some(crate::function::PendingRequest::Chat(
+            crate::function::ChatPending {
+                client,
+                base,
+                key,
+                req,
+                provider,
+                cwd,
+                agent,
+                cancel_rx,
+                tx,
+            },
+        ));
+    }
+}
 
-                let mut assistant_content = String::new();
-                let mut tool_calls: Vec<crate::providers::ToolCall> = Vec::new();
-                let mut stream_done = false;
-                while let Some(ev) = chat_rx.recv().await {
-                    match ev {
-                        crate::providers::ChatEvent::Delta(s) => {
-                            assistant_content.push_str(&s);
-                            let _ = tx.send(crate::event::AppMsg::ChatDelta(s));
-                        }
-                        crate::providers::ChatEvent::ThinkingDelta(s) => {
-                            let _ = tx.send(crate::event::AppMsg::ChatThinkingDelta(s));
-                        }
-                        crate::providers::ChatEvent::Debug(s) => {
-                            let _ = tx.send(crate::event::AppMsg::ChatDebug(s));
-                        }
-                        crate::providers::ChatEvent::Usage(u) => {
-                            let _ = tx.send(crate::event::AppMsg::ChatUsage(u));
-                        }
-                        crate::providers::ChatEvent::ToolResult {
-                            name,
-                            title,
-                            content,
-                        } => {
-                            let _ = tx.send(crate::event::AppMsg::ChatToolResult {
-                                name,
-                                title,
-                                content,
-                            });
-                        }
-                        crate::providers::ChatEvent::ToolCalls(calls) => {
-                            tool_calls = calls;
-                        }
-                        crate::providers::ChatEvent::Done => {
-                            stream_done = true;
-                            break;
-                        }
-                        crate::providers::ChatEvent::Error(e) => {
-                            let _ = tx.send(crate::event::AppMsg::ChatError(e));
-                            return;
-                        }
-                        crate::providers::ChatEvent::ContentBlockStart(kind) => {
-                            let _ = tx.send(crate::event::AppMsg::ChatContentBlockStart(kind));
-                        }
-                    }
-                }
-
-                if !stream_done {
-                    let err = match call.await {
-                        Ok(Ok(())) => None,
-                        Ok(Err(e)) => Some(format!("{e}")),
-                        Err(e) => Some(format!("chat task failed: {e}")),
-                    };
-                    if let Some(e) = err {
-                        stream_retries += 1;
-                        if stream_retries >= 3 {
-                            let _ = tx.send(crate::event::AppMsg::ChatError(e));
-                            return;
-                        }
-                        let _ = tx.send(crate::event::AppMsg::ChatDebug(format!(
-                            "stream retry {stream_retries}/3: {e}"
-                        )));
-                        // If an assistant message was pushed to req (we got tool calls),
-                        // pop it so the retry starts clean.
-                        if !tool_calls.is_empty() {
-                            req.messages.pop(); // assistant
-                        }
-                        continue;
-                    }
-                }
-
-                if tool_calls.is_empty() && !assistant_content.is_empty() {
-                    let parsed = parse_text_tool_calls(&assistant_content);
-                    if !parsed.is_empty() {
-                        tool_calls = parsed;
-                    }
-                }
-
-                if tool_calls.is_empty() {
-                    let _ = tx.send(crate::event::AppMsg::ChatDone);
-                    return;
-                }
-
-                req.messages.push(ChatMessage {
-                    role: "assistant".to_string(),
-                    content: assistant_content,
-                    tool_call_id: None,
-                    tool_calls: tool_calls.clone(),
-                });
-
-                let _ = tx.send(crate::event::AppMsg::ChatTimerPause);
-                for call in &tool_calls {
-                    let title = tool_result_title(call);
-                    let _ = tx.send(crate::event::AppMsg::ToolStarted {
-                        name: call.name.clone(),
-                        title: title.clone(),
-                    });
-                    let result = crate::tools::execute_tool_streaming_with_agent(
-                        agent,
-                        &call.name,
-                        &call.arguments,
-                        &cwd,
-                        tx.clone(),
-                    )
-                    .await;
-                    req.messages.push(ChatMessage {
-                        role: "tool".to_string(),
-                        content: result.clone(),
-                        tool_call_id: Some(call.id.clone()),
-                        tool_calls: Vec::new(),
-                    });
-                    let display_text = parse_tool_result_display(&result);
-                    let _ = tx.send(crate::event::AppMsg::ChatToolResult {
-                        name: call.name.clone(),
-                        title,
-                        content: display_text,
-                    });
-                }
-                // If the model emitted an interaction tool (plan or
-                // ask), stop the auto-continue loop and let the user
-                // respond. The plan agent surfaces the question in the
-                // session; the user types the answer in the input
-                // prompt and the conversation resumes.
-                let has_interaction_tool = tool_calls
-                    .iter()
-                    .any(|c| c.name == "plan" || c.name == "ask");
-                if has_interaction_tool {
-                    let _ = tx.send(crate::event::AppMsg::ChatDone);
-                    return;
-                }
-                let _ = tx.send(crate::event::AppMsg::ChatTimerResume);
-            }
-            // unreachable
+/// Run the chat stream retry loop. Extracted from `send_message` so
+/// the same body can be invoked both inline (legacy path) and from
+/// `event::flush_pending_request` after the user message has been
+/// rendered.
+///
+/// `req` is consumed and may be mutated across retries (the assistant
+/// turn is appended after a successful tool-call round, then popped
+/// on a retry so the new request starts clean).
+#[allow(clippy::too_many_arguments)]
+pub async fn run_chat_stream(
+    client: reqwest::Client,
+    base: String,
+    key: String,
+    mut req: ChatRequest,
+    provider: ProviderKind,
+    agent: crate::permission::Agent,
+    cwd: std::path::PathBuf,
+    cancel_rx: tokio::sync::watch::Receiver<bool>,
+    tx: tokio::sync::mpsc::UnboundedSender<crate::event::AppMsg>,
+) {
+    let mut stream_retries = 0u32;
+    loop {
+        if *cancel_rx.borrow() {
+            let _ = tx.send(crate::event::AppMsg::ChatDebug(
+                "user cancelled".to_string(),
+            ));
+            let _ = tx.send(crate::event::AppMsg::ChatDone);
+            return;
+        }
+        let (chat_tx, mut chat_rx) =
+            tokio::sync::mpsc::unbounded_channel::<crate::providers::ChatEvent>();
+        let p = crate::providers::provider(provider);
+        let client_for_call = client.clone();
+        let base_for_call = base.clone();
+        let key_for_call = key.clone();
+        let req_for_call = crate::providers::ChatRequest {
+            model: req.model.clone(),
+            messages: req.messages.clone(),
+            thinking: req.thinking,
+            system: req.system.clone(),
+        };
+        let call = tokio::spawn(async move {
+            p.chat_stream(
+                &client_for_call,
+                &base_for_call,
+                &key_for_call,
+                req_for_call,
+                chat_tx,
+            )
+            .await
         });
+
+        let mut assistant_content = String::new();
+        let mut tool_calls: Vec<crate::providers::ToolCall> = Vec::new();
+        let mut stream_done = false;
+        while let Some(ev) = chat_rx.recv().await {
+            match ev {
+                crate::providers::ChatEvent::Delta(s) => {
+                    assistant_content.push_str(&s);
+                    let _ = tx.send(crate::event::AppMsg::ChatDelta(s));
+                }
+                crate::providers::ChatEvent::ThinkingDelta(s) => {
+                    let _ = tx.send(crate::event::AppMsg::ChatThinkingDelta(s));
+                }
+                crate::providers::ChatEvent::Debug(s) => {
+                    let _ = tx.send(crate::event::AppMsg::ChatDebug(s));
+                }
+                crate::providers::ChatEvent::Usage(u) => {
+                    let _ = tx.send(crate::event::AppMsg::ChatUsage(u));
+                }
+                crate::providers::ChatEvent::ToolResult {
+                    name,
+                    title,
+                    content,
+                } => {
+                    let _ = tx.send(crate::event::AppMsg::ChatToolResult {
+                        name,
+                        title,
+                        content,
+                    });
+                }
+                crate::providers::ChatEvent::ToolCalls(calls) => {
+                    tool_calls = calls;
+                }
+                crate::providers::ChatEvent::Done => {
+                    stream_done = true;
+                    break;
+                }
+                crate::providers::ChatEvent::Error(e) => {
+                    let _ = tx.send(crate::event::AppMsg::ChatError(e));
+                    return;
+                }
+                crate::providers::ChatEvent::ContentBlockStart(kind) => {
+                    let _ = tx.send(crate::event::AppMsg::ChatContentBlockStart(kind));
+                }
+            }
+        }
+
+        if !stream_done {
+            let err = match call.await {
+                Ok(Ok(())) => None,
+                Ok(Err(e)) => Some(format!("{e}")),
+                Err(e) => Some(format!("chat task failed: {e}")),
+            };
+            if let Some(e) = err {
+                stream_retries += 1;
+                if stream_retries >= 3 {
+                    let _ = tx.send(crate::event::AppMsg::ChatError(e));
+                    return;
+                }
+                let _ = tx.send(crate::event::AppMsg::ChatDebug(format!(
+                    "stream retry {stream_retries}/3: {e}"
+                )));
+                // If an assistant message was pushed to req (we got tool calls),
+                // pop it so the retry starts clean.
+                if !tool_calls.is_empty() {
+                    req.messages.pop(); // assistant
+                }
+                continue;
+            }
+        }
+
+        if tool_calls.is_empty() && !assistant_content.is_empty() {
+            let parsed = parse_text_tool_calls(&assistant_content);
+            if !parsed.is_empty() {
+                tool_calls = parsed;
+            }
+        }
+
+        if tool_calls.is_empty() {
+            let _ = tx.send(crate::event::AppMsg::ChatDone);
+            return;
+        }
+
+        req.messages.push(ChatMessage {
+            role: "assistant".to_string(),
+            content: assistant_content,
+            tool_call_id: None,
+            tool_calls: tool_calls.clone(),
+        });
+
+        let _ = tx.send(crate::event::AppMsg::ChatTimerPause);
+        for call in &tool_calls {
+            let title = tool_result_title(call);
+            let _ = tx.send(crate::event::AppMsg::ToolStarted {
+                name: call.name.clone(),
+                title: title.clone(),
+            });
+            let result = crate::tools::execute_tool_streaming_with_agent(
+                agent,
+                &call.name,
+                &call.arguments,
+                &cwd,
+                tx.clone(),
+            )
+            .await;
+            req.messages.push(ChatMessage {
+                role: "tool".to_string(),
+                content: result.clone(),
+                tool_call_id: Some(call.id.clone()),
+                tool_calls: Vec::new(),
+            });
+            let display_text = parse_tool_result_display(&result);
+            let _ = tx.send(crate::event::AppMsg::ChatToolResult {
+                name: call.name.clone(),
+                title,
+                content: display_text,
+            });
+        }
+        // If the model emitted an interaction tool (plan or
+        // ask), stop the auto-continue loop and let the user
+        // respond. The plan agent surfaces the question in the
+        // session; the user types the answer in the input
+        // prompt and the conversation resumes.
+        let has_interaction_tool = tool_calls
+            .iter()
+            .any(|c| c.name == "plan" || c.name == "ask");
+        if has_interaction_tool {
+            let _ = tx.send(crate::event::AppMsg::ChatDone);
+            return;
+        }
+        let _ = tx.send(crate::event::AppMsg::ChatTimerResume);
     }
 }
 

@@ -805,6 +805,17 @@ impl Session {
             // inserts one and pushes another after the content
             // section). Assistant/system messages do not.
             if m.role == Role::User {
+                // Count the `[skill]` marker block rows when present
+                // (5 rows + 1 trailing blank, or 6 + 1 with non-empty
+                // args) so the viewport math matches the actual
+                // rendered output. Without this, the bottom of long
+                // skill bodies was hidden behind the input area.
+                if let Some(skill_ref) = &m.skill_ref {
+                    n += crate::session::render::skill_block_line_count(
+                        skill_ref,
+                        width as usize,
+                    );
+                }
                 n += 2;
             }
 
@@ -917,6 +928,17 @@ impl Session {
                 n += 1; // leading gap
             }
             if m.role == Role::User {
+                // Count the `[skill]` marker block rows when present
+                // (5 rows + 1 trailing blank, or 6 + 1 with non-empty
+                // args). Uses the same 120-col estimate as the
+                // content count above to match the pre-cache
+                // behaviour.
+                if let Some(skill_ref) = &m.skill_ref {
+                    n += crate::session::render::skill_block_line_count(
+                        skill_ref,
+                        120,
+                    );
+                }
                 n += 2; // user-bg padding above and below
             }
             n += 1; // spacer
