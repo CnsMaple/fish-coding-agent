@@ -133,6 +133,9 @@ where
 
     let mut events = EventStream::new();
     let mut tick = interval(Duration::from_millis(100));
+    // Faster tick dedicated to scrolling momentum. ~60fps so the
+    // motion looks smooth.
+    let mut scroll_tick = interval(Duration::from_millis(SCROLL_ANIM_TICK_MS));
     let mut last_status_refresh = std::time::Instant::now();
     let mut needs_draw = true;
     let mut last_draw = Instant::now();
@@ -189,6 +192,17 @@ where
             msg = channels.rx.recv() => {
                 needs_draw = true;
                 if let Some(m) = msg { handle_msg(m, app); }
+            }
+            _ = scroll_tick.tick() => {
+                // Clear the 1-frame gating window set by the most
+                // recent wheel event. In instant-scroll mode this is
+                // a no-op for the view (the view already jumped on
+                // the event frame) — it only re-arms `animating` to
+                // `false` so the next wheel event can start a new
+                // gesture.
+                if app.session_scroll.animating {
+                    let _ = app.session_scroll.step(Instant::now());
+                }
             }
             _ = tick.tick() => {
                 // Always render on tick while inflight so the spinner
@@ -1180,62 +1194,188 @@ static DRAG: std::sync::Mutex<DragState> = std::sync::Mutex::new(DragState {
 static SCROLL_STATE: std::sync::Mutex<(Option<std::time::Instant>, u32)> =
     std::sync::Mutex::new((None, 3));
 
+// ---- Instant scroll + 1-frame gating window ------------------------------
+//
+// Each wheel event lands `current` on `target` in a single step —
+// no visible animation, the view jumps by the OS step amount
+// immediately. The `animating` flag stays set for one frame
+// (~16ms) so the original "while the session is still scrolling,
+// ignore new scroll events" rule is preserved as a brief gating
+// window: events that arrive within the same render frame as a
+// previous event are dropped. After the next 16ms tick, the
+// window opens again and new gestures are accepted.
+
+/// Tick period (ms) for clearing the gating window. Drives the
+/// `step` call in the main loop.
+const SCROLL_ANIM_TICK_MS: u64 = 16;
+
+#[derive(Debug, Clone, Copy)]
+pub struct ScrollAnimator {
+    /// Currently displayed offset (lines from bottom). For instant
+    /// scroll this is always equal to `target` while `animating` is
+    /// set; kept as `f32` for the field's symmetry with the public
+    /// API and to make `snap(f32)` a no-op type-wise.
+    pub current: f32,
+    /// Where the user is scrolling toward. After a wheel event
+    /// `target == current` (the view is already at the target);
+    /// retained as a separate field so the integration in `step`
+    /// is conceptually symmetric with a future smooth-scroll mode.
+    pub target: f32,
+    /// Last-frame velocity, kept for API symmetry. Always 0 in
+    /// instant-scroll mode.
+    pub velocity: f32,
+    /// Timestamp of the last `step` call.
+    pub last_tick: Option<Instant>,
+    /// `true` for the one-frame window after a wheel event. New
+    /// wheel events are dropped while this is set.
+    pub animating: bool,
+}
+
+impl Default for ScrollAnimator {
+    fn default() -> Self {
+        Self {
+            current: 0.0,
+            target: 0.0,
+            velocity: 0.0,
+            last_tick: None,
+            animating: false,
+        }
+    }
+}
+
+impl ScrollAnimator {
+    /// Begin a scroll gesture. `delta_lines` is positive for
+    /// "scroll up / see older content" and negative for "scroll
+    /// down / see newer content". `step` is the adaptive step size
+    /// computed by the existing wheel handler (3..=10); kept as a
+    /// parameter for the same symmetry reason as `target`/`velocity`.
+    ///
+    /// The view lands on `target` immediately (no visible motion).
+    /// `animating` is set to `true` for a one-frame gating window
+    /// so additional wheel events arriving in the same render frame
+    /// are dropped. The window is cleared by the next `step` call.
+    ///
+    /// Callers MUST check `self.animating` first and only call this
+    /// when no gesture is in flight.
+    pub fn begin_gesture(&mut self, delta_lines: f32, _step: u32, now: Instant) {
+        debug_assert!(!self.animating, "begin_gesture called while animating");
+        let new_target = (self.target + delta_lines).max(0.0);
+        // Floor guard: when the gesture would push past 0 (tail)
+        // and we're already at rest there, do nothing. Avoids a
+        // no-op jump and keeps `current` clamped at 0.
+        if delta_lines < 0.0 && self.target == 0.0 {
+            self.snap(0.0);
+            return;
+        }
+        self.target = new_target;
+        // Instant: place `current` on `target` right now. The view
+        // jumps to the new position on the next draw.
+        self.current = new_target;
+        self.velocity = 0.0;
+        self.last_tick = Some(now);
+        self.animating = true;
+    }
+
+    /// Pin to a known value, cancelling any in-flight gating window.
+    /// Used by programmatic scrolls (submit, jump, clear, etc.)
+    /// that should land immediately.
+    pub fn snap(&mut self, value: f32) {
+        self.current = value;
+        self.target = value;
+        self.velocity = 0.0;
+        self.last_tick = None;
+        self.animating = false;
+    }
+
+    /// Advance the gating window by one tick. In instant-scroll mode
+    /// there is no integration to perform — `current` is already at
+    /// `target` (set in `begin_gesture`) — so this simply clears the
+    /// `animating` flag so the next wheel event can start a new
+    /// gesture.
+    ///
+    /// Returns `(session.scroll, settled)`. `session.scroll` is the
+    /// integer-rounded `current` (callers write it into
+    /// `session.scroll`); `settled` is `true` once the gating window
+    /// has been cleared.
+    pub fn step(&mut self, now: Instant) -> (u16, bool) {
+        self.last_tick = Some(now);
+        if !self.animating {
+            return (self.current.round() as u16, true);
+        }
+        self.animating = false;
+        (self.current.round() as u16, true)
+    }
+}
+
 fn handle_mouse(m: MouseEvent, app: &mut App) {
     let prompt = app.input_prompt_area;
     let prefix_width = unicode_width::UnicodeWidthStr::width(" > ") as u16;
     let in_prompt_row = prompt.map(|r| m.row == r.y).unwrap_or(false);
 
-    // Mouse wheel scroll — scroll the session content.
-    // scroll = offset from bottom.  ScrollUp = see older content (increase
-    // offset).  ScrollDown = see newer content (decrease offset).
-    // Adaptive step: fast scrolling → larger step, slow → smaller.
-    let step = if matches!(
+    // Mouse wheel scroll — instant jump by the OS step.
+    //
+    // scroll = offset from bottom.  ScrollUp = see older content
+    // (increase offset).  ScrollDown = see newer content (decrease
+    // offset).
+    //
+    // The view lands on the new position in a single frame. The
+    // `animating` flag is held for one 16ms tick so the original
+    // gating rule ("while the session is still scrolling, ignore
+    // new scroll events") is preserved: events arriving within the
+    // same render frame as a previous event are dropped.
+    let is_wheel = matches!(
         m.kind,
         MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
-    ) {
+    );
+    if is_wheel {
+        if app.session_scroll.animating {
+            // Gating window active — drop this event.
+            return;
+        }
+        // Adaptive step: fast scrolling → larger step, slow → smaller.
         let now = std::time::Instant::now();
-        if let Ok(mut state) = SCROLL_STATE.lock() {
+        let step: u32 = if let Ok(mut state) = SCROLL_STATE.lock() {
             let (last, mut step) = *state;
             if let Some(t) = last {
                 let ms = now.duration_since(t).as_millis();
                 if ms < 15 {
-                    // Rapid: accelerate step up to 10
                     step = (step + 1).min(10);
                 } else if ms > 80 {
-                    // Very slow: reset to 3
                     step = 3;
-                } else {
-                    // Moderate: keep current step
                 }
             }
             *state = (Some(now), step);
             step
         } else {
             3
-        }
-    } else {
-        3
-    };
-    if matches!(m.kind, MouseEventKind::ScrollUp) {
-        app.session.scroll = app.session.scroll.saturating_add(step as u16);
-        return;
-    }
-    if matches!(m.kind, MouseEventKind::ScrollDown) {
-        // Clamp overscroll so the user doesn't hit a dead zone where
-        // scroll-down events decrease session.scroll but the view
-        // doesn't change (because session.scroll is clamped to
-        // max_scroll in the render function).
-        if let Some(area) = app.session_area {
+        };
+        let delta: f32 = match m.kind {
+            MouseEventKind::ScrollUp => step as f32,
+            MouseEventKind::ScrollDown => -(step as f32),
+            _ => unreachable!(),
+        };
+        // Clamp the gesture against the real viewport max so a
+        // scroll-up at the top of the session doesn't aim past the
+        // ceiling.
+        let max_scroll_f = if let Some(area) = app.session_area {
             let inner_h = area.height.saturating_sub(2) as u32;
             let total = app.session.count_all_lines_with_width(area.width as usize);
-            let max_scroll = total.saturating_sub(inner_h).min(u16::MAX as u32) as u16;
-            if app.session.scroll > max_scroll {
-                app.session.scroll = max_scroll;
-            }
+            (total.saturating_sub(inner_h).min(u16::MAX as u32)) as f32
+        } else {
+            u16::MAX as f32
+        };
+        app.session_scroll.begin_gesture(delta, step, now);
+        if app.session_scroll.target > max_scroll_f {
+            app.session_scroll.target = max_scroll_f;
+            app.session_scroll.current = max_scroll_f;
         }
-        if app.session.scroll > 0 {
-            app.session.scroll = app.session.scroll.saturating_sub(step as u16);
+        // Drop the render cache so the new offset is visible on the
+        // very next frame.
+        if let Ok(mut c) = app.session.render_cache.lock() {
+            *c = None;
         }
+        // Write the integer anchor. The view jumps on the next draw.
+        app.session.scroll = app.session_scroll.current.round() as u16;
         return;
     }
 
@@ -1383,8 +1523,9 @@ fn submit_input(app: &mut App) {
     // Snap the chat viewport to the tail before we push any new
     // messages. If the user scrolled up to look at older content,
     // we want their just-submitted message to be visible (so they
-    // can confirm it was sent) — not pushed off the bottom.
-    app.session.scroll = 0;
+    // can confirm it was sent) — not pushed off the bottom. Also
+    // cancels any in-flight momentum so the jump lands immediately.
+    app.set_scroll_anchored(0);
     let raw = expand_paste_blocks(app.input.take(), &mut app.paste_blocks);
     if raw.is_empty() {
         return;
@@ -2440,11 +2581,14 @@ fn commit_timeline_jump(app: &mut App, state: &crate::function::TimelinePickerSt
     };
     let viewport_h = app.session_area.map(|r| r.height).unwrap_or(20);
     app.session.jump_to_message(msg_idx, viewport_h);
+    let mut scroll = app.session.scroll;
     if tool_idx.is_some() {
         // Nudge scroll up a bit so the tool block is more visible.
-        let nudge = 3u16.min(app.session.scroll);
-        app.session.scroll = app.session.scroll.saturating_sub(nudge);
+        let nudge = 3u16.min(scroll);
+        scroll = scroll.saturating_sub(nudge);
     }
+    // Programmatic jump — land immediately, cancel any momentum.
+    app.set_scroll_anchored(scroll);
     let active = app.function.active;
     if active < app.function.tabs.len() {
         app.function.tabs.remove(active);
@@ -3442,6 +3586,7 @@ mod tests {
             burst_buf: String::new(),
             burst_snapshot: None,
             pending_ask_snapshot: String::new(),
+            session_scroll: crate::event::ScrollAnimator::default(),
         }
     }
 
@@ -6141,5 +6286,101 @@ mod tests {
         flush_pending_request(&mut app);
         assert!(app.pending_request.is_none());
         assert!(app.inflight.is_none());
+    }
+
+    // ============================================================
+    // Smooth-scroll animator
+    // ============================================================
+
+    fn advance_animator(a: &mut ScrollAnimator, ticks: u32, ms_per_tick: u64) -> (u16, bool) {
+        let mut last_settled = true;
+        let mut last_v = a.current.round() as u16;
+        for i in 0..ticks {
+            let now = Instant::now() + Duration::from_millis(ms_per_tick * (i as u64 + 1));
+            let (v, settled) = a.step(now);
+            last_v = v;
+            last_settled = settled;
+        }
+        (last_v, last_settled)
+    }
+
+    #[test]
+    fn scroll_animator_lands_instantly_on_target() {
+        // A wheel event must place `current` on `target` immediately
+        // — no line-by-line animation, no per-frame coast. The view
+        // jumps by the OS step in a single frame.
+        let mut a = ScrollAnimator::default();
+        a.begin_gesture(5.0, 5, Instant::now());
+        assert_eq!(a.target, 5.0);
+        assert_eq!(
+            a.current, 5.0,
+            "current must equal target on the first event — instant scroll"
+        );
+        assert!(a.animating, "gating window must be active for the frame");
+    }
+
+    #[test]
+    fn scroll_animator_gates_events_within_one_frame() {
+        // The user-facing rule: while the session is still scrolling,
+        // ignore new scroll events. With instant scroll, "still
+        // scrolling" means the 1-frame gating window after the last
+        // event. `begin_gesture` callers (i.e. `handle_mouse`) refuse
+        // to call this when `animating` is true; this test verifies
+        // the invariant that the gating window is the ONLY thing
+        // keeping the target stable.
+        let mut a = ScrollAnimator::default();
+        a.begin_gesture(8.0, 3, Instant::now());
+        let target_after_start = a.target;
+        // Without a `step` call yet, the gating window is still
+        // active and the target must not change on its own.
+        assert!(a.animating, "gating window must be active right after begin_gesture");
+        assert_eq!(a.target, target_after_start);
+        // One tick clears the gating window.
+        let (_, settled) = advance_animator(&mut a, 1, 16);
+        assert!(settled, "one tick must clear the gating window");
+        assert!(!a.animating, "gating window must be cleared after one tick");
+    }
+
+    #[test]
+    fn scroll_animator_snap_cancels_motion() {
+        // `snap` is used by programmatic jumps (submit, jump-to, new
+        // session). It must cancel any in-flight gating window and
+        // land exactly at the requested value.
+        let mut a = ScrollAnimator::default();
+        a.begin_gesture(20.0, 5, Instant::now());
+        assert!(a.animating);
+        a.snap(7.0);
+        assert!(!a.animating, "snap must clear animating");
+        assert_eq!(a.current, 7.0);
+        assert_eq!(a.target, 7.0);
+        assert_eq!(a.velocity, 0.0);
+    }
+
+    #[test]
+    fn scroll_animator_does_not_overshoot_negative() {
+        // ScrollDown (negative delta) with no prior scroll must clamp
+        // at 0, not go negative.
+        let mut a = ScrollAnimator::default();
+        a.begin_gesture(-5.0, 3, Instant::now());
+        assert_eq!(a.target, 0.0, "target must clamp at 0");
+        assert_eq!(a.current, 0.0, "current must clamp at 0");
+        assert!(!a.animating, "negative gesture at floor is a snap, no gating window");
+    }
+
+    #[test]
+    fn scroll_animator_accumulates_consecutive_gestures() {
+        // After the gating window clears, a new gesture must add
+        // onto the current `target` (so multiple wheel clicks
+        // accumulate into a larger jump on the next render).
+        let mut a = ScrollAnimator::default();
+        a.begin_gesture(5.0, 5, Instant::now());
+        let _ = advance_animator(&mut a, 1, 16); // clear the gating window
+        assert!(!a.animating);
+        a.begin_gesture(3.0, 3, Instant::now());
+        assert_eq!(
+            a.target, 8.0,
+            "second gesture must accumulate onto the first"
+        );
+        assert_eq!(a.current, 8.0, "current must reflect the accumulated target");
     }
 }

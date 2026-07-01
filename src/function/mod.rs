@@ -1396,6 +1396,13 @@ pub struct App {
     /// current burst started, so we can undo the inserted characters
     /// if the burst qualifies as a paste.
     pub burst_snapshot: Option<(Instant, usize, usize)>,
+
+    /// Smooth / momentum-scroll animator for the session viewport.
+    /// `animating == true` while the previous wheel gesture is still
+    /// coasting; new wheel events are dropped during that window.
+    /// Programmatic scrolls (submit, jump-to-message, clear, etc.)
+    /// call `set_scroll_anchored` to land immediately.
+    pub session_scroll: crate::event::ScrollAnimator,
 }
 
 /// Mouse-driven text selection spanning the full TUI. Coordinates are
@@ -1505,6 +1512,7 @@ impl App {
             burst_buf: String::new(),
             burst_snapshot: None,
             pending_ask_snapshot: String::new(),
+            session_scroll: crate::event::ScrollAnimator::default(),
         };
         app.refresh_status_model_context();
         app
@@ -1612,6 +1620,22 @@ impl App {
         self.session.clear();
         self.session_id = crate::session::store::new_session_id();
         self.session_title = crate::session::store::default_title(&self.cwd);
+        // Land at the tail immediately; cancel any in-flight momentum.
+        self.set_scroll_anchored(0);
+    }
+
+    /// Pin the session viewport to a specific scroll offset, cancelling
+    /// any in-flight momentum animation. Use this for programmatic
+    /// scrolls (submit, jump-to-message, new session, etc.) that should
+    /// not coast. The integer offset is written to `session.scroll` so
+    /// the existing render path picks it up, and the render cache is
+    /// invalidated so the change is visible on the next frame.
+    pub fn set_scroll_anchored(&mut self, value: u16) {
+        self.session_scroll.snap(value as f32);
+        self.session.scroll = value;
+        if let Ok(mut c) = self.session.render_cache.lock() {
+            *c = None;
+        }
     }
 
     pub fn maybe_title_from_first_prompt(&mut self, prompt: &str) {
@@ -2095,6 +2119,7 @@ mod tests {
             burst_buf: String::new(),
             burst_snapshot: None,
             pending_ask_snapshot: String::new(),
+            session_scroll: crate::event::ScrollAnimator::default(),
         }
     }
 
