@@ -1277,6 +1277,10 @@ pub struct ChatPending {
     pub agent: crate::permission::Agent,
     pub cancel_rx: tokio::sync::watch::Receiver<bool>,
     pub tx: tokio::sync::mpsc::UnboundedSender<crate::event::AppMsg>,
+    /// See `App::current_request_seq`. Forwarded into the spawned
+    /// chat task so its final `ChatDone`/`ChatError` is recognized
+    /// (or ignored) by the main loop.
+    pub seq: u64,
 }
 
 #[derive(Debug)]
@@ -1288,6 +1292,10 @@ pub struct ToolPending {
     pub cwd: PathBuf,
     pub cancel_rx: tokio::sync::watch::Receiver<bool>,
     pub tx: tokio::sync::mpsc::UnboundedSender<crate::event::AppMsg>,
+    /// See `App::current_request_seq`. Forwarded into the spawned
+    /// tool task so its final `ChatDone`/`ChatError` is recognized
+    /// (or ignored) by the main loop.
+    pub seq: u64,
 }
 
 /// Top-level app state.
@@ -1318,6 +1326,17 @@ pub struct App {
 
     pub reqwest: reqwest::Client,
     pub inflight: Option<InflightHandle>,
+
+    /// Monotonic counter incremented every time `send_message` /
+    /// `send_chat` (or a direct-tool input) starts a new request.
+    /// Spelled out into the corresponding `InflightHandle::seq` and
+    /// carried inside the eventual `AppMsg::ChatDone` /
+    /// `AppMsg::ChatError` so `handle_msg` can tell a freshly
+    /// completed request from a `ChatDone`/`ChatError` left over
+    /// from an older request that we already cancelled (e.g. via
+    /// Esc) — those stale events must NOT clear the new inflight
+    /// or mark the new assistant message as finished.
+    pub current_request_seq: u64,
 
     /// A chat or tool request that has been fully prepared (messages
     /// pushed, inflight set, cancel channel wired up) but not yet
@@ -1447,6 +1466,12 @@ impl Selection {
 pub struct InflightHandle {
     pub cancel: tokio::sync::watch::Sender<bool>,
     pub label: String,
+    /// The `current_request_seq` value at the time this inflight was
+    /// created. The chat task tags its final `ChatDone`/`ChatError`
+    /// with this number; `handle_msg` compares it against
+    /// `App::current_request_seq` and ignores mismatches. See the
+    /// field-level comment on `App::current_request_seq`.
+    pub seq: u64,
 }
 
 impl App {
@@ -1495,6 +1520,7 @@ impl App {
                 .build()
                 .expect("reqwest client"),
             inflight: None,
+            current_request_seq: 0,
             pending_request: None,
             cwd,
             should_quit: false,
@@ -2098,6 +2124,7 @@ mod tests {
             response_output_tokens: None,
             reqwest: reqwest::Client::new(),
             inflight: None,
+            current_request_seq: 0,
             pending_request: None,
             cwd: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
             should_quit: false,

@@ -42,8 +42,12 @@ pub enum ChatEvent {
 }
 
 impl ChatEvent {
-    /// Convert a ChatEvent into the corresponding AppMsg for the main loop.
-    pub fn into_app_msg(self) -> crate::event::AppMsg {
+    /// Convert a ChatEvent into the corresponding AppMsg for the
+    /// main loop. `seq` stamps the request generation onto terminal
+    /// events (`ChatDone` / `ChatError`) so stale events from a
+    /// previous request can be filtered out by `handle_msg`.
+    #[allow(dead_code)]
+    pub fn into_app_msg(self, seq: u64) -> crate::event::AppMsg {
         match self {
             ChatEvent::Delta(s) => crate::event::AppMsg::ChatDelta(s),
             ChatEvent::ThinkingDelta(s) => crate::event::AppMsg::ChatThinkingDelta(s),
@@ -60,10 +64,10 @@ impl ChatEvent {
                 title,
                 content,
             },
-            ChatEvent::ToolCalls(_) => crate::event::AppMsg::ChatDone,
+            ChatEvent::ToolCalls(_) => crate::event::AppMsg::ChatDone { seq },
             ChatEvent::Usage(u) => crate::event::AppMsg::ChatUsage(u),
-            ChatEvent::Done => crate::event::AppMsg::ChatDone,
-            ChatEvent::Error(e) => crate::event::AppMsg::ChatError(e),
+            ChatEvent::Done => crate::event::AppMsg::ChatDone { seq },
+            ChatEvent::Error(e) => crate::event::AppMsg::ChatError { seq, error: e },
         }
     }
 }

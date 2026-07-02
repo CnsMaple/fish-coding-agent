@@ -259,10 +259,16 @@ fn continue_response(app: &mut App, arg: &str) {
         app.notify(ToastLevel::Warn, "request in flight, please wait");
         return;
     }
+    // Sent to the model, never shown in the session — we strip the
+    // user message out of `session.messages` right below. An empty
+    // user message confuses most providers (some reject it, others
+    // stall waiting for real input), so always feed the model an
+    // explicit continuation cue. If the user typed `/continue foo`
+    // we just append their note to the cue.
     let prompt = if arg.is_empty() {
-        String::new()
+        "Continue from where you left off.".to_string()
     } else {
-        arg.to_string()
+        format!("Continue from where you left off.\n\n{arg}")
     };
     crate::commands::send_chat(app, prompt);
     // Remove the user message from session (kept in API request)
@@ -662,10 +668,19 @@ pub fn send_message(app: &mut App, user_msg: Message) {
             tool_calls: Vec::new(),
         })
         .collect();
+    // Bump the request generation. Anything stale from a previous
+    // request that slips through after we re-enter (an old chat
+    // task still draining, a queued `ChatDone`/`ChatError` from
+    // before Esc cleared the inflight, etc.) carries the OLD seq
+    // and is filtered out in `handle_msg`.
+    app.current_request_seq = app.current_request_seq.wrapping_add(1);
+    let seq = app.current_request_seq;
+
     let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
     app.inflight = Some(crate::app::InflightHandle {
         cancel: cancel_tx,
         label: format!("chat:{active_id}:{model}"),
+        seq,
     });
 
     let req = ChatRequest {
@@ -694,6 +709,7 @@ pub fn send_message(app: &mut App, user_msg: Message) {
                 agent,
                 cancel_rx,
                 tx,
+                seq,
             },
         ));
     }
@@ -707,6 +723,16 @@ pub fn send_message(app: &mut App, user_msg: Message) {
 /// `req` is consumed and may be mutated across retries (the assistant
 /// turn is appended after a successful tool-call round, then popped
 /// on a retry so the new request starts clean).
+///
+/// `seq` is `App::current_request_seq` at the time the request was
+/// prepared. It's stamped onto the final `ChatDone`/`ChatError` so
+/// `handle_msg` can tell a freshly-completed request from a stale
+/// `ChatDone` left over from a previously cancelled request. While
+/// the request is running we also gate every `tx.send(...)` on
+/// `cancel_rx`: once the user hits Esc we no longer want any of
+/// these events to mutate the new state (a partial `Delta`
+/// landing in the new assistant message, or worse, a `ChatDone`
+/// clearing the freshly-armed inflight during `/continue`).
 #[allow(clippy::too_many_arguments)]
 pub async fn run_chat_stream(
     client: reqwest::Client,
@@ -718,14 +744,23 @@ pub async fn run_chat_stream(
     cwd: std::path::PathBuf,
     cancel_rx: tokio::sync::watch::Receiver<bool>,
     tx: tokio::sync::mpsc::UnboundedSender<crate::event::AppMsg>,
+    seq: u64,
 ) {
+    // Wrap every outbound AppMsg in a cancel check so a stale chat
+    // task cannot race with a follow-up request. See the field-level
+    // comments in `run_chat_stream` above and `App::current_request_seq`.
+    let send_msg = |msg: crate::event::AppMsg| {
+        if !*cancel_rx.borrow() {
+            let _ = tx.send(msg);
+        }
+    };
     let mut stream_retries = 0u32;
     loop {
         if *cancel_rx.borrow() {
-            let _ = tx.send(crate::event::AppMsg::ChatDebug(
-                "user cancelled".to_string(),
-            ));
-            let _ = tx.send(crate::event::AppMsg::ChatDone);
+            // Silent exit. We do NOT send `ChatDone` / `ChatError`
+            // here — the Esc handler already cleared local state and
+            // `seq` will reject any leftover event from this task if
+            // a new request takes over.
             return;
         }
         let (chat_tx, mut chat_rx) =
@@ -755,26 +790,33 @@ pub async fn run_chat_stream(
         let mut tool_calls: Vec<crate::providers::ToolCall> = Vec::new();
         let mut stream_done = false;
         while let Some(ev) = chat_rx.recv().await {
+            if *cancel_rx.borrow() {
+                // Drop the event we just received and exit. The next
+                // chat_rx.recv() would block forever on the dead
+                // http stream anyway; returning here lets the
+                // background `call` task finish on its own.
+                return;
+            }
             match ev {
                 crate::providers::ChatEvent::Delta(s) => {
                     assistant_content.push_str(&s);
-                    let _ = tx.send(crate::event::AppMsg::ChatDelta(s));
+                    send_msg(crate::event::AppMsg::ChatDelta(s));
                 }
                 crate::providers::ChatEvent::ThinkingDelta(s) => {
-                    let _ = tx.send(crate::event::AppMsg::ChatThinkingDelta(s));
+                    send_msg(crate::event::AppMsg::ChatThinkingDelta(s));
                 }
                 crate::providers::ChatEvent::Debug(s) => {
-                    let _ = tx.send(crate::event::AppMsg::ChatDebug(s));
+                    send_msg(crate::event::AppMsg::ChatDebug(s));
                 }
                 crate::providers::ChatEvent::Usage(u) => {
-                    let _ = tx.send(crate::event::AppMsg::ChatUsage(u));
+                    send_msg(crate::event::AppMsg::ChatUsage(u));
                 }
                 crate::providers::ChatEvent::ToolResult {
                     name,
                     title,
                     content,
                 } => {
-                    let _ = tx.send(crate::event::AppMsg::ChatToolResult {
+                    send_msg(crate::event::AppMsg::ChatToolResult {
                         name,
                         title,
                         content,
@@ -788,11 +830,11 @@ pub async fn run_chat_stream(
                     break;
                 }
                 crate::providers::ChatEvent::Error(e) => {
-                    let _ = tx.send(crate::event::AppMsg::ChatError(e));
+                    send_msg(crate::event::AppMsg::ChatError { seq, error: e });
                     return;
                 }
                 crate::providers::ChatEvent::ContentBlockStart(kind) => {
-                    let _ = tx.send(crate::event::AppMsg::ChatContentBlockStart(kind));
+                    send_msg(crate::event::AppMsg::ChatContentBlockStart(kind));
                 }
             }
         }
@@ -806,10 +848,10 @@ pub async fn run_chat_stream(
             if let Some(e) = err {
                 stream_retries += 1;
                 if stream_retries >= 3 {
-                    let _ = tx.send(crate::event::AppMsg::ChatError(e));
+                    send_msg(crate::event::AppMsg::ChatError { seq, error: e });
                     return;
                 }
-                let _ = tx.send(crate::event::AppMsg::ChatDebug(format!(
+                send_msg(crate::event::AppMsg::ChatDebug(format!(
                     "stream retry {stream_retries}/3: {e}"
                 )));
                 // If an assistant message was pushed to req (we got tool calls),
@@ -828,8 +870,15 @@ pub async fn run_chat_stream(
             }
         }
 
+        if *cancel_rx.borrow() {
+            // User cancelled between the inner loop draining the
+            // provider's `Done` event and us trying to close it out
+            // here. Stay silent.
+            return;
+        }
+
         if tool_calls.is_empty() {
-            let _ = tx.send(crate::event::AppMsg::ChatDone);
+            send_msg(crate::event::AppMsg::ChatDone { seq });
             return;
         }
 
@@ -840,10 +889,10 @@ pub async fn run_chat_stream(
             tool_calls: tool_calls.clone(),
         });
 
-        let _ = tx.send(crate::event::AppMsg::ChatTimerPause);
+        send_msg(crate::event::AppMsg::ChatTimerPause);
         for call in &tool_calls {
             let title = tool_result_title(call);
-            let _ = tx.send(crate::event::AppMsg::ToolStarted {
+            send_msg(crate::event::AppMsg::ToolStarted {
                 name: call.name.clone(),
                 title: title.clone(),
             });
@@ -862,7 +911,7 @@ pub async fn run_chat_stream(
                 tool_calls: Vec::new(),
             });
             let display_text = parse_tool_result_display(&result);
-            let _ = tx.send(crate::event::AppMsg::ChatToolResult {
+            send_msg(crate::event::AppMsg::ChatToolResult {
                 name: call.name.clone(),
                 title,
                 content: display_text,
@@ -877,10 +926,10 @@ pub async fn run_chat_stream(
             .iter()
             .any(|c| c.name == "plan" || c.name == "ask");
         if has_interaction_tool {
-            let _ = tx.send(crate::event::AppMsg::ChatDone);
+            send_msg(crate::event::AppMsg::ChatDone { seq });
             return;
         }
-        let _ = tx.send(crate::event::AppMsg::ChatTimerResume);
+        send_msg(crate::event::AppMsg::ChatTimerResume);
     }
 }
 
