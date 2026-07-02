@@ -388,6 +388,11 @@ fn render_settings(
             ));
             body_lines.push(list_item(
                 6 == s.cursor,
+                "auto compact",
+                Some(if cfg.auto_compact { "on".to_string() } else { "off".to_string() }),
+            ));
+            body_lines.push(list_item(
+                7 == s.cursor,
                 "tool preview lines",
                 Some(format!(
                     "{}",
@@ -492,6 +497,17 @@ fn render_settings(
                     label.push_str("  [current]");
                 }
                 body_lines.push(list_item(s.cursor == i, &label, None));
+            }
+        }
+        SettingsLevel::AutoCompact => {
+            let labels = ["on", "off"];
+            for (i, label) in labels.iter().enumerate() {
+                let is_current = (i == 0) == cfg.auto_compact;
+                let mut text = (*label).to_string();
+                if is_current {
+                    text.push_str("  [current]");
+                }
+                body_lines.push(list_item(s.cursor == i, &text, None));
             }
         }
         SettingsLevel::ToolPreviewLines => {

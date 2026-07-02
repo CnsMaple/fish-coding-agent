@@ -9,6 +9,7 @@ pub fn dispatch(app: &mut App, cmd: &str, arg: &str) {
     match cmd {
         "settings" => open_settings(app),
         "model" => open_model_picker(app),
+        "compact" => compact_now(app, arg),
         "hotkey" | "help" | "keys" => open_hotkey(app),
         "new" | "clear" => {
             app.start_new_session();
@@ -284,6 +285,105 @@ fn continue_response(app: &mut App, arg: &str) {
 
 pub fn open_settings(app: &mut App) {
     open_settings_at(app, crate::function::SettingsLevel::TopLevel);
+}
+
+/// Manually trigger a session compaction. `/compact` ignores the
+/// `auto_compact` setting (the user asked for it explicitly) and
+/// always runs the summary flow. We still refuse to start while a
+/// chat request is in flight so the live session is not
+/// concurrently mutated.
+pub fn compact_now(app: &mut App, _arg: &str) {
+    use crate::function::notifications::ToastLevel;
+    if app.inflight.is_some() {
+        app.notify(
+            ToastLevel::Fail,
+            "cannot compact while a request is in flight",
+        );
+        return;
+    }
+    if app.compacting {
+        app.notify(ToastLevel::Fail, "compaction already in progress");
+        return;
+    }
+    let Some(active_id) = app.config.active.clone() else {
+        app.notify(
+            ToastLevel::Fail,
+            "no active provider; configure one via /settings",
+        );
+        open_settings(app);
+        return;
+    };
+    if let Err(e) = app.config.validate_provider(&active_id) {
+        app.notify(ToastLevel::Fail, e.clone());
+        return;
+    }
+    let (provider, _mode) = match crate::config::parse_id(&active_id) {
+        Some(p) => p,
+        None => {
+            app.notify(ToastLevel::Fail, "active provider id invalid");
+            return;
+        }
+    };
+    if app.session.messages.is_empty() {
+        app.notify(ToastLevel::Fail, "session is empty — nothing to compact");
+        return;
+    }
+    // Try the conservative plan first (preserves `tail_turns` of
+    // recent context). If there is not enough history for that
+    // (e.g. the session has only 1–2 turns), fall back to a
+    // full-session summary so `/compact` always does something
+    // useful for the user.
+    let plan = crate::compaction::plan_cutoff(
+        &app.session.messages,
+        crate::compaction::DEFAULT_TAIL_TURNS,
+    )
+    .or_else(|| crate::compaction::plan_cutoff_force(&app.session.messages));
+    let Some((start, end)) = plan else {
+        app.notify(ToastLevel::Fail, "session is too short to compact");
+        return;
+    };
+    let history: Vec<crate::session::Message> = app.session.messages[start..end].to_vec();
+    let key = match app.config.effective_api_key(&active_id) {
+        Some(k) if !k.is_empty() => k,
+        _ => {
+            app.notify(
+                ToastLevel::Fail,
+                format!("missing api key for {active_id}"),
+            );
+            return;
+        }
+    };
+    let base = app
+        .config
+        .entry(&active_id)
+        .map(|c| c.base_url.clone())
+        .unwrap_or_default();
+    let model = app.config.active_model().to_string();
+    let client = app.reqwest.clone();
+    let tx = match app.msg_tx.clone() {
+        Some(tx) => tx,
+        None => {
+            app.notify(ToastLevel::Fail, "internal: msg channel closed");
+            return;
+        }
+    };
+    app.compacting = true;
+    app.status.mark_compact_triggered();
+    app.notify(ToastLevel::Info, "compacting session...");
+    let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+    // Stash the cancel sender in `inflight` so the existing Esc-cancel
+    // UI (which flips `inflight.cancel` to true) also cancels an
+    // active compaction. This re-uses the existing field; we
+    // distinguish the two via `compacting` so a chat cancel won't
+    // also clobber a separate inflight later.
+    app.inflight = Some(crate::app::InflightHandle {
+        cancel: cancel_tx,
+        label: format!("compact:{active_id}:{model}"),
+        seq: app.current_request_seq,
+    });
+    tokio::spawn(run_compaction_stream(
+        client, base, key, provider, model, history, cancel_rx, tx, start, end,
+    ));
 }
 
 /// Open a fresh Settings tab and jump to `initial_level`. Used by
@@ -931,6 +1031,129 @@ pub async fn run_chat_stream(
         }
         send_msg(crate::event::AppMsg::ChatTimerResume);
     }
+}
+
+/// System prompt used by the compaction stream. Distinct from the
+/// normal agent's prompt because the summarizer should focus on
+/// preserving intent, not on producing tool calls.
+fn compaction_system_prompt() -> String {
+    "You are a helpful assistant that summarizes conversations. \
+Produce a single concise summary that preserves every decision, \
+identifier, file path, and open question from the source. Do not \
+use any tools. Reply with the summary only — no preamble, no \
+closing remarks."
+    .to_string()
+}
+
+/// Spawn a one-shot chat stream that summarizes `history`. Used by
+/// both auto-compaction and the `/compact` command. The result is
+/// delivered as `AppMsg::CompactionSummaryReady { start, end, summary }`
+/// (or `AppMsg::CompactionFailed { error }` on error).
+///
+/// `history` must already be a clone of `Session::messages[start..end]`
+/// — the compactor runs entirely on the snapshot, so the live
+/// session can be mutated safely in parallel. The cancel channel is
+/// independent from the chat inflight handle so the existing
+/// inflight-cancel UI does not interfere.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_compaction_stream(
+    client: reqwest::Client,
+    base: String,
+    key: String,
+    provider: ProviderKind,
+    model: String,
+    history: Vec<crate::session::Message>,
+    cancel_rx: tokio::sync::watch::Receiver<bool>,
+    tx: tokio::sync::mpsc::UnboundedSender<crate::event::AppMsg>,
+    start: usize,
+    end: usize,
+) {
+    let send_msg = |msg: crate::event::AppMsg| {
+        if !*cancel_rx.borrow() {
+            let _ = tx.send(msg);
+        }
+    };
+    if *cancel_rx.borrow() {
+        return;
+    }
+    let prompt = crate::compaction::build_summary_prompt(&history);
+    let req = crate::providers::ChatRequest {
+        model,
+        messages: vec![crate::providers::ChatMessage {
+            role: "user".to_string(),
+            content: prompt,
+            tool_call_id: None,
+            tool_calls: Vec::new(),
+        }],
+        thinking: crate::config::ReasoningMode::Off,
+        system: Some(compaction_system_prompt()),
+    };
+
+    let (chat_tx, mut chat_rx) =
+        tokio::sync::mpsc::unbounded_channel::<crate::providers::ChatEvent>();
+    let p = crate::providers::provider(provider);
+    let client_for_call = client.clone();
+    let base_for_call = base.clone();
+    let key_for_call = key.clone();
+    let call = tokio::spawn(async move {
+        p.chat_stream(
+            &client_for_call,
+            &base_for_call,
+            &key_for_call,
+            req,
+            chat_tx,
+        )
+        .await
+    });
+
+    let mut summary = String::new();
+    let mut stream_done = false;
+    while let Some(ev) = chat_rx.recv().await {
+        if *cancel_rx.borrow() {
+            return;
+        }
+        match ev {
+            crate::providers::ChatEvent::Delta(s) => {
+                summary.push_str(&s);
+            }
+            crate::providers::ChatEvent::Done => {
+                stream_done = true;
+                break;
+            }
+            crate::providers::ChatEvent::Error(e) => {
+                send_msg(crate::event::AppMsg::CompactionFailed { error: e });
+                return;
+            }
+            // We do not care about thinking deltas, tool calls, etc.
+            // for a compaction summary — drop them.
+            _ => {}
+        }
+    }
+
+    if !stream_done {
+        // The provider's task ended without emitting `Done`. Treat
+        // any error as a compaction failure so the user gets a
+        // meaningful toast.
+        let err = match call.await {
+            Ok(Ok(())) => "stream closed without Done".to_string(),
+            Ok(Err(e)) => format!("{e}"),
+            Err(e) => format!("compaction task failed: {e}"),
+        };
+        send_msg(crate::event::AppMsg::CompactionFailed { error: err });
+        return;
+    }
+    let _ = call.await;
+    if summary.trim().is_empty() {
+        send_msg(crate::event::AppMsg::CompactionFailed {
+            error: "summary was empty".to_string(),
+        });
+        return;
+    }
+    send_msg(crate::event::AppMsg::CompactionSummaryReady {
+        start,
+        end,
+        summary,
+    });
 }
 
 /// Extract the human-readable display content from a tool result JSON string.

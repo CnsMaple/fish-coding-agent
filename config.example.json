@@ -2,6 +2,7 @@
   "active_provider": "openai",
   "active_model": "gpt-4o-mini",
   "thinking": "off",
+  "auto_compact": true,
   "providers": {
     "openai": {
       "api_key": "",

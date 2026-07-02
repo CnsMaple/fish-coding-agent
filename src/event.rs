@@ -105,6 +105,18 @@ pub enum AppMsg {
     ToolDelta {
         content: String,
     },
+    /// Auto or `/compact` finished: the LLM returned a summary for
+    /// the slice `Session::messages[start..end]`. The handler calls
+    /// `Session::apply_compaction` and (for auto-triggers) flags
+    /// the post-compaction continue prompt.
+    CompactionSummaryReady {
+        start: usize,
+        end: usize,
+        summary: String,
+    },
+    /// The compaction stream errored out. The session is left
+    /// untouched. Surfaces as a `Fail` toast.
+    CompactionFailed { error: String },
 }
 
 pub struct EventChannels {
@@ -160,6 +172,10 @@ where
             // deferred request — see `submit_input` /
             // `commands::send_message` for the producer side.
             flush_pending_request(app);
+            // Drain a queued post-compaction continue prompt, if
+            // any. The session is idle (no inflight) so this is the
+            // safest spot to launch the synthetic follow-up.
+            drain_post_compaction_prompt(app);
         }
 
         tokio::select! {
@@ -278,6 +294,24 @@ fn flush_pending_request(app: &mut App) {
             ));
         }
     }
+}
+
+/// Drain a queued post-compaction follow-up prompt, if any. The
+/// main loop calls this right after a frame is rendered so the
+/// synthetic message lands on screen before the actual chat stream
+/// is fired. No-op when the session is not idle (a fresh
+/// user-driven request is already pending) or when nothing is
+/// queued.
+fn drain_post_compaction_prompt(app: &mut App) {
+    let Some(text) = app.pending_post_compaction_prompt.take() else {
+        return;
+    };
+    if app.inflight.is_some() || app.compacting || app.pending_request.is_some() {
+        // Re-queue and try again next frame.
+        app.pending_post_compaction_prompt = Some(text);
+        return;
+    }
+    crate::commands::send_chat(app, text);
 }
 
 /// `quota=true` 表示这是 legacy 逐字符终端（如 conhost），需要在
@@ -602,6 +636,7 @@ fn handle_msg(msg: AppMsg, app: &mut App) {
             app.inflight = None;
             use crate::function::notifications::ToastLevel;
             app.notify(ToastLevel::Ok, "response complete");
+            maybe_trigger_auto_compact(app);
         }
         AppMsg::ChatError { seq, error } => {
             if seq != app.current_request_seq {
@@ -750,7 +785,93 @@ fn handle_msg(msg: AppMsg, app: &mut App) {
         AppMsg::ToolDelta { content } => {
             app.session.append_tool_delta_to_last(&content);
         }
+        AppMsg::CompactionSummaryReady { start, end, summary } => {
+            use crate::function::notifications::ToastLevel;
+            // The cancel-Esc path takes `inflight` out of `app`
+            // before this event arrives, so the cancel sender
+            // inside it is still alive. Drop it explicitly.
+            app.inflight = None;
+            app.compacting = false;
+            if let Some(idx) = app.session.apply_compaction(start, end, summary) {
+                app.notify(ToastLevel::Ok, "session compacted");
+                app.save_current_session();
+                // Stage the continue prompt; the main loop drains
+                // it on the next idle frame.
+                app.pending_post_compaction_prompt = Some(continue_prompt_text().to_string());
+                // Pin the cursor to the inserted summary so the
+                // user sees the new context first.
+                let _ = idx;
+            } else {
+                app.notify(ToastLevel::Warn, "compaction range was empty");
+            }
+            // Reset the "triggered" status indicator so the bar
+            // returns to showing the new headroom percentage.
+            if let Some(total) = app.status.token_total {
+                app.status.update_token_usage(total);
+            } else {
+                app.status.compact_triggered = false;
+            }
+        }
+        AppMsg::CompactionFailed { error } => {
+            use crate::function::notifications::ToastLevel;
+            app.inflight = None;
+            app.compacting = false;
+            app.notify(ToastLevel::Fail, format!("compact failed: {error}"));
+            if let Some(total) = app.status.token_total {
+                app.status.update_token_usage(total);
+            } else {
+                app.status.compact_triggered = false;
+            }
+        }
     }
+}
+
+/// Text used as the synthetic follow-up message after a successful
+/// compaction. Matches opencode's
+/// `experimental.compaction.autocontinue` message, with a small
+/// prefix to clarify to the user that it was auto-injected.
+fn continue_prompt_text() -> &'static str {
+    "Continue if you have next steps, or stop and ask for clarification if you are unsure how to proceed."
+}
+
+/// Decide whether the current usage warrants an auto-compaction,
+/// and if so, schedule one. No-op when:
+/// - the toggle is off
+/// - another compaction is already running
+/// - the token usage / context window is not known
+/// - the active provider is missing or unconfigured
+fn maybe_trigger_auto_compact(app: &mut App) {
+    use crate::function::notifications::ToastLevel;
+    if !app.config.auto_compact {
+        return;
+    }
+    if app.compacting || app.inflight.is_some() {
+        return;
+    }
+    let Some(used) = app.status.token_total else {
+        return;
+    };
+    if !app.status.context_window_known {
+        return;
+    }
+    let inp = crate::compaction::CompactionInputs {
+        auto_enabled: app.config.auto_compact,
+        ctx_window: app.status.context_window_tokens,
+        max_output_tokens: app.status.max_output_tokens,
+        reserved_override: app.config.compact_reserved,
+    };
+    if !crate::compaction::should_auto_compact(used, inp) {
+        return;
+    }
+    if crate::compaction::plan_cutoff(&app.session.messages, crate::compaction::DEFAULT_TAIL_TURNS)
+        .is_none()
+    {
+        return;
+    }
+    app.notify(ToastLevel::Info, "auto compacting session...");
+    crate::commands::compact_now(app, "");
+    // compact_now will only fail silently if the inflight / provider
+    // gate tripped; if it bailed, the user already saw a toast.
 }
 
 async fn handle_key(k: crossterm::event::KeyEvent, app: &mut App) {
@@ -896,6 +1017,12 @@ async fn handle_key(k: crossterm::event::KeyEvent, app: &mut App) {
             // is durable.
             if let Some(inflight) = app.inflight.take() {
                 let _ = inflight.cancel.send(true);
+                // A compaction also parks its cancel sender in
+                // `inflight`. Drop the flag so a subsequent
+                // `CompactionSummaryReady` is treated as stale
+                // (it won't fire — the task bailed out on cancel —
+                // but the flag is what blocks a fresh `/compact`).
+                app.compacting = false;
                 app.save_current_session();
                 app.session.streaming_id = None;
                 return;
@@ -2877,6 +3004,7 @@ fn handle_settings_back(app: &mut App, state: &mut crate::function::SettingsStat
         | SettingsLevel::EnterBehaviorList
         | SettingsLevel::BorderTypeList
         | SettingsLevel::ThemeList
+        | SettingsLevel::AutoCompact
         | SettingsLevel::ToolPreviewLines => {
             state.level = SettingsLevel::TopLevel;
             state.cursor = 0;
@@ -2924,6 +3052,7 @@ fn handle_settings_enter(app: &mut App, state: &mut crate::function::SettingsSta
             3 => SettingsLevel::EnterBehaviorList,
             4 => SettingsLevel::BorderTypeList,
             5 => SettingsLevel::ThemeList,
+            6 => SettingsLevel::AutoCompact,
             _ => SettingsLevel::ToolPreviewLines,
         },
         SettingsLevel::ProviderList => {
@@ -3055,6 +3184,26 @@ fn handle_settings_enter(app: &mut App, state: &mut crate::function::SettingsSta
                 if let Ok(mut c) = app.session.line_cache.lock() {
                     c.clear();
                 }
+            }
+            SettingsLevel::TopLevel
+        }
+        SettingsLevel::AutoCompact => {
+            use crate::function::notifications::ToastLevel;
+            // 0 = on, 1 = off. `auto_compact` defaults to `true` in
+            // `Config`, so picking the first row turns it on, the
+            // second row turns it off.
+            let enabled = match cursor {
+                0 => true,
+                _ => false,
+            };
+            if app.config.auto_compact != enabled {
+                app.config.auto_compact = enabled;
+                app.status.set_auto_compact(enabled);
+                app.save_config();
+                app.notify(
+                    ToastLevel::Ok,
+                    format!("auto compact: {}", if enabled { "on" } else { "off" }),
+                );
             }
             SettingsLevel::TopLevel
         }
@@ -3625,6 +3774,8 @@ mod tests {
             burst_snapshot: None,
             pending_ask_snapshot: String::new(),
             session_scroll: crate::event::ScrollAnimator::default(),
+            compacting: false,
+            pending_post_compaction_prompt: None,
         }
     }
 

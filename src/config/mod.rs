@@ -325,6 +325,13 @@ pub fn default_model(_kind: ProviderKind) -> &'static str {
     ""
 }
 
+/// Default for `Config::auto_compact`. Kept as a `fn` (not a
+/// `const`) so it can be referenced in `#[serde(default = ...)]`
+/// attributes.
+pub fn default_auto_compact() -> bool {
+    true
+}
+
 /// Default number of output lines visible inside a collapsed tool
 /// block before the Ctrl+O hint is offered. Adjustable via
 /// `/settings → tool preview lines`.
@@ -363,6 +370,20 @@ pub struct Config {
     /// Color theme for the TUI.
     #[serde(default)]
     pub theme: crate::theme::ThemeVariant,
+    /// When true, the session is auto-compacted (older turns are
+    /// summarized) once the cumulative token usage reaches
+    /// `ctx_window - reserved`. Toggleable from `/settings`.
+    /// Default: `true`. Mirrors opencode's
+    /// `Config::compaction.auto` knob.
+    #[serde(default = "default_auto_compact")]
+    pub auto_compact: bool,
+    /// Optional override for the reserved token buffer used by
+    /// auto-compaction. `None` means "use the default 20 000
+    /// token buffer, clamped to the model's max output". Not
+    /// exposed in the settings UI for now; reserved for future
+    /// advanced settings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compact_reserved: Option<u64>,
     #[serde(default)]
     pub entries: HashMap<ProviderId, ProviderConfig>,
 }
@@ -428,6 +449,8 @@ impl Config {
             tool_preview_lines: default_tool_preview_lines(),
             border_type: crate::ui::border_type::BorderType::default(),
             theme: crate::theme::ThemeVariant::default(),
+            auto_compact: default_auto_compact(),
+            compact_reserved: None,
             entries,
         }
     }
@@ -612,6 +635,8 @@ impl Default for Config {
             tool_preview_lines: default_tool_preview_lines(),
             border_type: crate::ui::border_type::BorderType::default(),
             theme: crate::theme::ThemeVariant::default(),
+            auto_compact: default_auto_compact(),
+            compact_reserved: None,
             entries: HashMap::new(),
         }
     }

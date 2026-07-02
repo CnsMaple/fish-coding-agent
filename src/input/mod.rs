@@ -676,6 +676,7 @@ pub const COMMAND_LIST: &[&str] = &[
     "/fork",
     "/retry",
     "/continue",
+    "/compact",
     "/plan",
     "/build",
     "/quit",

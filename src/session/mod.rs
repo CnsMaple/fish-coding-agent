@@ -683,9 +683,50 @@ impl Session {
         self.invalidate_layout_cache();
     }
 
+    /// Replace the message slice `messages[start..end]` with a single
+    /// `Role::System` summary message. Used by auto-compaction and
+    /// the `/compact` slash command. The summary content is stored
+    /// verbatim in `Message::content`; the LLM path already turns
+    /// `Role::System` into a user-role ChatMessage, which lands the
+    /// summary at the top of the next chat turn.
+    ///
+    /// `start..end` must be a valid range. Returns the index of the
+    /// newly-inserted summary message, or `None` when the range is
+    /// empty / out of bounds (caller should treat that as "nothing
+    /// to do").
+    ///
+    /// Caches are invalidated: line cache for every removed /
+    /// touched message index is dropped, the layout cache is
+    /// flushed, and the streaming id is reset (a compaction can
+    /// never run while a chat stream is live).
+    pub fn apply_compaction(&mut self, start: usize, end: usize, summary: String) -> Option<usize> {
+        if start >= end || end > self.messages.len() {
+            return None;
+        }
+        let summary_msg = Message::new(Role::System, summary);
+        // Drop everything in [start, end), then insert the summary
+        // at `start`. Indices >= end shift by `(end - start) - 1`.
+        self.messages.splice(start..end, std::iter::once(summary_msg));
+        // The splice moved every index >= end down by
+        // `(end - start) - 1`. Invalidate their render caches so
+        // a stale LRU entry cannot be reused.
+        self.invalidate_message_cache_from(start);
+        // A streaming id pointing into the removed range is now
+        // dangling; clear it.
+        if let Some(id) = self.streaming_id {
+            if id >= start && id < end {
+                self.streaming_id = None;
+            } else if id >= end {
+                self.streaming_id = Some(id - (end - start) + 1);
+            }
+        }
+        self.invalidate_layout_cache();
+        Some(start)
+    }
+
     /// Rough count of rendered lines up to (but not including) `msg_idx`,
     /// mirroring the same logic used by `build_lines` in `render.rs`.
-    /// Only thinking-mode `Show` counts expanded blocks; `Hide` and
+    /// Only thinking-mode `Show` counts expanded expanded blocks; `Hide` and
     /// `ShowWhileStreaming` count collapsed toggles.
     pub fn count_lines_before(&mut self, _msg_idx: usize, viewport: u16) -> u32 {
         if self.messages.is_empty() {
@@ -1186,5 +1227,34 @@ mod tests {
         assert_eq!(s.scroll, 5, "first observation at new width is neutral");
         s.pin_scroll_for_total(120, 1005);
         assert_eq!(s.scroll, 10, "delta applies normally at the new width");
+    }
+}
+
+#[cfg(test)]
+mod compaction_tests {
+    use crate::session::{Message, Role, Session};
+
+    #[test]
+    fn apply_compaction_drops_replaced_messages() {
+        let mut s = Session::default();
+        s.push(Message::new(Role::User, "u1"));
+        s.push(Message::new(Role::Assistant, "a1"));
+        s.push(Message::new(Role::User, "u2"));
+        s.push(Message::new(Role::Assistant, "a2"));
+        let idx = s.apply_compaction(0, 2, "summary".to_string()).unwrap();
+        assert_eq!(idx, 0);
+        assert_eq!(s.messages.len(), 3);
+        assert_eq!(s.messages[0].role, Role::System);
+        assert_eq!(s.messages[0].content, "summary");
+        assert_eq!(s.messages[1].content, "u2");
+        assert_eq!(s.messages[2].content, "a2");
+    }
+
+    #[test]
+    fn apply_compaction_rejects_empty_range() {
+        let mut s = Session::default();
+        s.push(Message::new(Role::User, "u1"));
+        assert_eq!(s.apply_compaction(0, 0, "x".to_string()), None);
+        assert_eq!(s.apply_compaction(2, 3, "x".to_string()), None);
     }
 }

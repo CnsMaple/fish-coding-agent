@@ -277,6 +277,8 @@ pub enum SettingsLevel {
     BorderTypeList,
     /// Theme chooser.
     ThemeList,
+    /// Auto-compact on/off toggle.
+    AutoCompact,
     /// Inline number stepper for `Config::tool_preview_lines`.
     ToolPreviewLines,
 }
@@ -307,6 +309,7 @@ impl SettingsLevel {
             SettingsLevel::EnterBehaviorList => "settings / enter behavior".to_string(),
             SettingsLevel::BorderTypeList => "settings / border type".to_string(),
             SettingsLevel::ThemeList => "settings / theme".to_string(),
+            SettingsLevel::AutoCompact => "settings / auto compact".to_string(),
             SettingsLevel::ToolPreviewLines => "settings / tool preview lines".to_string(),
         }
     }
@@ -325,7 +328,8 @@ impl SettingsLevel {
             | SettingsLevel::ToolResultDisplayList
             | SettingsLevel::EnterBehaviorList
             | SettingsLevel::BorderTypeList
-            | SettingsLevel::ThemeList => "Up/Down: nav | Enter: select | Esc: back",
+            |             SettingsLevel::ThemeList => "Up/Down: nav | Enter: select | Esc: back",
+            SettingsLevel::AutoCompact => "Up/Down: nav | Enter: select | Esc: back",
             SettingsLevel::ToolPreviewLines => "Up/Down: ±1 | Esc: back",
         }
     }
@@ -435,7 +439,7 @@ impl SettingsState {
     /// Number of items in the current list view (used to clamp cursor).
     pub fn list_len(&self, cfg: &Config) -> usize {
         match &self.level {
-            SettingsLevel::TopLevel => 7, // set provider, thinking display, tool display, enter behavior, border type, theme, tool preview lines
+            SettingsLevel::TopLevel => 8, // set provider, thinking display, tool display, enter behavior, border type, theme, auto compact, tool preview lines
             SettingsLevel::ProviderList => 1 + cfg.configured_provider_ids().len(), // new + existing
             SettingsLevel::NewProviderKind => self.new_provider.filtered.len(),
             SettingsLevel::ExistingActions(_) => 2, // edit, delete
@@ -445,6 +449,7 @@ impl SettingsState {
             SettingsLevel::EnterBehaviorList => 2,   // enter sends, enter newline
             SettingsLevel::BorderTypeList => 2,      // ascii, rounded
             SettingsLevel::ThemeList => crate::theme::ThemeVariant::all().len(),
+            SettingsLevel::AutoCompact => 2, // on, off
             SettingsLevel::ToolPreviewLines => 1, // single-row stepper, the value lives in cfg
         }
     }
@@ -1422,6 +1427,20 @@ pub struct App {
     /// Programmatic scrolls (submit, jump-to-message, clear, etc.)
     /// call `set_scroll_anchored` to land immediately.
     pub session_scroll: crate::event::ScrollAnimator,
+
+    /// `true` while an auto- or manual-compaction stream is in
+    /// flight. Independent from `inflight` so the spinner logic /
+    /// inflight-based cancel do not interfere with a compaction
+    /// task (which has its own cancel channel). The status bar
+    /// shows `cmp:triggered` whenever this is `true`.
+    pub compacting: bool,
+
+    /// Once a compaction succeeds, the event loop schedules a
+    /// synthetic "Continue if you have next steps…" user prompt
+    /// (mirrors opencode's `experimental.compaction.autocontinue`).
+    /// `None` means "no follow-up pending". Drained on the next
+    /// idle frame.
+    pub pending_post_compaction_prompt: Option<String>,
 }
 
 /// Mouse-driven text selection spanning the full TUI. Coordinates are
@@ -1539,7 +1558,19 @@ impl App {
             burst_snapshot: None,
             pending_ask_snapshot: String::new(),
             session_scroll: crate::event::ScrollAnimator::default(),
+            compacting: false,
+            pending_post_compaction_prompt: None,
         };
+        // Sync the auto-compact status from the loaded config so
+        // the very first render of the input bar shows the right
+        // state. `config` was moved into `app.config` above, so
+        // read from there.
+        let auto = app.config.auto_compact;
+        app.status.set_auto_compact(auto);
+        // Reset max_output_tokens to 0; the live provider can fill
+        // it in via `refresh_status_model_context`. For now, the
+        // cmp segment is suppressed when the model is unknown.
+        app.status.set_max_output_tokens(0);
         app.refresh_status_model_context();
         app
     }
@@ -1568,6 +1599,11 @@ impl App {
         } else if let Some(tokens) = selected.and_then(|m| m.context_window_tokens) {
             self.status.set_context_window_tokens(tokens);
         }
+        // `ModelInfo` does not yet carry a separate `max_output_tokens`
+        // field. Until it does, the cmp segment is shown when the
+        // context window is known but `max_output_tokens == 0`, with
+        // the formula falling back to `ctx_window * 0.25` (opencode's
+        // default) inside `StatusBar::recompute_compact_pct`.
     }
 
     /// Push a toast; if level is important and panel is hidden, force-show
@@ -2147,6 +2183,8 @@ mod tests {
             burst_snapshot: None,
             pending_ask_snapshot: String::new(),
             session_scroll: crate::event::ScrollAnimator::default(),
+            compacting: false,
+            pending_post_compaction_prompt: None,
         }
     }
 
