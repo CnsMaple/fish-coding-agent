@@ -19,7 +19,11 @@ async fn main() -> Result<()> {
 
     tracing_subscriber::fmt()
         .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                // Default: fish-coding-agent at info, everything else at warn.
+                // Users can override via RUST_LOG env var.
+                "warn,fish_coding_agent=info".parse().unwrap()
+            }),
         )
         .with_writer(std::io::stderr)
         .init();
@@ -43,9 +47,30 @@ async fn main() -> Result<()> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     // Initialize theme from config
     fish_coding_agent::theme::init_theme(cfg.theme);
+    // Initialize the MCP service. This reads the config's `mcp`
+    // section, spawns supervisor tasks for each enabled server,
+    // and installs itself into `McpRegistry` so the rest of the
+    // app can call `McpRegistry::current()`.
+    {
+        let mcp_cfg = cfg.mcp.clone();
+        let cwd_for_mcp = cwd.clone();
+        // `.await` is critical — without it the future is dropped
+        // and the service never initialises.
+        fish_coding_agent::mcp::McpService::init_from_config(
+            &mcp_cfg,
+            cwd_for_mcp,
+        )
+        .await;
+    }
     let mut app = App::new(cfg, config_path, cwd);
 
     let res = event::run(&mut terminal, &mut app).await;
+
+    // Tear down MCP clients (kills stdio child trees) before
+    // returning so child processes don't outlive the TUI.
+    if let Some(svc) = fish_coding_agent::mcp::McpRegistry::current() {
+        svc.shutdown().await;
+    }
 
     if let Err(e) = res {
         eprintln!("error: {e:#}");

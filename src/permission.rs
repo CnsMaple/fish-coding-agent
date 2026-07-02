@@ -88,7 +88,15 @@ pub fn check(agent: Agent, tool: &str) -> Action {
         .iter()
         .find(|(name, _)| *name == tool)
         .map(|(_, a)| *a)
-        .unwrap_or(Action::Deny)
+        .unwrap_or_else(|| {
+            // Unknown tools (e.g. MCP-discovered `<server>_<tool>`)
+            // are allowed in build/yolo mode (max autonomy) and
+            // denied in plan mode (read-only exploration).
+            match agent {
+                Agent::Build => Action::Allow,
+                Agent::Plan => Action::Deny,
+            }
+        })
 }
 
 #[cfg(test)]
@@ -136,8 +144,12 @@ mod tests {
     }
 
     #[test]
-    fn unknown_tool_defaults_to_deny() {
-        assert_eq!(check(Agent::Build, "no_such_tool"), Action::Deny);
+    fn unknown_tool_in_build_is_allowed() {
+        assert_eq!(check(Agent::Build, "no_such_tool"), Action::Allow);
+    }
+
+    #[test]
+    fn unknown_tool_in_plan_is_denied() {
         assert_eq!(check(Agent::Plan, "no_such_tool"), Action::Deny);
     }
 

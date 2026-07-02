@@ -16,8 +16,9 @@ path = "src/lib.rs"
 [dependencies]
 ratatui = { version = "0.30", features = ["crossterm"] }
 crossterm = { version = "0.28", features = ["event-stream"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "fs", "process"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "http2", "gzip", "brotli", "deflate", "zstd"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "fs", "process", "net"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls", "http2", "gzip", "brotli", "deflate", "zstd", "form"] }
+url = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
@@ -40,6 +41,16 @@ sha2 = "0.11.0"
 base64 = "0.22.1"
 hex = "0.4"
 uuid = { version = "1.23.3", features = ["v4", "serde"] }
+open = "5"
+rmcp = { version = "2.0", default-features = false, features = [
+    "client",
+    "server",
+    "transport-child-process",
+    "transport-streamable-http-client",
+    "transport-streamable-http-client-reqwest",
+    "auth",
+    "macros",
+] }
 
 [profile.release]
 opt-level = 3

@@ -9,13 +9,24 @@ use serde_json::json;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::event::AppMsg;
+use crate::mcp::McpRegistry;
 
 const COMMAND_TIMEOUT_SECS: u64 = 300;
 const COMMAND_OUTPUT_LIMIT: usize = 16_000;
 const READ_OUTPUT_LIMIT: usize = 32_000;
 
+/// Maximum number of MCP tools that may be advertised to the LLM.
+/// Protects against a misconfigured server that exports tens of
+/// thousands of tools from blowing the prompt budget.
+const MCP_TOOL_LIMIT: usize = 256;
+
+/// Maximum length of a tool description we'll send to the LLM.
+/// Truncates with an ellipsis when longer; matches the opencode
+/// behaviour in `McpCatalog.convertTool`.
+const MCP_DESC_LIMIT: usize = 200;
+
 pub fn openai_tool_specs() -> Vec<serde_json::Value> {
-    tool_defs()
+    let mut out: Vec<serde_json::Value> = tool_defs()
         .into_iter()
         .map(|tool| {
             json!({
@@ -27,11 +38,13 @@ pub fn openai_tool_specs() -> Vec<serde_json::Value> {
                 }
             })
         })
-        .collect()
+        .collect();
+    out.extend(mcp_specs_for_openai());
+    out
 }
 
 pub fn anthropic_tool_specs() -> Vec<serde_json::Value> {
-    tool_defs()
+    let mut out: Vec<serde_json::Value> = tool_defs()
         .into_iter()
         .map(|tool| {
             json!({
@@ -40,7 +53,73 @@ pub fn anthropic_tool_specs() -> Vec<serde_json::Value> {
                 "input_schema": tool.schema,
             })
         })
+        .collect();
+    out.extend(mcp_specs_for_anthropic());
+    out
+}
+
+/// Read the current MCP tool list and convert it to the OpenAI
+/// tool-spec shape. Returns an empty Vec when the service is not
+/// installed or has no connected tools.
+fn mcp_specs_for_openai() -> Vec<serde_json::Value> {
+    mcp_tool_iter()
+        .into_iter()
+        .map(|(key, description, schema)| {
+            json!({
+                "type": "function",
+                "function": {
+                    "name": key,
+                    "description": description,
+                    "parameters": schema,
+                }
+            })
+        })
         .collect()
+}
+
+fn mcp_specs_for_anthropic() -> Vec<serde_json::Value> {
+    mcp_tool_iter()
+        .into_iter()
+        .map(|(key, description, schema)| {
+            json!({
+                "name": key,
+                "description": description,
+                "input_schema": schema,
+            })
+        })
+        .collect()
+}
+
+/// Collect `(key, description, schema)` triples from the live MCP
+/// service. Strips to the first `MCP_TOOL_LIMIT` entries; bounds
+/// the description length.
+fn mcp_tool_iter() -> Vec<(String, String, serde_json::Value)> {
+    let Some(svc) = McpRegistry::current() else {
+        return Vec::new();
+    };
+    let snap = match svc.try_snapshot() {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    let mut out: Vec<(String, String, serde_json::Value)> = snap
+        .tools
+        .values()
+        .map(|t| {
+            let mut desc = t.description.clone();
+            if desc.chars().count() > MCP_DESC_LIMIT {
+                desc = desc.chars().take(MCP_DESC_LIMIT).collect::<String>() + "…";
+            }
+            if desc.is_empty() {
+                desc = format!("MCP tool `{name}` (server: {server})", name = t.name, server = t.server);
+            } else {
+                desc = format!("[mcp:{server}] {desc}", server = t.server);
+            }
+            (t.key.clone(), desc, t.input_schema.clone())
+        })
+        .collect();
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out.truncate(MCP_TOOL_LIMIT);
+    out
 }
 
 struct ToolDef {
@@ -232,6 +311,38 @@ pub async fn execute_tool_streaming_with_agent(
         })
         .to_string();
     }
+    // MCP tool dispatch. The tool name is `<server>_<tool>`; if
+    // the live service knows it, run it through the MCP client.
+    if is_mcp_tool_name(name) {
+        if let Some(svc) = crate::mcp::McpRegistry::current() {
+            let arguments = if args.trim().is_empty() {
+                serde_json::Value::Null
+            } else {
+                match serde_json::from_str::<serde_json::Value>(args) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return json!({
+                            "ok": false,
+                            "error": format!("mcp tool arguments must be JSON: {e}"),
+                        })
+                        .to_string();
+                    }
+                }
+            };
+            return match svc.call_tool(name, arguments).await {
+                Ok(rendered) => {
+                    let _ = tx.send(AppMsg::ToolDelta { content: rendered.clone() });
+                    json!({ "ok": true, "result": rendered }).to_string()
+                }
+                Err(e) => json!({ "ok": false, "error": format!("mcp error: {e}") }).to_string(),
+            };
+        }
+        return json!({
+            "ok": false,
+            "error": format!("mcp service is not initialised; tool `{name}` cannot run"),
+        })
+        .to_string();
+    }
     let result = match name {
         t::SHELL_COMMAND | "command" => run_command_streaming(args, cwd, tx)
             .await
@@ -243,6 +354,17 @@ pub async fn execute_tool_streaming_with_agent(
     };
 
     result
+}
+
+/// Heuristic: a tool name is treated as an MCP tool when the live
+/// service knows it. Falls back to the built-in list otherwise.
+fn is_mcp_tool_name(name: &str) -> bool {
+    if let Some(svc) = crate::mcp::McpRegistry::current() {
+        if let Ok(snap) = svc.try_snapshot() {
+            return snap.tools.contains_key(name);
+        }
+    }
+    false
 }
 
 async fn run_command_streaming(

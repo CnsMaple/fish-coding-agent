@@ -682,6 +682,10 @@ pub const COMMAND_LIST: &[&str] = &[
     "/quit",
     "/exit",
     "/help",
+    "/mcp",
+    "/mcp-auth",
+    "/mcp-logout",
+    "/mcp-debug",
 ];
 
 /// Returns the list of completion candidates that match the given prefix
@@ -705,6 +709,15 @@ pub fn completion_candidates_for(input: &str) -> Vec<String> {
                 .filter(|c| c.starts_with(&rest) || rest.is_empty())
                 .map(|s| format!("/plan {s}"))
                 .collect(),
+            "mcp" | "mcp-auth" | "mcp-logout" | "mcp-debug" => {
+                // List configured MCP server names.
+                let names = crate::mcp::builtin_names();
+                names
+                    .into_iter()
+                    .filter(|n| n.starts_with(&rest) || rest.is_empty())
+                    .map(|n| format!("/{cmd} {n}"))
+                    .collect()
+            }
             _ => vec![],
         };
     }

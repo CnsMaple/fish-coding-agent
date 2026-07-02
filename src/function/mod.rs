@@ -1332,6 +1332,13 @@ pub struct App {
     pub reqwest: reqwest::Client,
     pub inflight: Option<InflightHandle>,
 
+    /// Set when the MCP tool list has changed since the last
+    /// `openai_tool_specs` / `anthropic_tool_specs` call. The
+    /// provider layer re-reads on the next request; the field is
+    /// a plain `bool` because the aggregate count is cheap to
+    /// recompute.
+    pub mcp_tools_dirty: bool,
+
     /// Monotonic counter incremented every time `send_message` /
     /// `send_chat` (or a direct-tool input) starts a new request.
     /// Spelled out into the corresponding `InflightHandle::seq` and
@@ -1544,6 +1551,7 @@ impl App {
             cwd,
             should_quit: false,
             msg_tx: None,
+            mcp_tools_dirty: true,
             input_prompt_area: None,
             tui_selection: None,
             selected_text: None,
@@ -2165,6 +2173,7 @@ mod tests {
             cwd: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
             should_quit: false,
             msg_tx: None,
+            mcp_tools_dirty: true,
             input_prompt_area: None,
             tui_selection: None,
             selected_text: None,

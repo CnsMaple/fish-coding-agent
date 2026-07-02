@@ -386,6 +386,13 @@ pub struct Config {
     pub compact_reserved: Option<u64>,
     #[serde(default)]
     pub entries: HashMap<ProviderId, ProviderConfig>,
+    /// MCP server configuration. Mirrors the top-level
+    /// `Config.mcp` record in opencode
+    /// (`packages/core/src/v1/config/config.ts`). Each entry is
+    /// either a full server config or a `{ "enabled": false }`
+    /// toggle used to disable a remote default.
+    #[serde(default)]
+    pub mcp: HashMap<String, crate::mcp::McpEntry>,
 }
 
 impl Config {
@@ -452,6 +459,7 @@ impl Config {
             auto_compact: default_auto_compact(),
             compact_reserved: None,
             entries,
+            mcp: HashMap::new(),
         }
     }
 
@@ -638,6 +646,7 @@ impl Default for Config {
             auto_compact: default_auto_compact(),
             compact_reserved: None,
             entries: HashMap::new(),
+            mcp: HashMap::new(),
         }
     }
 }

@@ -105,6 +105,35 @@ pub enum AppMsg {
     ToolDelta {
         content: String,
     },
+    /// MCP tool list changed for a single server (added, removed,
+    /// or server went up/down). Triggers re-aggregation of the
+    /// `openai_tool_specs` / `anthropic_tool_specs` view and an
+    /// immediate redraw of the status bar.
+    McpToolsChanged { server: String },
+    /// MCP status changed for a server. Used to refresh the
+    /// `/mcp` picker without forcing a re-aggregation of tools.
+    McpStatusChanged {
+        name: String,
+        status: crate::mcp::McpStatus,
+    },
+    /// An MCP server needs user authentication. `url` is the
+    /// authorization URL the app should surface in a toast (and
+    /// open in the browser if possible).
+    McpAuthRequired {
+        server: String,
+        url: String,
+        error: String,
+    },
+    /// The browser failed to open for an MCP auth URL; the TUI
+    /// already showed the URL in a toast, so the user can copy it.
+    McpBrowserOpenFailed { server: String, url: String },
+    /// A connected MCP server's client closed unexpectedly. The
+    /// service has already marked the server as `Failed`; the
+    /// TUI uses this to surface a toast and update the picker.
+    McpClientClosed { server: String },
+    /// Manual request to start the OAuth dance for a remote MCP
+    /// server. Issued by `/mcp-auth <name>`.
+    McpStartAuth { server: String },
     /// Auto or `/compact` finished: the LLM returned a summary for
     /// the slice `Session::messages[start..end]`. The handler calls
     /// `Session::apply_compaction` and (for auto-triggers) flags
@@ -145,6 +174,14 @@ where
     // We need to put the sender into the App so spawned tasks can use it.
     app.msg_tx = Some(channels.tx.clone());
     app.check_config();
+
+    // Wire the MCP service (if installed) into the app's event
+    // channel so tool-list changes surface as `AppMsg`s.
+    if let Some(svc) = crate::mcp::McpRegistry::current() {
+        let tx_for_mcp = channels.tx.clone();
+        let sink = crate::mcp::AppMsgEventSink::new(tx_for_mcp);
+        svc.bind_event_sink(std::sync::Arc::new(sink)).await;
+    }
 
     let mut events = EventStream::new();
     let mut tick = interval(Duration::from_millis(100));
@@ -784,6 +821,67 @@ fn handle_msg(msg: AppMsg, app: &mut App) {
         }
         AppMsg::ToolDelta { content } => {
             app.session.append_tool_delta_to_last(&content);
+        }
+        AppMsg::McpToolsChanged { server } => {
+            // The aggregated tool set changed; nudge the next
+            // request to re-read `openai_tool_specs` /
+            // `anthropic_tool_specs`. The picker / status bar
+            // already consume the live snapshot.
+            tracing::info!(server = %server, "mcp tools changed");
+            app.invalidate_tool_specs();
+            let _ = app.notify(
+                crate::function::notifications::ToastLevel::Info,
+                format!("mcp `{server}` tools updated"),
+            );
+        }
+        AppMsg::McpStatusChanged { name, status } => {
+            tracing::info!(server = %name, status = %status.label(), "mcp status changed");
+            // No-op for now beyond logging; the status bar reads
+            // the live snapshot directly. The toast noise is
+            // kept low so a healthy startup doesn't spam.
+        }
+        AppMsg::McpAuthRequired { server, url, error } => {
+            if !url.is_empty() {
+                let _ = app.notify(
+                    crate::function::notifications::ToastLevel::Warn,
+                    format!("mcp `{server}` needs auth: {url}"),
+                );
+            } else {
+                let _ = app.notify(
+                    crate::function::notifications::ToastLevel::Warn,
+                    format!("mcp `{server}` needs auth: {error}"),
+                );
+            }
+        }
+        AppMsg::McpBrowserOpenFailed { server: _, url: _ } => {
+            // The toast already surfaced the URL; nothing else to do.
+        }
+        AppMsg::McpClientClosed { server } => {
+            let _ = app.notify(
+                crate::function::notifications::ToastLevel::Fail,
+                format!("mcp `{server}` connection closed"),
+            );
+        }
+        AppMsg::McpStartAuth { server } => {
+            // Drive the OAuth flow asynchronously. The handler is
+            // synchronous, so we spawn a background task that does
+            // the async work and sends result AppMsgs back.
+            let server_clone = server.clone();
+            let tx = app.msg_tx.clone();
+            app.notify(
+                crate::function::notifications::ToastLevel::Info,
+                format!("mcp `{server}`: starting OAuth..."),
+            );
+            tokio::spawn(async move {
+                let Some(tx) = tx else { return };
+                if let Err(e) = run_mcp_oauth(&server_clone, &tx).await {
+                    let _ = tx.send(crate::event::AppMsg::McpAuthRequired {
+                        server: server_clone,
+                        url: String::new(),
+                        error: format!("OAuth failed: {e}"),
+                    });
+                }
+            });
         }
         AppMsg::CompactionSummaryReady { start, end, summary } => {
             use crate::function::notifications::ToastLevel;
@@ -1715,6 +1813,211 @@ fn submit_input(app: &mut App) {
     }
     // The buffer is now empty, so the completion tab (if any) should close.
     app.sync_completion();
+}
+
+/// Run the full OAuth authorization flow for a remote MCP server:
+///
+/// 1. Start a local TCP callback server
+/// 2. Generate PKCE challenge
+/// 3. Build the authorization URL (using stored `client_id` or
+///    performing dynamic client registration)
+/// 4. Open the browser
+/// 5. Wait for the callback (5 min timeout)
+/// 6. Exchange code for tokens
+/// 7. Store tokens in `McpAuthStore`
+/// 8. Reconnect the server with the new token
+async fn run_mcp_oauth(
+    server_name: &str,
+    tx: &tokio::sync::mpsc::UnboundedSender<AppMsg>,
+) -> Result<(), String> {
+    use base64::Engine;
+    use sha2::Digest;
+
+    let Some(svc) = crate::mcp::McpRegistry::current() else {
+        return Err("mcp service not initialised".into());
+    };
+
+    // 1. Get server config. Must be a remote server.
+    let config = svc.snapshot().await;
+    let cfg = config
+        .config
+        .get(server_name)
+        .ok_or_else(|| format!("server `{server_name}` not configured"))?;
+    let (server_url, oauth_cfg) = match cfg {
+        crate::mcp::McpServerConfig::Remote { url, oauth, .. } => {
+            let oauth = oauth.as_ref().ok_or_else(|| {
+                format!("server `{server_name}` has no OAuth config")
+            })?;
+            (url.clone(), oauth)
+        }
+        _ => return Err(format!("server `{server_name}` is not a remote server")),
+    };
+
+    // 2. Discover OAuth metadata from the MCP server.
+    let well_known_url = format!(
+        "{}/.well-known/oauth-authorization-server",
+        server_url.trim_end_matches('/')
+    );
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| format!("build http client: {e}"))?;
+    let metadata: serde_json::Value = client
+        .get(&well_known_url)
+        .send()
+        .await
+        .map_err(|e| format!("fetch OAuth metadata: {e}"))?
+        .json()
+        .await
+        .map_err(|e| format!("parse OAuth metadata: {e}"))?;
+
+    let auth_url_str = metadata["authorization_endpoint"]
+        .as_str()
+        .ok_or_else(|| "no authorization_endpoint in OAuth metadata".to_string())?;
+    let token_url_str = metadata["token_endpoint"]
+        .as_str()
+        .ok_or_else(|| "no token_endpoint in OAuth metadata".to_string())?;
+
+    // 3. Generate PKCE challenge (S256).
+    //    Code verifier: uuid-based random token.
+    let code_verifier = uuid::Uuid::new_v4().to_string()
+        + &uuid::Uuid::new_v4().to_string()
+        + &uuid::Uuid::new_v4().to_string();
+    // The verifier must be 43-128 chars as per RFC 7636. Uuid hex is 36
+    // chars each, so three give us 108. Replace dashes to get only
+    // unreserved chars.
+    let code_verifier: String = code_verifier.chars().filter(|c| *c != '-').collect();
+    let code_challenge_hash = sha2::Sha256::digest(code_verifier.as_bytes());
+    let code_challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(code_challenge_hash);
+
+    // 4. Build the redirect URI.
+    let port = crate::mcp::oauth_callback::DEFAULT_OAUTH_CALLBACK_PORT;
+    let redirect_uri = oauth_cfg
+        .redirect_uri
+        .clone()
+        .unwrap_or_else(|| format!("http://127.0.0.1:{port}{}", crate::mcp::oauth_callback::OAUTH_CALLBACK_PATH));
+
+    // 5. Determine client_id: use configured value or try dynamic
+    //    client registration.
+    let client_id = if let Some(cid) = &oauth_cfg.client_id {
+        cid.clone()
+    } else {
+        // TODO: dynamic client registration (POST to registration endpoint)
+        // For now, require configured client_id.
+        return Err(
+            "no client_id configured; add `oauth.client_id` to your config".into(),
+        );
+    };
+
+    // 6. Generate a random state token for CSRF protection.
+    let state_token = uuid::Uuid::new_v4().to_string();
+
+    // 7. Start the callback server and wait for the redirect.
+    //    Clone the state token so the spawned task can own it.
+    let state_for_callback = state_token.clone();
+    let callback_handle = tokio::spawn(async move {
+        crate::mcp::oauth_callback::wait_for_callback(&state_for_callback).await
+    });
+
+    // 8. Build and open the authorization URL.
+    use url::form_urlencoded;
+    let mut query_parts: Vec<(&str, &str)> = vec![
+        ("response_type", "code"),
+        ("client_id", &client_id),
+        ("redirect_uri", &redirect_uri),
+        ("state", &state_token),
+        ("code_challenge", &code_challenge),
+        ("code_challenge_method", "S256"),
+    ];
+    if let Some(scope) = &oauth_cfg.scope {
+        query_parts.push(("scope", scope));
+    }
+    let auth_url_str = format!(
+        "{}?{}",
+        auth_url_str,
+        form_urlencoded::Serializer::new(String::new())
+            .extend_pairs(query_parts)
+            .finish()
+    );
+
+    tracing::info!(
+        server = %server_name,
+        url = %auth_url_str,
+        "opening browser for MCP OAuth"
+    );
+    let _ = tx.send(AppMsg::McpAuthRequired {
+        server: server_name.to_string(),
+        url: auth_url_str.clone(),
+        error: String::new(),
+    });
+    // Best-effort browser open.
+    if let Err(e) = open::that(&auth_url_str) {
+        let _ = tx.send(AppMsg::McpBrowserOpenFailed {
+            server: server_name.to_string(),
+            url: auth_url_str,
+        });
+        return Err(format!("open browser: {e}. URL shown in toast above."));
+    }
+
+    // 9. Wait for the callback result (or timeout).
+    let cb = callback_handle
+        .await
+        .map_err(|e| format!("callback task failed: {e}"))?
+        .map_err(|e| format!("callback error: {e}"))?;
+
+    // 10. Exchange the auth code for tokens.
+    let token_params = [
+        ("grant_type", "authorization_code"),
+        ("code", &cb),
+        ("redirect_uri", &redirect_uri),
+        ("client_id", &client_id),
+        ("code_verifier", &code_verifier),
+    ];
+    let token_resp: serde_json::Value = client
+        .post(token_url_str)
+        .form(&token_params)
+        .send()
+        .await
+        .map_err(|e| format!("token exchange request: {e}"))?
+        .json()
+        .await
+        .map_err(|e| format!("token exchange parse: {e}"))?;
+
+    let access_token = token_resp["access_token"]
+        .as_str()
+        .ok_or_else(|| "no access_token in token response".to_string())?
+        .to_string();
+    let refresh_token = token_resp["refresh_token"].as_str().map(|s| s.to_string());
+    let expires_in = token_resp["expires_in"].as_i64();
+    let expires_at = expires_in.map(|secs| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64
+            + secs
+    });
+
+    // 11. Store tokens.
+    let store = crate::mcp::auth::McpAuthStore::load_or_default();
+    store.set(
+        server_name,
+        crate::mcp::auth::Entry {
+            tokens: Some(crate::mcp::auth::Tokens {
+                access_token,
+                refresh_token,
+                expires_at,
+                scope: oauth_cfg.scope.clone(),
+            }),
+            client_info: None,
+            server_url: Some(server_url.clone()),
+        },
+    );
+
+    tracing::info!(server = %server_name, "OAuth tokens stored, reconnecting...");
+
+    // 12. Reconnect the server.
+    svc.connect(server_name, cfg).await;
+    Ok(())
 }
 
 fn submit_direct_tool_input(app: &mut App, raw: &str) -> bool {
@@ -3756,6 +4059,7 @@ mod tests {
             cwd: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
             should_quit: false,
             msg_tx: None,
+            mcp_tools_dirty: true,
             input_prompt_area: None,
             tui_selection: None,
             selected_text: None,

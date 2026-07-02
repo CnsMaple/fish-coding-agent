@@ -123,6 +123,9 @@ pub fn dispatch(app: &mut App, cmd: &str, arg: &str) {
         }
         "skill" => dispatch_skill(app, arg, ""),
         "mcp" => open_mcp(app, arg),
+        "mcp-auth" => open_mcp_auth(app, arg),
+        "mcp-logout" => open_mcp_logout(app, arg),
+        "mcp-debug" => open_mcp_debug(app, arg),
         _ => {
             app.notify(ToastLevel::Fail, format!("unknown command: /{cmd}"));
         }
@@ -202,6 +205,13 @@ fn open_mcp(app: &mut App, arg: &str) {
     let name = arg.trim();
     if name.is_empty() {
         let names = crate::mcp::builtin_names();
+        if names.is_empty() {
+            app.notify(
+                ToastLevel::Warn,
+                "no MCP servers configured. add to config.json `mcp` section, then restart.",
+            );
+            return;
+        }
         let preview = names
             .iter()
             .take(8)
@@ -218,10 +228,26 @@ fn open_mcp(app: &mut App, arg: &str) {
         return;
     }
     match crate::mcp::find(name) {
-        Some(server) => {
+        Some(_server_name) => {
+            let status_label = if let Some(svc) = crate::mcp::McpRegistry::current() {
+                let s = svc.status_of_sync(name).ok();
+                s.as_ref()
+                    .map(|st| {
+                        let base = format!("{} — {}", st.icon(), st.label());
+                        match st {
+                            crate::mcp::McpStatus::Failed { error } => {
+                                format!("{base}: {error}")
+                            }
+                            _ => base,
+                        }
+                    })
+                    .unwrap_or_else(|| "configured".to_string())
+            } else {
+                "configured".to_string()
+            };
             app.notify(
                 ToastLevel::Ok,
-                format!("mcp '{}' ready: {}", server.name, server.description),
+                format!("mcp '{name}' is {status_label}"),
             );
         }
         None => {
@@ -232,6 +258,87 @@ fn open_mcp(app: &mut App, arg: &str) {
             );
         }
     }
+}
+
+/// `/mcp-auth <name>` — start the OAuth flow for a remote MCP
+/// server. Opens a local callback server, constructs the
+/// authorization URL, opens the browser, and waits for the
+/// redirect. On success, stores the token and re-connects the
+/// server.
+fn open_mcp_auth(app: &mut App, arg: &str) {
+    let name = arg.trim();
+    if name.is_empty() {
+        app.notify(ToastLevel::Fail, "usage: /mcp-auth <server-name>");
+        return;
+    }
+    if crate::mcp::McpRegistry::current().is_none() {
+        app.notify(ToastLevel::Fail, "mcp service not initialised");
+        return;
+    }
+    // Delegate to the async handler via the event channel.
+    let tx = match &app.msg_tx {
+        Some(tx) => tx.clone(),
+        None => {
+            app.notify(ToastLevel::Fail, "no event channel available");
+            return;
+        }
+    };
+    let _ = tx.send(crate::event::AppMsg::McpStartAuth { server: name.to_string() });
+    app.notify(
+        ToastLevel::Info,
+        format!("starting OAuth for `{name}`... (see next notification)"),
+    );
+}
+
+/// `/mcp-debug <name>` — print diagnostics for a server: status,
+/// auth state, tool count, and config preview.
+fn open_mcp_debug(app: &mut App, arg: &str) {
+    let name = arg.trim();
+    if name.is_empty() {
+        app.notify(ToastLevel::Fail, "usage: /mcp-debug <server-name>");
+        return;
+    }
+    let Some(svc) = crate::mcp::McpRegistry::current() else {
+        app.notify(ToastLevel::Fail, "mcp service not initialised");
+        return;
+    };
+    let status = svc.status_of_sync(name).ok();
+    let auth = crate::mcp::auth::McpAuthStore::load_or_default();
+    let has_tokens = auth.get(name).is_some();
+    let snap = svc.try_snapshot().ok();
+    let tool_count = snap
+        .as_ref()
+        .map(|s| s.tools.values().filter(|t| t.server == name).count())
+        .unwrap_or(0);
+    let mut lines = vec![format!("MCP server: {name}")];
+    let status_str = match status.as_ref() {
+        Some(crate::mcp::McpStatus::Failed { error }) => {
+            format!("✗ failed: {error}")
+        }
+        Some(s) => format!("{} {}", s.icon(), s.label()),
+        None => "unknown".to_string(),
+    };
+    lines.push(format!("  status: {status_str}"));
+    lines.push(format!("  has stored tokens: {has_tokens}"));
+    lines.push(format!("  tool count: {tool_count}"));
+    if let Some(crate::mcp::McpStatus::Connected) = status.as_ref() {
+        lines.push("  ✓ ready to receive tool calls".to_string());
+    }
+    app.notify(ToastLevel::Info, lines.join(" | "));
+}
+
+/// `/mcp-logout <name>` — remove stored OAuth tokens for a
+/// remote MCP server.
+fn open_mcp_logout(app: &mut App, arg: &str) {
+    let name = arg.trim();
+    if name.is_empty() {
+        app.notify(ToastLevel::Fail, "usage: /mcp-logout <server-name>");
+        return;
+    }
+    // Remove from auth store.
+    let auth = crate::mcp::auth::McpAuthStore::load_or_default();
+    auth.remove(name);
+    app.notify(ToastLevel::Ok, format!("OAuth tokens removed for `{name}`"));
 }
 
 fn retry_last_prompt(app: &mut App) {

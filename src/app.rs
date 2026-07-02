@@ -44,4 +44,13 @@ impl App {
         self.notify(ToastLevel::Fail, msg);
         false
     }
+
+    /// Mark the LLM tool spec cache as dirty. The next chat request
+    /// will re-read `tools::openai_tool_specs` / `anthropic_tool_specs`,
+    /// picking up any new MCP tool definitions. The OpenAI / Anthropic
+    /// provider calls are stateless w.r.t. the tool list, so a
+    /// single bool is enough.
+    pub fn invalidate_tool_specs(&mut self) {
+        self.mcp_tools_dirty = true;
+    }
 }
