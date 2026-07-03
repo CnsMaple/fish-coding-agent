@@ -360,20 +360,37 @@ fn apply_selection_style(buf: &mut Buffer, sel: &Selection) {
     // Stream selection: from start through end, flowing across line breaks.
     let start = sel.start;
     let end = sel.end;
-    let y_min = start.1.min(end.1);
-    let y_max = start.1.max(end.1);
     let width = buf.area().width;
-    for y in y_min..=y_max {
-        let row_sx = if y == start.1 { start.0 } else { 0 };
-        let row_ex = if y == end.1 {
-            end.0.min(width.saturating_sub(1))
-        } else {
-            width.saturating_sub(1)
-        };
-        for x in row_sx..=row_ex {
-            if let Some(cell) = buf.cell_mut((x, y)) {
+    let w = width.saturating_sub(1);
+    if start.1 == end.1 {
+        let x_min = start.0.min(end.0);
+        let x_max = start.0.max(end.0);
+        for x in x_min..=x_max {
+            if let Some(cell) = buf.cell_mut((x, start.1)) {
                 let new_style = cell.style().add_modifier(Modifier::REVERSED);
                 cell.set_style(new_style);
+            }
+        }
+    } else if start.1 < end.1 {
+        for y in start.1..=end.1 {
+            let row_sx = if y == start.1 { start.0 } else { 0 };
+            let row_ex = if y == end.1 { end.0.min(w) } else { w };
+            for x in row_sx..=row_ex {
+                if let Some(cell) = buf.cell_mut((x, y)) {
+                    let new_style = cell.style().add_modifier(Modifier::REVERSED);
+                    cell.set_style(new_style);
+                }
+            }
+        }
+    } else {
+        for y in end.1..=start.1 {
+            let row_sx = if y == end.1 { end.0 } else { 0 };
+            let row_ex = if y == start.1 { start.0.min(w) } else { w };
+            for x in row_sx..=row_ex {
+                if let Some(cell) = buf.cell_mut((x, y)) {
+                    let new_style = cell.style().add_modifier(Modifier::REVERSED);
+                    cell.set_style(new_style);
+                }
             }
         }
     }
@@ -386,24 +403,43 @@ fn apply_selection_style(buf: &mut Buffer, sel: &Selection) {
 pub fn extract_selection_text(buf: &Buffer, sel: &Selection) -> String {
     let start = sel.start;
     let end = sel.end;
-    let y_min = start.1.min(end.1);
-    let y_max = start.1.max(end.1);
     let width = buf.area().width;
+    let w = width.saturating_sub(1);
     let mut lines: Vec<String> = Vec::new();
-    for y in y_min..=y_max {
-        let row_sx = if y == start.1 { start.0 } else { 0 };
-        let row_ex = if y == end.1 {
-            end.0.min(width.saturating_sub(1))
-        } else {
-            width.saturating_sub(1)
-        };
+    if start.1 == end.1 {
+        let x_min = start.0.min(end.0);
+        let x_max = start.0.max(end.0);
         let mut line = String::new();
-        for x in row_sx..=row_ex {
-            if let Some(cell) = buf.cell((x, y)) {
+        for x in x_min..=x_max {
+            if let Some(cell) = buf.cell((x, start.1)) {
                 line.push_str(cell.symbol());
             }
         }
         lines.push(line.trim_end().to_string());
+    } else if start.1 < end.1 {
+        for y in start.1..=end.1 {
+            let row_sx = if y == start.1 { start.0 } else { 0 };
+            let row_ex = if y == end.1 { end.0.min(w) } else { w };
+            let mut line = String::new();
+            for x in row_sx..=row_ex {
+                if let Some(cell) = buf.cell((x, y)) {
+                    line.push_str(cell.symbol());
+                }
+            }
+            lines.push(line.trim_end().to_string());
+        }
+    } else {
+        for y in end.1..=start.1 {
+            let row_sx = if y == end.1 { end.0 } else { 0 };
+            let row_ex = if y == start.1 { start.0.min(w) } else { w };
+            let mut line = String::new();
+            for x in row_sx..=row_ex {
+                if let Some(cell) = buf.cell((x, y)) {
+                    line.push_str(cell.symbol());
+                }
+            }
+            lines.push(line.trim_end().to_string());
+        }
     }
     while lines.len() > 1 && lines.last().unwrap().is_empty() {
         lines.pop();

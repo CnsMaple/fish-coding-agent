@@ -247,7 +247,7 @@ where
                     Event::Paste(text) => {
                         handle_paste(text, app).await;
                     }
-                    Event::Resize(_, _) => {}
+Event::Resize(_, _) => {}
                     _ => {}
                 }
             }
@@ -1765,7 +1765,7 @@ fn handle_mouse(m: MouseEvent, app: &mut App) {
         }
     }
 
-    match m.kind {
+match m.kind {
         MouseEventKind::Down(MouseButton::Left) => {
             // Clear any prior selection but DO NOT create a new one yet.
             // We only commit a TUI selection when the user actually drags,
@@ -1837,8 +1837,22 @@ fn handle_mouse(m: MouseEvent, app: &mut App) {
                 d.active = false;
             }
         }
+        MouseEventKind::Moved => {
+            if app.tui_drag_start.is_some()
+                || app.tui_selection.map_or(false, |s| s.active)
+            {
+                app.tui_selection = None;
+                app.selected_text = None;
+                app.tui_drag_start = None;
+                if let Ok(mut d) = DRAG.lock() {
+                    d.active = false;
+                }
+            }
+        }
         _ => {}
     }
+
+    app.last_mouse_event = Some(Instant::now());
 }
 
 pub fn cycle_sidebar_forward(app: &mut App) {

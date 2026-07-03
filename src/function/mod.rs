@@ -1384,6 +1384,9 @@ pub struct App {
     /// Lets us avoid creating a single-cell "selection" for an
     /// ordinary click with no drag movement.
     pub tui_drag_start: Option<(u16, u16)>,
+    /// Timestamp of the last mouse event. Used to detect stale drags
+    /// when the mouse leaves and re-enters the terminal.
+    pub last_mouse_event: Option<Instant>,
     /// Path to the persisted model-cache JSON file. Computed from
     /// `config_path` during construction.
     pub model_cache_path: std::path::PathBuf,
@@ -1564,6 +1567,7 @@ impl App {
             tui_selection: None,
             selected_text: None,
             tui_drag_start: None,
+            last_mouse_event: None,
             input_cursor_screen: None,
             function_panel_cursor: None,
             paste_blocks: VecDeque::new(),
@@ -2241,6 +2245,7 @@ mod tests {
             tui_selection: None,
             selected_text: None,
             tui_drag_start: None,
+            last_mouse_event: None,
             model_cache_path: cache_file,
             thinking_toggle_rows: Vec::new(),
             tool_toggle_rows: Vec::new(),
