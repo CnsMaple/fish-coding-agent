@@ -1623,7 +1623,10 @@ impl App {
         // default) inside `StatusBar::recompute_compact_pct`.
     }
 
-    /// Push a toast; force-show the panel when a notification arrives.
+    /// Push a toast; force-show the panel only for `Fail`-level
+    /// notifications. All other levels increment the unread count
+    /// without popping open the panel so the user sees the badge
+    /// in the status line instead.
     /// The Notifications tab is created on-demand — when no other tab
     /// is already open, it also becomes the active tab.
     pub fn notify(
@@ -1648,7 +1651,9 @@ impl App {
             }
         }
         if !self.function_visible {
-            self.function_visible = true;
+            if level == crate::function::notifications::ToastLevel::Fail {
+                self.function_visible = true;
+            }
             self.pending_events = self.pending_events.saturating_add(1);
         }
         self.notifications.push(level, text);

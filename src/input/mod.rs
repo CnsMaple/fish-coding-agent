@@ -409,28 +409,23 @@ fn byte_at_display_col(s: &str, col: usize) -> usize {
 
 /// Renders the input area. The status line (model | think | hit) lives
 /// in the input block's title, not inside the box, so the body is just
-/// the prompt row.
+/// the prompt row. When there are unread notifications while the
+/// function panel is hidden, a small badge `(!N)` is prepended to the
+/// status line instead of replacing it.
 pub fn render(area: Rect, buf: &mut Buffer, app: &mut crate::app::App) {
-    // Pick the title content: the unread-banner wins when the function
-    // panel is hidden but has pending important toasts; otherwise the
-    // regular status line.
-    let show_banner = !app.function_visible && app.pending_events > 0;
-    let mut title: Line = if show_banner {
-        Line::from(vec![
-            Span::styled("[", Theme::dim()),
+    let mode = input_mode_preview(&app.input.buffer, &app.status.mode);
+    let mut title = app.status.render_line_with_mode(mode);
+    // Show a compact unread badge when the panel is hidden and there
+    // are pending toasts, rather than replacing the entire status line.
+    if !app.function_visible && app.pending_events > 0 {
+        title.spans.insert(
+            0,
             Span::styled(
-                format!(
-                    "{} unread in function panel - press Ctrl+N to view",
-                    app.pending_events
-                ),
+                format!("(!{}) ", app.pending_events),
                 Theme::status_warn(),
             ),
-            Span::styled("]", Theme::dim()),
-        ])
-    } else {
-        let mode = input_mode_preview(&app.input.buffer, &app.status.mode);
-        app.status.render_line_with_mode(mode)
-    };
+        );
+    }
     // One space of padding on each side so the title text does not touch
     // the left/right border lines.
     title.spans.insert(0, Span::raw(" "));

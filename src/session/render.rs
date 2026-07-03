@@ -303,6 +303,12 @@ pub fn build_message_lines(session: &Session, msg_idx: usize, width: usize) -> V
     enum RenderItemKind {
         Thinking {
             content: String,
+            /// `true` once a non-thinking content block has begun
+            /// after this segment. Closed segments render with the
+            /// "done" background color; open segments use the
+            /// "streaming" color while the message is still in
+            /// flight.
+            closed: bool,
             /// Snapshot of `m.tool_results.len()` when this segment
             /// was created. Used by the sort tiebreaker below to
             /// distinguish pre-tool thinking (renders before its
@@ -331,6 +337,7 @@ pub fn build_message_lines(session: &Session, msg_idx: usize, width: usize) -> V
                     offset,
                     kind: RenderItemKind::Thinking {
                         content: seg.content.clone(),
+                        closed: seg.closed,
                         tool_results_len_at_open: seg.tool_results_len_at_open,
                     },
                 });
@@ -416,17 +423,19 @@ pub fn build_message_lines(session: &Session, msg_idx: usize, width: usize) -> V
         }
 
         match item.kind {
-            RenderItemKind::Thinking { content, .. } => {
+            RenderItemKind::Thinking {
+                content, closed, ..
+            } => {
                 let visible = match session.display {
                     ThinkingDisplay::Show => m.thinking_visible,
                     ThinkingDisplay::ShowWhileStreaming => m.streaming || m.thinking_visible,
                     _ => false,
                 };
                 let colors = active_colors();
-                let bg = if m.streaming {
-                    colors.thinking_streaming_bg
-                } else {
+                let bg = if closed || !m.streaming {
                     colors.thinking_done_bg
+                } else {
+                    colors.thinking_streaming_bg
                 };
                 ensure_gap_before_block(&mut msg_lines);
                 let rows = build_thinking_block_rows(

@@ -54,6 +54,9 @@ pub enum AppMsg {
     ChatContentBlockStart(String),
     /// Provider-level debug event, shown only in notifications.
     ChatDebug(String),
+    /// Stream-level warning event (e.g. retry), shown in notifications
+    /// at Warn level so it is more visible than Info-level debug events.
+    ChatWarn(String),
     /// A structured tool result arrived, to be rendered as a collapsible block.
     ChatToolResult {
         name: String,
@@ -781,6 +784,9 @@ fn handle_msg(msg: AppMsg, app: &mut App) {
         }
         AppMsg::ChatDebug(s) => {
             app.notify(crate::function::notifications::ToastLevel::Info, s);
+        }
+        AppMsg::ChatWarn(s) => {
+            app.notify(crate::function::notifications::ToastLevel::Warn, s);
         }
         AppMsg::ChatToolResult {
             name,

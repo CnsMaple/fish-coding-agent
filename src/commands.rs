@@ -4,6 +4,7 @@ use crate::function::notifications::ToastLevel;
 use crate::function::SidebarTab;
 use crate::providers::{ChatMessage, ChatRequest, ToolCall};
 use crate::session::{Message, Role};
+use std::time::Duration;
 
 pub fn dispatch(app: &mut App, cmd: &str, arg: &str) {
     match cmd {
@@ -971,6 +972,7 @@ pub async fn run_chat_stream(
         }
     };
     let mut stream_retries = 0u32;
+    let retry_delays = [3u64, 12, 60];
     loop {
         if *cancel_rx.borrow() {
             // Silent exit. We do NOT send `ChatDone` / `ChatError`
@@ -1058,26 +1060,43 @@ pub async fn run_chat_stream(
         if !stream_done {
             let err = match call.await {
                 Ok(Ok(())) => None,
-                Ok(Err(e)) => Some(format!("{e}")),
-                Err(e) => Some(format!("chat task failed: {e}")),
+                // {e:#} shows the full anyhow error chain (surface
+                // message + underlying cause like reqwest transport
+                // errors) so retry/failure notifications carry enough
+                // context to diagnose API or network issues.
+                Ok(Err(e)) => Some(format!("{e:#}")),
+                Err(e) => Some(format!("chat task failed: {e:#}")),
             };
             if let Some(e) = err {
                 stream_retries += 1;
                 if stream_retries >= 3 {
+                    // Show the full error chain in the final failure so
+                    // the user sees both the surface message and its
+                    // underlying cause (e.g. reqwest transport errors).
                     send_msg(crate::event::AppMsg::ChatError { seq, error: e });
                     return;
                 }
-                send_msg(crate::event::AppMsg::ChatDebug(format!(
-                    "stream retry {stream_retries}/3: {e}"
+                let delay = retry_delays[(stream_retries - 1) as usize];
+                // Use ChatWarn (Warn level) instead of ChatDebug
+                // (Info level) so retry notifications are more visible
+                // in the notification list. Use {e:#} to show the full
+                // error chain including the underlying cause.
+                send_msg(crate::event::AppMsg::ChatWarn(format!(
+                    "stream retry {stream_retries}/3 ({delay}s): {e:#}"
                 )));
                 // If an assistant message was pushed to req (we got tool calls),
                 // pop it so the retry starts clean.
                 if !tool_calls.is_empty() {
                     req.messages.pop(); // assistant
                 }
+                tokio::time::sleep(Duration::from_secs(delay)).await;
                 continue;
             }
         }
+        // Stream completed (either via Done event or graceful EOF
+        // without error). Reset the retry counter so a subsequent
+        // failure starts from 1/3, not from the stale count.
+        stream_retries = 0;
 
         if tool_calls.is_empty() && !assistant_content.is_empty() {
             let parsed = parse_text_tool_calls(&assistant_content);
