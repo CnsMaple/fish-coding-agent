@@ -244,6 +244,21 @@ impl Provider for CursorProvider {
             &tx,
             format!("request start model={} url={}", req.model, url),
         );
+        // Check for image attachments that Cursor's protocol does not support.
+        let image_count: usize = req
+            .messages
+            .iter()
+            .flat_map(|m| m.content_parts.iter())
+            .filter(|p| matches!(p, super::ContentPart::Image(_)))
+            .count();
+        if image_count > 0 {
+            cursor_debug(
+                &tx,
+                format!(
+                    "dropping {image_count} image(s): cursor protocol has no image attachment field"
+                ),
+            );
+        }
         let (request, mut blob_store) = build_request(req);
         let bytes = request.encode_to_vec();
         let (body_tx, body_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(16);

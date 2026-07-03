@@ -5,6 +5,27 @@ pub mod store;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImageAttachment {
+    /// Absolute path to the saved image file on disk.
+    pub asset_path: PathBuf,
+    /// MIME type, e.g. "image/png", "image/jpeg".
+    pub media_type: String,
+    /// File size in bytes.
+    pub byte_size: u64,
+    /// Image width in pixels (0 if unknown).
+    pub width: u32,
+    /// Image height in pixels (0 if unknown).
+    pub height: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ContentPart {
+    Text(String),
+    Image(ImageAttachment),
+}
 
 /// Width-keyed cached line count. Used to cache the rendered line count
 /// of message content (markdown + wrapping) per viewport width, since the
@@ -123,6 +144,12 @@ pub struct Message {
     /// prompt assembly is needed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skill_ref: Option<SkillRef>,
+    /// Image attachments (screenshots etc.) pasted with this message.
+    /// Stored as references to disk-backed files; the raw bytes are not
+    /// inlined in the JSONL. Empty vec for plain-text messages.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<ImageAttachment>,
+
     /// Pre-computed line count (content.split('\n').count()).
     /// Updated when content changes to avoid re-scanning on every frame.
     /// `u32` to support 10M+ token sessions.
@@ -158,6 +185,7 @@ impl Message {
             thinking_segments: Vec::new(),
             thinking_visible: false,
             tool_results: Vec::new(),
+            attachments: Vec::new(),
             ts: Utc::now(),
             streaming: false,
             display_cursor: len, // non-streaming → fully visible
@@ -500,6 +528,7 @@ impl Session {
                 cached_line_count_visible: None,
                 cached_line_count_collapsed: None,
             }],
+            attachments: Vec::new(),
             ts: Utc::now(),
             streaming: false,
             display_cursor: 0,
@@ -795,6 +824,12 @@ impl Session {
             let content_lines = render_cached_content_lines(m, width);
             n += content_lines;
 
+            // Attachment blocks: each contributes its rendered dim rows
+            // plus the trailing blank that `build_message_lines` pushes.
+            if !m.attachments.is_empty() {
+                n += crate::session::render::attachment_block_line_count(&m.attachments);
+            }
+
             // Thinking blocks: each contributes its rendered line count
             // plus the trailing blank that `build_message_lines` pushes
             // immediately after it.
@@ -880,13 +915,14 @@ impl Session {
 
             // Leading gap: `ensure_gap_before_block` in
             // `build_message_lines` always inserts a blank line
-            // immediately before the first block (thinking or tool)
-            // of a message — both when the content is empty (the
-            // message vec starts empty) and when it is non-empty
-            // (the content's final line is non-empty, so the gap is
-            // added on top). Without this +1, the count is off by
-            // 1 per message that has at least one block.
-            if thinking_blocks > 0 || tool_blocks > 0 {
+            // immediately before the first block (thinking, tool,
+            // or attachment) of a message — both when the content
+            // is empty (the message vec starts empty) and when it
+            // is non-empty (the content's final line is non-empty,
+            // so the gap is added on top). Without this +1, the
+            // count is off by 1 per message that has at least one
+            // block.
+            if !m.attachments.is_empty() || thinking_blocks > 0 || tool_blocks > 0 {
                 n += 1;
             }
 
@@ -975,6 +1011,9 @@ impl Session {
             }
             let content_lines = read_cached_content_lines(m, 120);
             n += content_lines;
+            if !m.attachments.is_empty() {
+                n += crate::session::render::attachment_block_line_count(&m.attachments);
+            }
             let mut thinking_blocks: u32 = 0;
             let show = m.role == Role::Assistant
                 && crate::session::render::message_has_thinking(m)
@@ -1015,7 +1054,7 @@ impl Session {
                     tool_blocks += 1;
                 }
             }
-            if thinking_blocks > 0 || tool_blocks > 0 {
+            if !m.attachments.is_empty() || thinking_blocks > 0 || tool_blocks > 0 {
                 n += 1; // leading gap
             }
             if m.role == Role::User {

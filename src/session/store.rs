@@ -70,8 +70,9 @@ pub fn title_from_prompt(prompt: &str) -> String {
 
 pub fn save(id: &str, title: &str, cwd: &Path, session: &Session) -> Result<()> {
     let dir = sessions_dir()?;
-    std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
-    let path = session_path_in(&dir, id);
+    let session_dir = dir.join(sanitize_id(id));
+    std::fs::create_dir_all(&session_dir).with_context(|| format!("create {}", session_dir.display()))?;
+    let path = session_dir.join("session.json");
     let now = Utc::now();
     let created_at = load(id).map(|s| s.created_at).unwrap_or(now);
     let stored = StoredSession {
@@ -94,10 +95,19 @@ pub fn load(id: &str) -> Result<StoredSession> {
     serde_json::from_str(&raw).with_context(|| format!("parse {}", path.display()))
 }
 
+pub fn assets_dir(id: &str) -> Result<PathBuf> {
+    Ok(sessions_dir()?.join(sanitize_id(id)).join("assets"))
+}
+
 pub fn delete(id: &str) -> Result<()> {
-    let path = session_path(id)?;
-    if path.exists() {
-        std::fs::remove_file(&path).with_context(|| format!("delete {}", path.display()))?;
+    let dir = sessions_dir()?.join(sanitize_id(id));
+    if dir.exists() {
+        std::fs::remove_dir_all(&dir).with_context(|| format!("delete {}", dir.display()))?;
+    } else {
+        let path = session_path(id)?;
+        if path.exists() {
+            std::fs::remove_file(&path).with_context(|| format!("delete {}", path.display()))?;
+        }
     }
     Ok(())
 }
@@ -138,8 +148,34 @@ pub fn list(scope_cwd: Option<&Path>) -> Result<Vec<SessionSummary>> {
     let mut out = Vec::new();
     for entry in std::fs::read_dir(&dir).with_context(|| format!("read {}", dir.display()))? {
         let entry = entry?;
-        let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) != Some("json") {
+        let session_dir = entry.path();
+        if !session_dir.is_dir() {
+            // Legacy flat session files may still exist
+            if session_dir.extension().and_then(|s| s.to_str()) == Some("json") {
+                let Ok(raw) = std::fs::read_to_string(&session_dir) else {
+                    continue;
+                };
+                let Ok(stored) = serde_json::from_str::<StoredSession>(&raw) else {
+                    continue;
+                };
+                if let Some(scope) = &scope {
+                    if normalize_path_string(&stored.cwd) != *scope {
+                        continue;
+                    }
+                }
+                out.push(SessionSummary {
+                    id: stored.id,
+                    title: stored.title,
+                    cwd: stored.cwd,
+                    updated_at: stored.updated_at,
+                    message_count: stored.messages.len(),
+                });
+                continue;
+            }
+            continue;
+        }
+        let path = session_dir.join("session.json");
+        if !path.exists() {
             continue;
         }
         let Ok(raw) = std::fs::read_to_string(&path) else {
@@ -167,8 +203,9 @@ pub fn list(scope_cwd: Option<&Path>) -> Result<Vec<SessionSummary>> {
 
 fn write_stored(stored: &StoredSession) -> Result<()> {
     let dir = sessions_dir()?;
-    std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
-    let path = session_path_in(&dir, &stored.id);
+    let session_dir = dir.join(sanitize_id(&stored.id));
+    std::fs::create_dir_all(&session_dir).with_context(|| format!("create {}", session_dir.display()))?;
+    let path = session_dir.join("session.json");
     let raw = serde_json::to_string_pretty(stored)?;
     std::fs::write(&path, raw).with_context(|| format!("write {}", path.display()))?;
     Ok(())
@@ -179,7 +216,7 @@ fn session_path(id: &str) -> Result<PathBuf> {
 }
 
 fn session_path_in(dir: &Path, id: &str) -> PathBuf {
-    dir.join(format!("{}.json", sanitize_id(id)))
+    dir.join(sanitize_id(id)).join("session.json")
 }
 
 fn sanitize_id(id: &str) -> String {

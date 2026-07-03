@@ -72,6 +72,8 @@ impl ChatEvent {
     }
 }
 
+pub use crate::session::{ContentPart, ImageAttachment};
+
 #[derive(Debug)]
 pub struct ChatRequest {
     pub model: String,
@@ -84,6 +86,7 @@ pub struct ChatRequest {
 pub struct ChatMessage {
     pub role: String,
     pub content: String,
+    pub content_parts: Vec<ContentPart>,
     pub tool_call_id: Option<String>,
     pub tool_calls: Vec<ToolCall>,
 }

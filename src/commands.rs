@@ -359,7 +359,7 @@ fn retry_last_prompt(app: &mut App) {
     app.session.messages.truncate(idx);
     app.session.invalidate_message_cache_from(idx);
     app.session.invalidate_layout_cache();
-    crate::commands::send_chat(app, prompt);
+    crate::commands::send_chat(app, prompt, Vec::new());
 }
 
 fn continue_response(app: &mut App, arg: &str) {
@@ -378,7 +378,7 @@ fn continue_response(app: &mut App, arg: &str) {
     } else {
         format!("Continue from where you left off.\n\n{arg}")
     };
-    crate::commands::send_chat(app, prompt);
+    crate::commands::send_chat(app, prompt, Vec::new());
     // Remove the user message from session (kept in API request)
     if app.inflight.is_some() && app.session.messages.len() >= 2 {
         let idx = app.session.messages.len() - 2;
@@ -767,8 +767,15 @@ its result.
         ),
     }
 }
-pub fn send_chat(app: &mut App, user_text: String) {
-    send_message(app, Message::new(Role::User, user_text));
+pub fn send_chat(app: &mut App, user_text: String, image_parts: Vec<crate::session::ContentPart>) {
+    let mut msg = Message::new(Role::User, user_text);
+    // Extract ImageAttachment from ContentPart to store on the Message.
+    for part in &image_parts {
+        if let crate::session::ContentPart::Image(att) = part {
+            msg.attachments.push(att.clone());
+        }
+    }
+    send_message(app, msg);
 }
 
 /// Dispatch a pre-built user message to the active provider. Used by
@@ -844,6 +851,7 @@ pub fn send_message(app: &mut App, user_msg: Message) {
         thinking_segments: Vec::new(),
         thinking_visible: false,
         tool_results: Vec::new(),
+        attachments: Vec::new(),
         display_cursor: 0,
         line_count: 0,
         cached_content_line_count: None,
@@ -871,6 +879,7 @@ pub fn send_message(app: &mut App, user_msg: Message) {
                 Role::System => "user".to_string(),
             },
             content: m.content.clone(),
+            content_parts: Vec::new(),
             tool_call_id: None,
             tool_calls: Vec::new(),
         })
@@ -1092,6 +1101,7 @@ pub async fn run_chat_stream(
         req.messages.push(ChatMessage {
             role: "assistant".to_string(),
             content: assistant_content,
+            content_parts: Vec::new(),
             tool_call_id: None,
             tool_calls: tool_calls.clone(),
         });
@@ -1114,6 +1124,7 @@ pub async fn run_chat_stream(
             req.messages.push(ChatMessage {
                 role: "tool".to_string(),
                 content: result.clone(),
+                content_parts: Vec::new(),
                 tool_call_id: Some(call.id.clone()),
                 tool_calls: Vec::new(),
             });
@@ -1189,6 +1200,7 @@ pub async fn run_compaction_stream(
         messages: vec![crate::providers::ChatMessage {
             role: "user".to_string(),
             content: prompt,
+            content_parts: Vec::new(),
             tool_call_id: None,
             tool_calls: Vec::new(),
         }],

@@ -817,6 +817,7 @@ pub fn toast_level_label(l: ToastLevel) -> &'static str {
 pub fn sidebar_tab_name(t: &SidebarTab) -> &'static str {
     match t {
         SidebarTab::Notifications => "notifications",
+        SidebarTab::PastePreview(_) => "paste",
         SidebarTab::Completion(_) => "completion",
         SidebarTab::Settings(_) => "settings",
         SidebarTab::ModelPicker(_) => "model picker",

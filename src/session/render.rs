@@ -153,6 +153,10 @@ fn count_lines_estimate(session: &Session) -> u32 {
     for m in &session.messages {
         let content_lines = read_cached_content_count(m);
         n += content_lines;
+        // Attachment blocks: rough estimate.
+        if !m.attachments.is_empty() {
+            n += attachment_block_line_count(&m.attachments);
+        }
         let mut thinking_blocks: u32 = 0;
         if message_has_thinking(m) {
             n += 1; // toggle line
@@ -164,7 +168,7 @@ fn count_lines_estimate(session: &Session) -> u32 {
         }
         let tool_blocks = m.tool_results.len() as u32;
         n += tool_blocks * 2; // rough per-block estimate + 1 trailing blank
-        if thinking_blocks > 0 || tool_blocks > 0 {
+        if !m.attachments.is_empty() || thinking_blocks > 0 || tool_blocks > 0 {
             n += 1; // leading gap
         }
         if m.role == super::Role::User {
@@ -277,6 +281,14 @@ pub fn build_message_lines(session: &Session, msg_idx: usize, width: usize) -> V
     let mut msg_lines: Vec<Line<'static>> = Vec::new();
     if let Some(skill_ref) = &m.skill_ref {
         let rows = build_skill_block_rows(skill_ref, width);
+        push_block_rows(&mut msg_lines, rows);
+        msg_lines.push(Line::from(""));
+    }
+
+    // Render image attachments as dim placeholder blocks.
+    if !m.attachments.is_empty() {
+        ensure_gap_before_block(&mut msg_lines);
+        let rows = build_attachment_block_rows(&m.attachments, width);
         push_block_rows(&mut msg_lines, rows);
         msg_lines.push(Line::from(""));
     }
@@ -552,6 +564,11 @@ fn build_lines_viewport(
         let mut thinking_blocks: u32 = 0;
         let mut tool_blocks: u32 = 0;
 
+        // Attachment blocks.
+        if !m.attachments.is_empty() {
+            msg_total += attachment_block_line_count(&m.attachments);
+        }
+
         if m.role == super::Role::Assistant
             && message_has_thinking(m)
             && session.display != crate::config::ThinkingDisplay::Hide
@@ -592,7 +609,7 @@ fn build_lines_viewport(
                 tool_blocks += 1;
             }
         }
-        if thinking_blocks > 0 || tool_blocks > 0 {
+        if !m.attachments.is_empty() || thinking_blocks > 0 || tool_blocks > 0 {
             msg_total += 1; // leading gap
         }
         if m.role == super::Role::User {
@@ -1067,6 +1084,57 @@ pub fn skill_block_line_count(skill: &SkillRef, _width: usize) -> u32 {
     rows += 1; // "context: ..."
     rows += 1; // trailing blank after the block
     rows
+}
+
+/// Build dim placeholder rows for pasted image attachments.
+/// Each image gets one row: `[image #K] png 1024x768 234KB`.
+fn build_attachment_block_rows(
+    attachments: &[super::ImageAttachment],
+    _width: usize,
+) -> Vec<Line<'static>> {
+    let mut rows = Vec::new();
+    // Top border
+    rows.push(Line::from(Span::styled(
+        "┌ images ────────────────────────────────────────────────",
+        Style::default().dim(),
+    )));
+    for (i, att) in attachments.iter().enumerate() {
+        let size_kb = (att.byte_size + 512) / 1024;
+        let label = if att.width > 0 && att.height > 0 {
+            format!(
+                "  [image #{}] {} {}x{} · {}KB",
+                i + 1,
+                att.media_type,
+                att.width,
+                att.height,
+                size_kb
+            )
+        } else {
+            format!(
+                "  [image #{}] {} · {}KB",
+                i + 1,
+                att.media_type,
+                size_kb
+            )
+        };
+        rows.push(Line::from(Span::styled(label, Style::default().dim())));
+    }
+    // Bottom border
+    rows.push(Line::from(Span::styled(
+        "└────────────────────────────────────────────────────────",
+        Style::default().dim(),
+    )));
+    rows
+}
+
+/// Number of rendered lines consumed by attachment blocks +
+/// the trailing blank line that `build_message_lines` pushes.
+pub fn attachment_block_line_count(attachments: &[super::ImageAttachment]) -> u32 {
+    if attachments.is_empty() {
+        return 0;
+    }
+    // top border + bottom border + 1 row per attachment + trailing blank
+    2 + attachments.len() as u32 + 1
 }
 
 fn build_tool_block_rows(
@@ -2726,6 +2794,7 @@ mod tests {
             thinking_segments: Vec::new(),
             thinking_visible: false,
             tool_results: Vec::new(),
+            attachments: Vec::new(),
             display_cursor: usize::MAX,
             ts: chrono::Utc::now(),
             streaming: false,
@@ -3003,6 +3072,7 @@ mod tests {
                 thinking_segments: Vec::new(),
                 thinking_visible: false,
                 tool_results: Vec::new(),
+                attachments: Vec::new(),
                 display_cursor: usize::MAX,
                 ts: chrono::Utc::now(),
                 streaming: false,

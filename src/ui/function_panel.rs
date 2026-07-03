@@ -3,7 +3,7 @@ use crate::function::SidebarTab;
 use crate::theme::Theme;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::Modifier;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Tabs, Wrap};
@@ -62,6 +62,10 @@ pub fn render(area: Rect, buf: &mut Buffer, app: &mut App) {
                     SidebarTab::SessionRename(s) => render_session_rename(inner, buf, s),
                     SidebarTab::Plan(s) => render_plan(inner, buf, s),
                     SidebarTab::Ask(s) => render_ask(inner, buf, s),
+SidebarTab::PastePreview(s) => {
+                        render_paste_preview(inner, buf, s);
+                        None
+                    }
                     SidebarTab::Hotkey => {
                         render_hotkey(inner, buf);
                         None
@@ -95,6 +99,7 @@ pub fn render(area: Rect, buf: &mut Buffer, app: &mut App) {
                 SidebarTab::SessionRename(_) => "rename",
                 SidebarTab::Plan(_) => "plan",
                 SidebarTab::Ask(_) => "ask",
+                SidebarTab::PastePreview(_) => "paste",
                 SidebarTab::Hotkey => "hotkey",
             };
             if orig_idx == active_idx {
@@ -140,6 +145,10 @@ pub fn render(area: Rect, buf: &mut Buffer, app: &mut App) {
             SidebarTab::SessionRename(s) => render_session_rename(rows[1], buf, s),
             SidebarTab::Plan(s) => render_plan(rows[1], buf, s),
             SidebarTab::Ask(s) => render_ask(rows[1], buf, s),
+            SidebarTab::PastePreview(s) => {
+                render_paste_preview(rows[1], buf, s);
+                None
+            }
             SidebarTab::Hotkey => {
                 render_hotkey(rows[1], buf);
                 None
@@ -788,6 +797,82 @@ fn render_hotkey(area: Rect, buf: &mut Buffer) {
     Paragraph::new(lines)
         .wrap(Wrap { trim: false })
         .render(area, buf);
+}
+
+fn render_paste_preview(area: Rect, buf: &mut Buffer, state: &crate::function::PastePreviewState) {
+    use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+    use ratatui::text::{Line, Span};
+    use ratatui::layout::{Constraint, Direction, Layout};
+    use crate::theme::Theme;
+
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .split(area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("clipboard");
+    let inner = block.inner(rows[0]);
+    block.render(rows[0], buf);
+
+    let mut lines = Vec::new();
+
+    if let Some(ref image) = state.image {
+        let size_kb = (image.byte_size + 512) / 1024;
+        let dim = if image.width > 0 && image.height > 0 {
+            format!("{}x{} ", image.width, image.height)
+        } else {
+            String::new()
+        };
+        lines.push(Line::from(Span::styled(
+            format!("image {} {dim}· {size_kb}KB", image.media_type),
+            Theme::bold(),
+        )));
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "┌─ thumbnail ───────────────────────┐",
+            Style::default().dim(),
+        )));
+        lines.push(Line::from(Span::styled(
+            format!("│ {}x{} · {size_kb}KB", image.width, image.height),
+            Style::default().dim(),
+        )));
+        lines.push(Line::from(Span::styled(
+            "└────────────────────────────────────┘",
+            Style::default().dim(),
+        )));
+        lines.push(Line::from(""));
+    } else if let Some(ref text) = state.text {
+        let preview_lines: Vec<&str> = text.lines().take(5).collect();
+        let overflow = text.lines().count().saturating_sub(5);
+        for &line_str in &preview_lines {
+            lines.push(Line::from(Span::raw(line_str)));
+        }
+        if overflow > 0 {
+            lines.push(Line::from(Span::styled(
+                format!("... ({overflow} more lines, {} chars)", text.len()),
+                Style::default().dim(),
+            )));
+        } else {
+            lines.push(Line::from(Span::styled(
+                format!("{} chars", text.len()),
+                Style::default().dim(),
+            )));
+        }
+    } else {
+        lines.push(Line::from(Span::styled("clipboard is empty", Style::default().dim())));
+    }
+
+    let p = Paragraph::new(lines).wrap(Wrap { trim: false });
+    p.render(inner, buf);
+
+    // Hint row
+    let hint = Line::from(Span::styled(
+        " Enter: paste | Esc: cancel ",
+        Theme::dim(),
+    ));
+    Paragraph::new(hint).render(rows[1], buf);
 }
 
 fn render_thinking_picker(

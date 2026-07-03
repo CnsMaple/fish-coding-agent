@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use crossterm::event::{Event, EventStream, KeyEventKind, MouseButton, MouseEvent, MouseEventKind};
+use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use futures_util::StreamExt;
 use ratatui::backend::Backend;
 use ratatui::Terminal;
@@ -222,17 +222,19 @@ where
                 let Some(evt) = evt else { break; };
                 match evt? {
                     Event::Key(k) if k.kind == KeyEventKind::Press => {
-                        match try_consume_burst(k, &mut events).await {
-                            BurstResult::Paste(text) => {
-                                // Paste was fully consumed from the event stream;
-                                // no remaining chars to suppress.
-                                insert_paste_block(text, app, false);
-                            }
-                            BurstResult::Keys(keys) => {
-                                for k in keys {
-                                    handle_key(k, app).await;
-                                }
-                            }
+                        // Intercept Alt+V to open paste preview.
+                        let is_alt_v = k.modifiers.contains(KeyModifiers::ALT)
+                            && matches!(k.code, KeyCode::Char('v') | KeyCode::Char('V'));
+                        if is_alt_v {
+                            open_paste_preview(app);
+                            continue;
+                        }
+
+                        // All other key events go through handle_key directly.
+                        // Burst paste detection is removed in favor of the
+                        // explicit paste preview panel.
+                        for k in try_consume_burst(k, &mut events).await {
+                            handle_key(k, app).await;
                         }
                     }
                     Event::Mouse(m) => {
@@ -287,8 +289,129 @@ where
     Ok(())
 }
 
+/// Unified Ctrl+V / Cmd+V handler: open clipboard once, try image
+/// first, fall back to text paste.
+/// Open the paste preview sidebar tab, showing the current clipboard
+/// content (image or text) for the user to confirm before inserting.
+fn open_paste_preview(app: &mut App) {
+    use crate::function::notifications::ToastLevel;
+    use crate::session::ImageAttachment;
+    use sha2::{Digest, Sha256};
+
+    let mut state = crate::function::PastePreviewState {
+        text: None,
+        image: None,
+        image_bytes: None,
+        media_type: None,
+    };
+
+    let Ok(mut cb) = arboard::Clipboard::new() else {
+        let _ = app.notify(ToastLevel::Warn, "clipboard unavailable");
+        return;
+    };
+
+    // Try image first.
+    if let Ok(img_data) = cb.get_image() {
+        let bytes = &img_data.bytes;
+        let media_type = infer_image_type(bytes);
+        let extension = media_type.split('/').nth(1).unwrap_or("png");
+        let hash = hex::encode(Sha256::digest(bytes));
+        if let Ok(assets_dir) = crate::session::store::assets_dir(&app.session_id) {
+            let _ = std::fs::create_dir_all(&assets_dir);
+            let filename = format!("{hash}.{extension}");
+            let asset_path = assets_dir.join(&filename);
+            if !asset_path.exists() {
+                let _ = std::fs::write(&asset_path, bytes);
+            }
+            state.image = Some(ImageAttachment {
+                asset_path,
+                media_type: media_type.to_string(),
+                byte_size: bytes.len() as u64,
+                width: img_data.width as u32,
+                height: img_data.height as u32,
+            });
+            state.image_bytes = Some(bytes.to_vec());
+            state.media_type = Some(media_type.to_string());
+        }
+    }
+
+    // Fall back to text.
+    if state.image.is_none() {
+        if let Ok(text) = cb.get_text() {
+            if !text.is_empty() {
+                state.text = Some(text);
+            }
+        }
+    }
+
+    if state.text.is_none() && state.image.is_none() {
+        let _ = app.notify(ToastLevel::Warn, "clipboard is empty");
+        return;
+    }
+
+    app.function.push(crate::function::SidebarTab::PastePreview(Box::new(state)));
+    app.function_visible = true;
+    app.acknowledge_panel();
+}
+
 async fn handle_paste(text: String, app: &mut App) {
     insert_paste_block(text, app, false);
+}
+
+fn handle_paste_preview_key(
+    k: crossterm::event::KeyEvent,
+    app: &mut App,
+    state: &mut crate::function::PastePreviewState,
+) -> bool {
+    use crossterm::event::KeyCode;
+    match k.code {
+        KeyCode::Enter => {
+            // Confirm paste.
+            if let Some(ref image) = state.image {
+                // Insert [image #N] marker.
+                let idx = app.image_blocks.len() + 1;
+                app.image_blocks.push_back(image.clone());
+                app.input.insert_str(&format!("[image #{idx}]"));
+            } else if let Some(ref text) = state.text {
+                // Use insert_paste_block to create [paste N lines] marker.
+                // This also handles image path detection as a fallback.
+                insert_paste_block(text.clone(), app, false);
+            }
+            close_active_function_tab(app);
+            true
+        }
+        KeyCode::Esc => {
+            // Cancel: close the tab without pasting.
+            close_active_function_tab(app);
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Quick MIME detection from magic bytes. Defaults to PNG.
+fn infer_image_type(bytes: &[u8]) -> &'static str {
+    if bytes.len() < 4 {
+        return "image/png";
+    }
+    if bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF {
+        return "image/jpeg";
+    }
+    if bytes[0] == 0x47 && bytes[1] == 0x49 && bytes[2] == 0x46 {
+        return "image/gif";
+    }
+    if bytes.len() >= 8
+        && bytes[0] == 0x89 && bytes[1] == 0x50 && bytes[2] == 0x4E && bytes[3] == 0x47
+    {
+        return "image/png";
+    }
+    if bytes.len() >= 12
+        && bytes[0] == 0x52 && bytes[1] == 0x49 && bytes[2] == 0x46 && bytes[3] == 0x46
+        && bytes[8] == 0x57 && bytes[9] == 0x45 && bytes[10] == 0x42 && bytes[11] == 0x50
+    {
+        return "image/webp";
+    }
+    "image/png"
 }
 
 /// Spawn any request that was prepared by `submit_input` /
@@ -348,13 +471,79 @@ fn drain_post_compaction_prompt(app: &mut App) {
         app.pending_post_compaction_prompt = Some(text);
         return;
     }
-    crate::commands::send_chat(app, text);
+    crate::commands::send_chat(app, text, Vec::new());
 }
 
 /// `quota=true` 表示这是 legacy 逐字符终端（如 conhost），需要在
 /// handle_key 里抑制随后重发的字符，避免输入重复。
+/// Image file extensions that we support loading directly from path.
+const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "bmp"];
+
+/// If `text` looks like a file path ending in a known image extension,
+/// load the file from disk and insert it as an `[image #K]` marker.
+/// Returns `true` if an image was successfully loaded and inserted.
+fn try_insert_image_from_path(text: &str, app: &mut App) -> bool {
+    let path = std::path::Path::new(text.trim().trim_matches('"'));
+    let ext = match path.extension().and_then(|e| e.to_str()) {
+        Some(e) => e.to_ascii_lowercase(),
+        None => return false,
+    };
+    if !IMAGE_EXTENSIONS.contains(&ext.as_str()) {
+        return false;
+    }
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(_) => return false,
+    };
+    let media_type = infer_image_type(&bytes);
+    use sha2::{Digest, Sha256};
+    let hash = hex::encode(Sha256::digest(&bytes));
+    let assets_dir = match crate::session::store::assets_dir(&app.session_id) {
+        Ok(d) => d,
+        Err(_) => return false,
+    };
+    if let Err(e) = std::fs::create_dir_all(&assets_dir) {
+        use crate::function::notifications::ToastLevel;
+        let _ = app.notify(ToastLevel::Warn, format!("image: create assets dir: {e}"));
+        return false;
+    }
+    let extension = media_type.split('/').nth(1).unwrap_or("png");
+    let filename = format!("{hash}.{extension}");
+    let asset_path = assets_dir.join(&filename);
+    if !asset_path.exists() {
+        if let Err(e) = std::fs::write(&asset_path, &bytes) {
+            use crate::function::notifications::ToastLevel;
+            let _ = app.notify(ToastLevel::Warn, format!("image: write {filename}: {e}"));
+            return false;
+        }
+    }
+    let attachment = crate::session::ImageAttachment {
+        asset_path: asset_path.clone(),
+        media_type: media_type.to_string(),
+        byte_size: bytes.len() as u64,
+        width: 0,
+        height: 0,
+    };
+    let idx = app.image_blocks.len() + 1;
+    app.image_blocks.push_back(attachment);
+    let marker = format!("[image #{idx}]");
+    if app.input.has_selection() {
+        app.input.delete_selection();
+    }
+    app.input.insert_str(&marker);
+    app.sync_completion();
+    use crate::function::notifications::ToastLevel;
+    let _ = app.notify(ToastLevel::Ok, format!("image #{idx} attached ({media_type})"));
+    true
+}
+
 fn insert_paste_block(text: String, app: &mut App, quota: bool) {
     let mut text = normalize_paste_text(&text);
+    // Strip trailing newline so the paste doesn't inadvertently send
+    // the prompt when Enter is pressed afterwards.
+    if text.ends_with('\n') {
+        text.pop();
+    }
     if let Ok(mut cb) = arboard::Clipboard::new() {
         if let Ok(clip) = cb.get_text() {
             let clip = normalize_paste_text(&clip);
@@ -364,6 +553,14 @@ fn insert_paste_block(text: String, app: &mut App, quota: bool) {
         }
     }
     if text.is_empty() {
+        return;
+    }
+    // If the paste text looks like a local image file path, load it directly.
+    if try_insert_image_from_path(&text, app) {
+        // Also update last_paste_text so the dedup check catches
+        // repeated burst classifications of the same path.
+        app.last_paste_text = Some(text.clone());
+        app.last_paste_at = Some(Instant::now());
         return;
     }
     let now = Instant::now();
@@ -403,46 +600,16 @@ fn paste_line_count(text: &str) -> usize {
 }
 
 /// Heuristic: treat text as a paste if it spans multiple lines or is long enough.
-fn classify_burst(text: &str) -> bool {
-    text.contains('\n') || text.chars().count() >= 20
-}
-
-/// Cross-check burst text against clipboard to avoid IME false positives.
+/// Path-like text needs more characters to avoid fragmenting long file paths
+/// that arrive as individual key events from legacy Windows terminals.
+/// Try to aggregate rapid-fire key events into a single batch so
+/// terminal-level buffering doesn't starve the main loop.
 /// IME commits characters in burst-like fashion but does NOT modify the
 /// clipboard, so a clipboard mismatch reliably rules out a paste.
-fn clipboard_matches(text: &str) -> bool {
-    if let Ok(mut cb) = arboard::Clipboard::new() {
-        if let Ok(clip) = cb.get_text() {
-            let clip = normalize_paste_text(&clip);
-            let t = normalize_paste_text(text);
-            return !clip.is_empty() && (clip == t || clip.contains(&t) || t.contains(&clip));
-        }
-    }
-    // No clipboard access → err on the side of treating it as paste.
-    true
-}
-
-/// Try to aggregate rapid-fire key events into a single paste burst.
-/// Returns `Some(text)` when the burst looks like a paste; the caller
-/// should treat it as `Event::Paste`. Returns `None` otherwise; the
-/// original `first_key` (and any collected chars) must be dispatched
-/// through the normal `handle_key` path.
-///
-/// This is primarily for legacy Windows terminals (conhost) that do not
-/// support bracketed paste and instead emit a stream of individual
-/// `KeyEvent`s.
-enum BurstResult {
-    /// The burst qualifies as a paste; contains the aggregated text.
-    Paste(String),
-    /// The burst does not qualify; the caller must dispatch these keys
-    /// through the normal `handle_key` path.
-    Keys(Vec<crossterm::event::KeyEvent>),
-}
-
 async fn try_consume_burst(
     first_key: crossterm::event::KeyEvent,
     events: &mut EventStream,
-) -> BurstResult {
+) -> Vec<crossterm::event::KeyEvent> {
     use crossterm::event::{Event, KeyCode, KeyEventKind};
 
     let mut keys = vec![first_key];
@@ -451,7 +618,7 @@ async fn try_consume_burst(
     // Only start burst detection on a plain printable char (no modifiers).
     match first_key.code {
         KeyCode::Char(c) if first_key.modifiers.is_empty() => text.push(c),
-        _ => return BurstResult::Keys(keys),
+        _ => return keys,
     }
 
     // Adaptive timeout: start short, grow as we see more chars.
@@ -470,11 +637,17 @@ async fn try_consume_burst(
                     KeyCode::Char(c) if k.modifiers.is_empty() => {
                         text.push(c);
                         keys.push(k);
-                        // Once we've seen 3+ chars, extend the timeout so
-                        // a real paste doesn't get split into tiny chunks.
-                        if keys.len() >= 3 {
-                            timeout = Duration::from_millis(200);
-                        }
+                        // Adaptive timeout: longer bursts (image paths, URLs)
+                        // need more time between components to avoid splitting.
+                        timeout = if keys.len() >= 30 {
+                            Duration::from_millis(1000)
+                        } else if keys.len() >= 10 {
+                            Duration::from_millis(500)
+                        } else if keys.len() >= 3 {
+                            Duration::from_millis(200)
+                        } else {
+                            Duration::from_millis(10)
+                        };
                     }
                     KeyCode::Enter if k.modifiers.is_empty() => {
                         text.push('\n');
@@ -493,11 +666,7 @@ async fn try_consume_burst(
         }
     }
 
-    if classify_burst(&text) {
-        BurstResult::Paste(text)
-    } else {
-        BurstResult::Keys(keys)
-    }
+    keys
 }
 
 fn note_model_output(app: &mut App, chunk: &str) {
@@ -1045,15 +1214,6 @@ async fn handle_key(k: crossterm::event::KeyEvent, app: &mut App) {
         return;
     }
 
-    if ctrl && matches!(k.code, KeyCode::Char('v') | KeyCode::Char('V')) {
-        if let Ok(mut cb) = arboard::Clipboard::new() {
-            if let Ok(text) = cb.get_text() {
-                insert_paste_block(text, app, false);
-            }
-        }
-        return;
-    }
-
     // Ctrl+I: focus input. Closes any active sidebar tab (returns to chat).
     if ctrl && matches!(k.code, KeyCode::Char('i') | KeyCode::Char('I')) {
         app.function
@@ -1204,30 +1364,16 @@ async fn handle_key(k: crossterm::event::KeyEvent, app: &mut App) {
                     }
                 }
                 app.input.insert_newline();
-                if app.burst_snapshot.is_some()
-                    && classify_burst(&app.burst_buf)
-                    && clipboard_matches(&app.burst_buf)
-                {
-                    let burst_text = std::mem::take(&mut app.burst_buf);
-                    let processed = burst_text.chars().count();
-                    if let Some((_, old_cursor, old_len)) = app.burst_snapshot.take() {
-                        app.input.buffer.truncate(old_len);
-                        app.input.cursor = old_cursor;
-                    }
-                    insert_paste_block(burst_text, app, true);
-                    if app.paste_key_quota > processed {
-                        app.paste_key_quota -= processed;
-                    } else {
-                        app.paste_key_quota = 0;
-                    }
-                }
                 app.sync_completion();
             } else {
                 submit_input(app);
             }
         }
         KeyCode::Backspace => {
-            if !app.input.delete_selection() && !try_remove_paste_marker(app) {
+            if !app.input.delete_selection()
+                && !try_remove_paste_marker(app)
+                && !try_remove_image_marker(app)
+            {
                 app.input.backspace();
             }
             app.sync_completion();
@@ -1283,26 +1429,6 @@ async fn handle_key(k: crossterm::event::KeyEvent, app: &mut App) {
                     }
                 }
                 app.input.insert_char(c);
-                if app.burst_snapshot.is_some()
-                    && classify_burst(&app.burst_buf)
-                    && clipboard_matches(&app.burst_buf)
-                {
-                    let burst_text = std::mem::take(&mut app.burst_buf);
-                    let processed = burst_text.chars().count();
-                    if let Some((_, old_cursor, old_len)) = app.burst_snapshot.take() {
-                        app.input.buffer.truncate(old_len);
-                        app.input.cursor = old_cursor;
-                    }
-                    insert_paste_block(burst_text, app, true);
-                    // Do not over-suppress: quota was set to the (possibly
-                    // clipboard-expanded) paste length, which includes chars
-                    // we already handled via handle_key. Subtract them.
-                    if app.paste_key_quota > processed {
-                        app.paste_key_quota -= processed;
-                    } else {
-                        app.paste_key_quota = 0;
-                    }
-                }
                 app.sync_completion();
             }
         }
@@ -1753,6 +1879,179 @@ fn try_remove_paste_marker(app: &mut App) -> bool {
     false
 }
 
+fn try_remove_image_marker(app: &mut App) -> bool {
+    let buf = &app.input.buffer;
+    let cursor = app.input.cursor;
+    // Minimum length: "[image #1]" is 9 chars.
+    if cursor < 9 || !buf.is_char_boundary(cursor) {
+        return false;
+    }
+    let before = &buf[..cursor];
+    if let Some(start) = before.rfind("[image #") {
+        let candidate = &buf[start..cursor];
+        if let Some(rest) = candidate.strip_prefix("[image #").and_then(|s| s.strip_suffix(']')) {
+            if !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()) {
+                let idx: usize = rest.parse().unwrap_or(0);
+                if idx > 0 && idx <= app.image_blocks.len() {
+                    // Remove the image file from disk.
+                    if let Some(att) = app.image_blocks.get(idx - 1) {
+                        let _ = std::fs::remove_file(&att.asset_path);
+                    }
+                    app.image_blocks.remove(idx - 1);
+                    app.input.buffer.replace_range(start..cursor, "");
+                    app.input.cursor = start;
+                    // Re-number remaining image markers in the buffer.
+                    renumber_image_markers(app);
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Re-number all `[image #K]` markers in the input buffer to match
+/// the current `app.image_blocks` order (1-based). Called after a
+/// marker is removed from the middle of the list.
+fn renumber_image_markers(app: &mut App) {
+    let buf = &app.input.buffer.clone();
+    let mut new_buf = buf.clone();
+    let mut block_idx = 1usize;
+    let mut search_start = 0usize;
+    loop {
+        let remaining = &new_buf[search_start..];
+        let Some(marker_start) = remaining.find("[image #") else {
+            break;
+        };
+        let abs_start = search_start + marker_start;
+        let after_marker = &new_buf[abs_start + 8..];
+        let Some(bracket_end) = after_marker.find(']') else {
+            break;
+        };
+        let num_str = &after_marker[..bracket_end];
+        if !num_str.chars().all(|c| c.is_ascii_digit()) {
+            search_start = abs_start + 1;
+            continue;
+        }
+        let old_len = 8 + bracket_end + 1; // "[image #N]" length
+        let new_marker = format!("[image #{block_idx}]");
+        new_buf.replace_range(abs_start..abs_start + old_len, &new_marker);
+        search_start = abs_start + new_marker.len();
+        block_idx += 1;
+    }
+    app.input.buffer = new_buf;
+}
+
+/// Replace `[image #K]` markers in `raw` with the corresponding
+/// `ContentPart`s from `image_blocks`, and collect them in order.
+/// Returns `(cleaned_text, image_parts)`.
+fn expand_image_blocks(
+    raw: &str,
+    image_blocks: &mut VecDeque<crate::session::ImageAttachment>,
+) -> (String, Vec<crate::session::ContentPart>) {
+    let mut out = raw.to_string();
+    let mut parts: Vec<crate::session::ContentPart> = Vec::new();
+    let mut search_start = 0usize;
+    loop {
+        let remaining = &out[search_start..];
+        let Some(marker_start) = remaining.find("[image #") else {
+            break;
+        };
+        let abs_start = search_start + marker_start;
+        let after_marker = &out[abs_start + 8..];
+        let Some(bracket_end) = after_marker.find(']') else {
+            break;
+        };
+        let num_str = &after_marker[..bracket_end];
+        if !num_str.chars().all(|c| c.is_ascii_digit()) {
+            search_start = abs_start + 1;
+            continue;
+        }
+        let idx: usize = num_str.parse().unwrap_or(0);
+        let old_len = 8 + bracket_end + 1;
+        // Drain the corresponding image block.
+        if idx > 0 && idx <= image_blocks.len() {
+            let att = image_blocks.remove(idx - 1).unwrap();
+            parts.push(crate::session::ContentPart::Image(att));
+        }
+        out.replace_range(abs_start..abs_start + old_len, "");
+        search_start = abs_start; // re-scan after the removal
+    }
+    (out, parts)
+}
+
+/// Check if `raw` is a single image file path. If so, load the file
+/// and push an `Image` ContentPart into `image_parts`. Returns true
+/// if an image was loaded.
+fn try_extract_image_path_from_input(
+    raw: &str,
+    image_parts: &mut Vec<crate::session::ContentPart>,
+    app: &mut App,
+) -> bool {
+    let trimmed = raw.trim().trim_matches('"');
+    let path = std::path::Path::new(trimmed);
+    let ext = match path.extension().and_then(|e| e.to_str()) {
+        Some(e) => e.to_ascii_lowercase(),
+        None => return false,
+    };
+    if !IMAGE_EXTENSIONS.contains(&ext.as_str()) {
+        return false;
+    }
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(_e) => {
+            #[cfg(windows)]
+            {
+                let wide_path = format!("\\\\?\\{}", trimmed);
+                let wide_path = std::path::Path::new(&wide_path);
+                match std::fs::read(wide_path) {
+                    Ok(b) => b,
+                    Err(_) => return false,
+                }
+            }
+            #[cfg(not(windows))]
+            {
+                return false;
+            }
+        }
+    };
+    let media_type = infer_image_type(&bytes);
+    use sha2::{Digest, Sha256};
+    let hash = hex::encode(Sha256::digest(&bytes));
+    let assets_dir = match crate::session::store::assets_dir(&app.session_id) {
+        Ok(d) => d,
+        Err(_) => return false,
+    };
+    if let Err(e) = std::fs::create_dir_all(&assets_dir) {
+        use crate::function::notifications::ToastLevel;
+        let _ = app.notify(ToastLevel::Warn, format!("image: create assets dir: {e}"));
+        return false;
+    }
+    let extension = media_type.split('/').nth(1).unwrap_or("png");
+    let filename = format!("{hash}.{extension}");
+    let asset_path = assets_dir.join(&filename);
+    if !asset_path.exists() {
+        if let Err(e) = std::fs::write(&asset_path, &bytes) {
+            use crate::function::notifications::ToastLevel;
+            let _ = app.notify(ToastLevel::Warn, format!("image: write {filename}: {e}"));
+            return false;
+        }
+    }
+    let attachment = crate::session::ImageAttachment {
+        asset_path: asset_path.clone(),
+        media_type: media_type.to_string(),
+        byte_size: bytes.len() as u64,
+        width: 0,
+        height: 0,
+    };
+    app.image_blocks.push_back(attachment.clone());
+    image_parts.push(crate::session::ContentPart::Image(attachment));
+    let idx = app.image_blocks.len();
+    let _ = app.notify(crate::function::notifications::ToastLevel::Ok,
+        format!("image #{idx} loaded from path ({media_type})"));
+    true
+}
+
 fn expand_paste_blocks(mut raw: String, paste_blocks: &mut VecDeque<String>) -> String {
     while let Some(text) = paste_blocks.pop_front() {
         let line_count = paste_line_count(&text);
@@ -1773,13 +2072,24 @@ fn submit_input(app: &mut App) {
     // can confirm it was sent) — not pushed off the bottom. Also
     // cancels any in-flight momentum so the jump lands immediately.
     app.set_scroll_anchored(0);
-    let raw = expand_paste_blocks(app.input.take(), &mut app.paste_blocks);
-    if raw.is_empty() {
-        return;
-    }
-    if submit_direct_tool_input(app, &raw) {
+    // Expand image markers first (while the input buffer still has
+    // the markers), then expand paste blocks.
+    let raw = app.input.take();
+    let (clean_text, mut image_parts) = expand_image_blocks(&raw, &mut app.image_blocks);
+    if image_parts.is_empty() && try_extract_image_path_from_input(&clean_text, &mut image_parts, app) {
+        // Image path was extracted and loaded; text is now empty.
         app.sync_completion();
         return;
+    }
+    let raw = expand_paste_blocks(clean_text, &mut app.paste_blocks);
+    if raw.is_empty() && image_parts.is_empty() {
+        return;
+    }
+    if image_parts.is_empty() {
+        if submit_direct_tool_input(app, &raw) {
+            app.sync_completion();
+            return;
+        }
     }
     if let Some(rest) = raw.strip_prefix('/') {
         let mut parts = rest.splitn(2, char::is_whitespace);
@@ -1809,7 +2119,7 @@ fn submit_input(app: &mut App) {
         }
         crate::commands::dispatch(app, &cmd, &arg);
     } else {
-        crate::commands::send_chat(app, raw);
+        crate::commands::send_chat(app, raw, image_parts);
     }
     // The buffer is now empty, so the completion tab (if any) should close.
     app.sync_completion();
@@ -2098,6 +2408,7 @@ fn submit_direct_tool_input(app: &mut App, raw: &str) -> bool {
         thinking_segments: Vec::new(),
         thinking_visible: false,
         tool_results: Vec::new(),
+        attachments: Vec::new(),
         display_cursor: 0,
         line_count: 0,
         cached_content_line_count: None,
@@ -2306,6 +2617,7 @@ async fn dispatch_to_active_tab(k: crossterm::event::KeyEvent, app: &mut App) ->
         crate::function::SidebarTab::SessionRename(state) => {
             handle_session_rename_key(k, app, state)
         }
+        crate::function::SidebarTab::PastePreview(state) => handle_paste_preview_key(k, app, state),
         crate::function::SidebarTab::Plan(state) => handle_plan_key(k, app, state).await,
         crate::function::SidebarTab::Ask(state) => handle_ask_key(k, app, state).await,
         _ => false,
@@ -2390,7 +2702,7 @@ async fn handle_plan_key(
                 crate::function::notifications::ToastLevel::Ok,
                 "plan approved",
             );
-            crate::commands::send_chat(app, prompt);
+            crate::commands::send_chat(app, prompt, Vec::new());
             true
         }
         KeyCode::Char('r') | KeyCode::Char('R') => {
@@ -2402,7 +2714,7 @@ async fn handle_plan_key(
                 crate::function::notifications::ToastLevel::Warn,
                 "plan rejected",
             );
-            crate::commands::send_chat(app, prompt);
+            crate::commands::send_chat(app, prompt, Vec::new());
             true
         }
         KeyCode::Char('s') | KeyCode::Char('S') => {
@@ -2496,7 +2808,7 @@ async fn handle_ask_key(
                 // and close the tab.
                 let summary = state.build_summary();
                 close_active_function_tab(app);
-                crate::commands::send_chat(app, summary);
+                crate::commands::send_chat(app, summary, Vec::new());
                 return true;
             }
 
@@ -2514,7 +2826,7 @@ async fn handle_ask_key(
                 let prompt = format!(
                     "(Question: {question})\nPlease wait — the user is typing a free-form answer."
                 );
-                crate::commands::send_chat(app, prompt);
+                crate::commands::send_chat(app, prompt, Vec::new());
                 return true;
             }
 
@@ -2539,7 +2851,7 @@ async fn handle_ask_key(
             // answer.
             let summary = state.build_dismiss_summary();
             close_active_function_tab(app);
-            crate::commands::send_chat(app, summary);
+            crate::commands::send_chat(app, summary, Vec::new());
             true
         }
         _ => false,
@@ -4071,6 +4383,7 @@ mod tests {
             input_cursor_screen: None,
             function_panel_cursor: None,
             paste_blocks: VecDeque::new(),
+            image_blocks: VecDeque::new(),
             last_paste_text: None,
             last_paste_at: None,
             paste_key_quota: 0,
@@ -4108,31 +4421,6 @@ mod tests {
     #[test]
     fn paste_line_count_ignores_trailing_newline() {
         assert_eq!(paste_line_count("a\nb\nc\n"), 3);
-    }
-
-    #[test]
-    fn classify_burst_multiline() {
-        assert!(classify_burst("line1\nline2"));
-        assert!(classify_burst("a\n"));
-    }
-
-    #[test]
-    fn classify_burst_long_single() {
-        assert!(classify_burst(&"a".repeat(20)));
-        assert!(classify_burst(&"a".repeat(100)));
-    }
-
-    #[test]
-    fn classify_burst_short_single() {
-        assert!(!classify_burst("hello"));
-        assert!(!classify_burst(&"a".repeat(19)));
-        assert!(!classify_burst(""));
-    }
-
-    #[test]
-    fn classify_burst_typical_code() {
-        let code = "fn main() {\n    println!(\"hello\");\n}";
-        assert!(classify_burst(code));
     }
 
     #[test]

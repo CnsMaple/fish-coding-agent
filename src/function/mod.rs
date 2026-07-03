@@ -82,6 +82,7 @@ impl AppMode {
 pub enum SidebarTab {
     Notifications,
     Completion(CompletionState),
+    PastePreview(Box<PastePreviewState>),
     Settings(Box<SettingsState>),
     ModelPicker(ModelPickerState),
     ProviderPicker(ProviderPickerState),
@@ -544,6 +545,20 @@ impl ModelPickerState {
             self.scroll = self.cursor;
         }
     }
+}
+
+/// State for the clipboard paste preview panel. Opened by Ctrl+V
+/// to show the user what's on the clipboard before confirming.
+#[derive(Debug, Clone)]
+pub struct PastePreviewState {
+    /// Text content from clipboard, if any.
+    pub text: Option<String>,
+    /// Image attachment saved to disk, if clipboard had an image.
+    pub image: Option<crate::session::ImageAttachment>,
+    /// Raw image bytes for rendering (in-memory cache).
+    pub image_bytes: Option<Vec<u8>>,
+    /// MIME type of the clipboard content for display.
+    pub media_type: Option<String>,
 }
 
 /// One row in the provider picker. The user picks a specific configured
@@ -1202,6 +1217,7 @@ impl FunctionPanel {
     pub fn active_kind_name(&self) -> &'static str {
         match self.tabs.get(self.active) {
             Some(SidebarTab::Notifications) => "notifications",
+            Some(SidebarTab::PastePreview(_)) => "paste",
             Some(SidebarTab::Completion(_)) => "completion",
             Some(SidebarTab::Settings(_)) => "settings",
             Some(SidebarTab::ModelPicker(_)) => "model picker",
@@ -1403,6 +1419,9 @@ pub struct App {
     /// when the user is typing in a picker search field.
     pub function_panel_cursor: Option<(u16, u16)>,
     pub paste_blocks: VecDeque<String>,
+    /// Image blocks pasted from clipboard, indexed by VecDeque position.
+    /// The input buffer shows `[image #K]` where K = 1-based index.
+    pub image_blocks: VecDeque<crate::session::ImageAttachment>,
     pub last_paste_text: Option<String>,
     pub last_paste_at: Option<Instant>,
     /// Number of keystrokes to suppress after a paste (terminal re-sends
@@ -1559,6 +1578,7 @@ impl App {
             input_cursor_screen: None,
             function_panel_cursor: None,
             paste_blocks: VecDeque::new(),
+            image_blocks: VecDeque::new(),
             last_paste_text: None,
             last_paste_at: None,
             paste_key_quota: 0,
@@ -1690,6 +1710,7 @@ impl App {
         self.session.clear();
         self.session_id = crate::session::store::new_session_id();
         self.session_title = crate::session::store::default_title(&self.cwd);
+        self.image_blocks.clear();
         // Land at the tail immediately; cancel any in-flight momentum.
         self.set_scroll_anchored(0);
     }
@@ -1749,6 +1770,7 @@ impl App {
                     render_cache: Default::default(),
                     last_rendered_total: None,
                 };
+                self.image_blocks.clear();
                 self.session.invalidate_layout_cache();
                 self.session_id = stored.id;
                 self.session_title = stored.title;
@@ -2185,6 +2207,7 @@ mod tests {
             input_cursor_screen: None,
             function_panel_cursor: None,
             paste_blocks: VecDeque::new(),
+            image_blocks: VecDeque::new(),
             last_paste_text: None,
             last_paste_at: None,
             paste_key_quota: 0,

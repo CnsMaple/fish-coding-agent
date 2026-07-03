@@ -4,6 +4,7 @@ use crate::function::notifications::ModelInfo;
 use crate::net::stream::{drive_sse_stream, SseControl, STREAM_IDLE_TIMEOUT};
 use anyhow::Result;
 use async_trait::async_trait;
+use base64::Engine;
 use serde::Deserialize;
 use tokio::sync::mpsc;
 
@@ -216,7 +217,47 @@ fn openai_message(m: &super::ChatMessage) -> serde_json::Value {
             })).collect::<Vec<_>>(),
         });
     }
+    // If the message has image content parts, produce a content array
+    // with text + image_url blocks instead of a plain string.
+    if !m.content_parts.is_empty() {
+        let mut content = Vec::new();
+        let mut text_buf = String::new();
+        for part in &m.content_parts {
+            match part {
+                super::ContentPart::Text(t) => text_buf.push_str(t),
+                super::ContentPart::Image(att) => {
+                    // Flush accumulated text first.
+                    if !text_buf.is_empty() {
+                        content.push(serde_json::json!({"type": "text", "text": text_buf}));
+                        text_buf.clear();
+                    }
+                    // Read the image file and base64-encode it.
+                    let b64 = image_to_base64(&att.asset_path);
+                    let url = format!("data:{};base64,{}", att.media_type, b64);
+                    content.push(serde_json::json!({
+                        "type": "image_url",
+                        "image_url": { "url": url }
+                    }));
+                }
+            }
+        }
+        if !text_buf.is_empty() {
+            content.push(serde_json::json!({"type": "text", "text": text_buf}));
+        }
+        if content.is_empty() {
+            content.push(serde_json::json!({"type": "text", "text": m.content}));
+        }
+        return serde_json::json!({"role": m.role, "content": content});
+    }
     serde_json::json!({"role": m.role, "content": m.content})
+}
+
+/// Read an image file from disk and return its base64-encoded content.
+pub(crate) fn image_to_base64(path: &std::path::Path) -> String {
+    match std::fs::read(path) {
+        Ok(bytes) => base64::engine::general_purpose::STANDARD.encode(&bytes),
+        Err(_) => String::new(),
+    }
 }
 
 fn merge_tool_call_deltas(tool_calls: &mut Vec<ToolCall>, deltas: &[serde_json::Value]) {
