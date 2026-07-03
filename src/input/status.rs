@@ -37,6 +37,9 @@ pub struct StatusBar {
     /// ("cmp:triggered") instead of the green "cmp:N% free" form.
     /// Resets to `false` on the next `update_token_usage` call.
     pub compact_triggered: bool,
+    /// Compact MCP server status summary, e.g. `"2✓ 1✗"`.
+    /// `None` means no MCP servers are configured or enabled.
+    pub mcp_summary: Option<String>,
 }
 
 impl StatusBar {
@@ -59,6 +62,7 @@ impl StatusBar {
             max_output_tokens: 0,
             compact_pct: None,
             compact_triggered: false,
+            mcp_summary: None,
         }
     }
 
@@ -187,6 +191,10 @@ impl StatusBar {
         self.tok_avg = t.average();
     }
 
+    pub fn set_mcp_summary(&mut self, summary: Option<String>) {
+        self.mcp_summary = summary;
+    }
+
     pub fn update_token_usage(&mut self, total: u64) {
         self.token_total = Some(total);
         self.token_pct = if self.context_window_known && self.context_window_tokens > 0 {
@@ -279,6 +287,11 @@ impl StatusBar {
         spans.push(Span::styled(fmt_pct(self.hit_cur), Theme::base()));
         spans.push(Span::raw("/avg "));
         spans.push(Span::styled(fmt_pct(self.hit_avg), Theme::dim()));
+        if let Some(ref mcp) = self.mcp_summary {
+            spans.push(Span::raw(" | "));
+            spans.push(Span::styled("mcp:", Theme::dim()));
+            spans.push(Span::styled(mcp.clone(), Theme::base()));
+        }
         Line::from(spans)
     }
 }

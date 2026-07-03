@@ -186,6 +186,7 @@ where
         let sink = crate::mcp::AppMsgEventSink::new(tx_for_mcp);
         svc.bind_event_sink(std::sync::Arc::new(sink)).await;
     }
+    refresh_mcp_summary(app);
 
     let mut events = EventStream::new();
     let mut tick = interval(Duration::from_millis(100));
@@ -765,6 +766,43 @@ fn open_tool_function_panel(app: &mut App, name: &str, content: &str) {
     }
 }
 
+/// Refresh the MCP status summary displayed in the status bar.
+/// Reads the live snapshot from the MCP service and aggregates
+/// per-server statuses into a compact string like `"2✓ 1✗"`.
+fn refresh_mcp_summary(app: &mut App) {
+    let snap = crate::mcp::try_snapshot_or_empty();
+    let mut connected = 0u32;
+    let mut failed = 0u32;
+    let mut other = 0u32;
+
+    for (_, status) in &snap.status {
+        match status {
+            crate::mcp::McpStatus::Connected => connected += 1,
+            crate::mcp::McpStatus::Failed { .. } => failed += 1,
+            crate::mcp::McpStatus::Disabled => {}
+            _ => other += 1,
+        }
+    }
+
+    let active = connected + failed + other;
+    if active == 0 {
+        app.status.set_mcp_summary(None);
+        return;
+    }
+
+    let mut parts = Vec::new();
+    if connected > 0 {
+        parts.push(format!("{connected}✓"));
+    }
+    if failed > 0 {
+        parts.push(format!("{failed}✗"));
+    }
+    if other > 0 {
+        parts.push(format!("{other}⚠"));
+    }
+    app.status.set_mcp_summary(Some(parts.join(" ")));
+}
+
 fn handle_msg(msg: AppMsg, app: &mut App) {
     match msg {
         AppMsg::ChatDelta(s) => {
@@ -1003,7 +1041,7 @@ fn handle_msg(msg: AppMsg, app: &mut App) {
             // request to re-read `openai_tool_specs` /
             // `anthropic_tool_specs`. The picker / status bar
             // already consume the live snapshot.
-            tracing::info!(server = %server, "mcp tools changed");
+            tracing::debug!(server = %server, "mcp tools changed");
             app.invalidate_tool_specs();
             let _ = app.notify(
                 crate::function::notifications::ToastLevel::Info,
@@ -1011,10 +1049,8 @@ fn handle_msg(msg: AppMsg, app: &mut App) {
             );
         }
         AppMsg::McpStatusChanged { name, status } => {
-            tracing::info!(server = %name, status = %status.label(), "mcp status changed");
-            // No-op for now beyond logging; the status bar reads
-            // the live snapshot directly. The toast noise is
-            // kept low so a healthy startup doesn't spam.
+            tracing::debug!(server = %name, status = %status.label(), "mcp status changed");
+            refresh_mcp_summary(app);
         }
         AppMsg::McpAuthRequired { server, url, error } => {
             if !url.is_empty() {

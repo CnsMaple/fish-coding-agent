@@ -109,8 +109,13 @@ impl McpService {
                 }
             }
         }
-        // Spawn one connect task per enabled server, in parallel.
-        let mut handles = Vec::new();
+        // Install the registry immediately so the TUI can access
+        // the service without waiting for connects to finish.
+        McpRegistry::install(svc.clone());
+        // Fire-and-forget: spawn one connect task per enabled server.
+        // The TUI renders right away with `Disabled` status; the
+        // background tasks update the status to `Connected` / `Failed`
+        // and emit `McpStatusChanged` events when done.
         for (name, entry) in cfg {
             let Some(server_cfg) = entry.as_config() else {
                 continue;
@@ -121,14 +126,10 @@ impl McpService {
             let svc2 = svc.clone();
             let name = name.clone();
             let server_cfg = server_cfg.clone();
-            handles.push(tokio::spawn(async move {
+            tokio::spawn(async move {
                 svc2.connect(&name, &server_cfg).await;
-            }));
+            });
         }
-        for h in handles {
-            let _ = h.await;
-        }
-        McpRegistry::install(svc.clone());
         svc
     }
 
