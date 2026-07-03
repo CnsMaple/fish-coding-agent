@@ -4802,12 +4802,12 @@ mod tests {
 
         // Move cursor to the end.
         s.cursor = 19;
-        s.ensure_cursor_visible(5);
+        crate::ui::function_panel::ensure_cursor_visible(s.cursor, &mut s.scroll, 5);
         assert_eq!(s.scroll, 15, "scroll must advance to keep cursor visible");
 
         // Move cursor to the top.
         s.cursor = 0;
-        s.ensure_cursor_visible(5);
+        crate::ui::function_panel::ensure_cursor_visible(s.cursor, &mut s.scroll, 5);
         assert_eq!(s.scroll, 0, "scroll must retreat when cursor goes up");
     }
 
@@ -6155,7 +6155,7 @@ mod tests {
 
         // Move cursor down past the visible window (visible_rows = 5).
         state.cursor = 10;
-        state.ensure_cursor_visible(5);
+        crate::ui::function_panel::ensure_cursor_visible(state.cursor, &mut state.scroll, 5);
         // scroll must have advanced so cursor 10 is inside [scroll, scroll+5).
         assert!(
             state.cursor >= state.scroll && state.cursor < state.scroll + 5,
@@ -6172,7 +6172,7 @@ mod tests {
 
         // Move cursor back to the top: scroll should retreat.
         state.cursor = 0;
-        state.ensure_cursor_visible(5);
+        crate::ui::function_panel::ensure_cursor_visible(state.cursor, &mut state.scroll, 5);
         assert_eq!(state.scroll, 0, "scroll must retreat when cursor goes up");
     }
 

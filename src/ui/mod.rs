@@ -21,15 +21,19 @@ pub fn render(f: &mut Frame, app: &mut App) {
     // project path on the input block's title.
     let input_height = input_height(app, area.height, area.width);
     let chunks = if app.function_visible {
+        // For PastePreview the panel height is exactly the content height
+        // (capped at 20%); for other tabs it grows with 20% but never below
+        // the minimum renderable height.
+        let remaining = area.height.saturating_sub(input_height + CWD_HEIGHT);
+        let pct_height = (remaining as f64 * 0.20) as u16;
+        let panel_height = app.function.tabs.get(app.function.active)
+            .map_or(4, |t| t.panel_height(pct_height));
+
         Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Min(0),
-                // Function panel takes 20% of the remaining space (after
-                // input/cwd); the session area gets the leftover so long
-                // tables (12 rows + final spacer = 13) fit in a 24-row
-                // terminal without clipping the bottom border.
-                Constraint::Percentage(20),
+                Constraint::Length(panel_height),
                 Constraint::Length(input_height),
                 Constraint::Length(CWD_HEIGHT),
             ])

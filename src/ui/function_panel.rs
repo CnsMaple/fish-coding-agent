@@ -1,3 +1,5 @@
+use std::ops::Range;
+
 use crate::app::App;
 use crate::function::SidebarTab;
 use crate::theme::Theme;
@@ -6,151 +8,103 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
-use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Tabs, Wrap};
+use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
+
+/// Keep the cursor inside the visible window while scrolling.
+pub fn ensure_cursor_visible(cursor: usize, scroll: &mut usize, visible_rows: usize) {
+    if visible_rows == 0 {
+        return;
+    }
+    if cursor < *scroll {
+        *scroll = cursor;
+    } else if cursor >= *scroll + visible_rows {
+        *scroll = cursor + 1 - visible_rows;
+    }
+}
+
+/// Calculate the range of visible rows, auto-scrolling if the cursor is
+/// outside the visible window.
+pub fn visible_window(
+    cursor: usize,
+    scroll: &mut usize,
+    visible_rows: usize,
+    total: usize,
+) -> Range<usize> {
+    ensure_cursor_visible(cursor, scroll, visible_rows);
+    let start = (*scroll).min(total);
+    let end = (start + visible_rows).min(total);
+    start..end
+}
 
 pub fn render(area: Rect, buf: &mut Buffer, app: &mut App) {
     if area.width < 4 || area.height < 4 {
         return;
     }
-    // Title shows the active sidebar tab name, drawn into the top
-    // border itself — no separate title row in the body, so we save
-    // one line compared to a normal titled block. Matches the
-    // `+--- ask ---+` style in the screenshots.
-    let title = format!(" {} ", app.function.active_kind_name());
+
+    let mut title_spans: Vec<Span> = Vec::new();
+    for (i, tab) in app.function.tabs.iter().enumerate() {
+        if i > 0 {
+            title_spans.push(Span::raw(" │ "));
+        }
+        let name = match tab {
+            SidebarTab::Notifications => "notifications",
+            SidebarTab::Completion(_) => "completion",
+            SidebarTab::Settings(_) => "settings",
+            SidebarTab::ModelPicker(_) => "model picker",
+            SidebarTab::ProviderPicker(_) => "provider",
+            SidebarTab::ThinkingPicker(_) => "thinking",
+            SidebarTab::TimelinePicker(_) => "timeline",
+            SidebarTab::SessionPicker(_) => "sessions",
+            SidebarTab::SessionRename(_) => "rename",
+            SidebarTab::Plan(_) => "plan",
+            SidebarTab::Ask(_) => "ask",
+            SidebarTab::PastePreview(_) => "paste",
+            SidebarTab::Hotkey => "hotkey",
+        };
+        if i == app.function.active {
+            title_spans.push(Span::styled(format!(" {name} "), Theme::bold()));
+        } else {
+            title_spans.push(Span::styled(format!(" {name} "), Theme::dim()));
+        }
+    }
+
     let block = Block::default()
         .borders(Borders::ALL)
         .border_set(app.config.border_type.ratatui_set())
         .border_style(Theme::unfocused_border())
-        .title(Line::from(Span::styled(title, Theme::bold())));
+        .title(Line::from(title_spans));
     let inner = block.inner(area);
     block.render(area, buf);
     if inner.height < 2 {
         return;
     }
 
-    // All tabs (including Notifications) are shown in the row. The earlier
-    // model that hid "notif" was too confusing — the user wants to see
-    // every tab, even the passive ones.
-    let function_tab_indices: Vec<usize> = app
-        .function
-        .tabs
-        .iter()
-        .enumerate()
-        .map(|(i, _)| i)
-        .collect();
-
-    if function_tab_indices.is_empty() {
-        // No function tab is open. The body is the Notifications content
-        // (or empty if there are no toasts). No tabs row.
-            if let Some(tab) = app.function.tabs.get_mut(app.function.active) {
-                let cfg = &app.config;
-                let cursor = match tab {
-                    SidebarTab::Notifications => {
-                        render_notifications(inner, buf, app);
-                        None
-                    }
-                    SidebarTab::Completion(s) => {
-                        render_completion(inner, buf, s);
-                        None
-                    }
-                    SidebarTab::Settings(s) => render_settings(inner, buf, cfg, s),
-                    SidebarTab::ModelPicker(s) => render_picker(inner, buf, s),
-                    SidebarTab::ProviderPicker(s) => render_provider_picker(inner, buf, s),
-                    SidebarTab::ThinkingPicker(s) => render_thinking_picker(inner, buf, s),
-                    SidebarTab::TimelinePicker(s) => render_timeline_picker(inner, buf, s),
-                    SidebarTab::SessionPicker(s) => render_session_picker(inner, buf, s),
-                    SidebarTab::SessionRename(s) => render_session_rename(inner, buf, s),
-                    SidebarTab::Plan(s) => render_plan(inner, buf, s),
-                    SidebarTab::Ask(s) => render_ask(inner, buf, s),
-SidebarTab::PastePreview(s) => {
-                        render_paste_preview(inner, buf, s);
-                        None
-                    }
-                    SidebarTab::Hotkey => {
-                        render_hotkey(inner, buf);
-                        None
-                    }
-                };
-                app.function_panel_cursor = cursor;
-            }
-            return;
-        }
-
-    // Function tab is active. Show the tabs row (function tabs only) above
-    // the body.
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(1)])
-        .split(inner);
-
-    let active_idx = app.function.active;
-    let titles: Vec<Line> = function_tab_indices
-        .iter()
-        .map(|&orig_idx| {
-            let name = match app.function.tabs[orig_idx] {
-                SidebarTab::Notifications => "notifications",
-                SidebarTab::Completion(_) => "completion",
-                SidebarTab::Settings(_) => "settings",
-                SidebarTab::ModelPicker(_) => "model picker",
-                SidebarTab::ProviderPicker(_) => "provider",
-                SidebarTab::ThinkingPicker(_) => "thinking",
-                SidebarTab::TimelinePicker(_) => "timeline",
-                SidebarTab::SessionPicker(_) => "sessions",
-                SidebarTab::SessionRename(_) => "rename",
-                SidebarTab::Plan(_) => "plan",
-                SidebarTab::Ask(_) => "ask",
-                SidebarTab::PastePreview(_) => "paste",
-                SidebarTab::Hotkey => "hotkey",
-            };
-            if orig_idx == active_idx {
-                Line::from(Span::styled(
-                    format!(" {name} "),
-                    Theme::underlined().add_modifier(ratatui::style::Modifier::BOLD),
-                ))
-            } else {
-                Line::from(Span::styled(format!(" {name} "), Theme::dim()))
-            }
-        })
-        .collect();
-    let active_filtered = function_tab_indices
-        .iter()
-        .position(|&i| i == active_idx)
-        .unwrap_or(0);
-    let tabs = Tabs::new(titles)
-        .select(active_filtered)
-        .highlight_style(Theme::underlined());
-    tabs.render(rows[0], buf);
-
-    // Body
-    if let Some(tab) = app.function.tabs.get_mut(active_idx) {
+    if let Some(tab) = app.function.tabs.get_mut(app.function.active) {
         let cfg = &app.config;
         let cursor = match tab {
             SidebarTab::Notifications => {
-                render_notifications(rows[1], buf, app);
+                render_notifications(inner, buf, app);
                 None
             }
             SidebarTab::Completion(s) => {
-                render_completion(rows[1], buf, s);
+                render_completion(inner, buf, s);
                 None
             }
-            SidebarTab::Settings(s) => {
-                render_settings(rows[1], buf, cfg, s);
-                None
-            }
-            SidebarTab::ModelPicker(s) => render_picker(rows[1], buf, s),
-            SidebarTab::ProviderPicker(s) => render_provider_picker(rows[1], buf, s),
-            SidebarTab::ThinkingPicker(s) => render_thinking_picker(rows[1], buf, s),
-            SidebarTab::TimelinePicker(s) => render_timeline_picker(rows[1], buf, s),
-            SidebarTab::SessionPicker(s) => render_session_picker(rows[1], buf, s),
-            SidebarTab::SessionRename(s) => render_session_rename(rows[1], buf, s),
-            SidebarTab::Plan(s) => render_plan(rows[1], buf, s),
-            SidebarTab::Ask(s) => render_ask(rows[1], buf, s),
+            SidebarTab::Settings(s) => render_settings(inner, buf, cfg, s),
+            SidebarTab::ModelPicker(s) => render_picker(inner, buf, s),
+            SidebarTab::ProviderPicker(s) => render_provider_picker(inner, buf, s),
+            SidebarTab::ThinkingPicker(s) => render_thinking_picker(inner, buf, s),
+            SidebarTab::TimelinePicker(s) => render_timeline_picker(inner, buf, s),
+            SidebarTab::SessionPicker(s) => render_session_picker(inner, buf, s),
+            SidebarTab::SessionRename(s) => render_session_rename(inner, buf, s),
+            SidebarTab::Plan(s) => render_plan(inner, buf, s),
+            SidebarTab::Ask(s) => render_ask(inner, buf, s),
             SidebarTab::PastePreview(s) => {
-                render_paste_preview(rows[1], buf, s);
+                render_paste_preview(inner, buf, s);
                 None
             }
             SidebarTab::Hotkey => {
-                render_hotkey(rows[1], buf);
+                render_hotkey(inner, buf);
                 None
             }
         };
@@ -158,7 +112,7 @@ SidebarTab::PastePreview(s) => {
     }
 }
 
-fn render_notifications(area: Rect, buf: &mut Buffer, app: &App) {
+fn render_notifications(area: Rect, buf: &mut Buffer, app: &mut App) {
     if area.height < 3 {
         return;
     }
@@ -190,8 +144,12 @@ fn render_notifications(area: Rect, buf: &mut Buffer, app: &App) {
             .wrap(Wrap { trim: false })
             .render(list_area, buf);
     } else {
+        let filtered_len = filtered.len();
+        if filtered_len > 0 {
+            ensure_cursor_visible(app.notifications.cursor, &mut app.notifications.scroll, list_area.height as usize);
+        }
         let width = list_area.width.saturating_sub(2).max(8) as usize;
-        let start = app.notifications.scroll.min(filtered.len());
+        let start = app.notifications.scroll.min(filtered_len);
         let mut visible = Vec::new();
         let mut row_count = 0u16;
         for (row, idx) in filtered.iter().enumerate().skip(start) {
@@ -302,16 +260,12 @@ fn render_new_provider_picker(
             .wrap(Wrap { trim: false })
             .render(list_area, buf);
     } else {
-        let visible_rows = list_area.height as usize;
-        s.ensure_cursor_visible(visible_rows);
-        let total = s.filtered.len();
-        let start = s.scroll.min(total);
-        let end = (start + visible_rows).min(total);
-        for row in start..end {
+        let range = visible_window(s.cursor, &mut s.scroll, list_area.height as usize, s.filtered.len());
+        for row in range {
             let idx = s.filtered[row];
             let id = &s.entries[idx];
             let is_cursor = row == s.cursor;
-            let y = list_area.y + (row - start) as u16;
+            let y = list_area.y + (row - s.scroll) as u16;
             let picker_label = s.picker_label(id);
             let line = if is_cursor {
                 Line::from(vec![
@@ -332,25 +286,28 @@ fn render_new_provider_picker(
     search_cursor
 }
 
-fn render_completion(area: Rect, buf: &mut Buffer, s: &crate::function::CompletionState) {
-    let mut lines: Vec<Line> = Vec::new();
+fn render_completion(area: Rect, buf: &mut Buffer, s: &mut crate::function::CompletionState) {
     if s.candidates.is_empty() {
-        lines.push(Line::from(Span::styled("[no completion]", Theme::dim())));
-    } else {
-        for (i, c) in s.candidates.iter().enumerate() {
-            if i == s.cursor {
-                lines.push(Line::from(vec![
-                    Span::styled("> ", Theme::bold()),
-                    Span::raw(c.clone()),
-                ]));
-            } else {
-                lines.push(Line::from(Span::raw(format!("  {c}"))));
-            }
-        }
+        Paragraph::new(Line::from(Span::styled("[no completion]", Theme::dim())))
+            .wrap(Wrap { trim: false })
+            .render(area, buf);
+        return;
     }
-    Paragraph::new(lines)
-        .wrap(Wrap { trim: false })
-        .render(area, buf);
+    let range = visible_window(s.cursor, &mut s.scroll, area.height as usize, s.candidates.len());
+    for row in range {
+        let c = &s.candidates[row];
+        let is_cursor = row == s.cursor;
+        let y = area.y + (row - s.scroll) as u16;
+        let line = if is_cursor {
+            Line::from(vec![
+                Span::styled("> ", Theme::bold()),
+                Span::raw(c.clone()),
+            ])
+        } else {
+            Line::from(Span::raw(format!("  {c}")))
+        };
+        buf.set_line(area.x, y, &line, area.width);
+    }
 }
 
 fn render_settings(
@@ -572,9 +529,15 @@ fn render_settings(
         )));
     }
 
-    Paragraph::new(body_lines)
-        .wrap(Wrap { trim: false })
-        .render(rows[0], buf);
+    let list_area = rows[0];
+    let total = body_lines.len();
+    if total > 0 {
+        let range = visible_window(s.cursor, &mut s.scroll, list_area.height as usize, total);
+        for row in range {
+            let y = list_area.y + (row - s.scroll) as u16;
+            buf.set_line(list_area.x, y, &body_lines[row], list_area.width);
+        }
+    }
 
     // Spacer (rows[1]) is left empty.
 
@@ -661,17 +624,12 @@ fn render_picker(
         .wrap(Wrap { trim: false });
         p.render(list_area, buf);
     } else {
-        let visible_rows = list_area.height as usize;
-        // ensure the focused row is in the visible window
-        s.ensure_cursor_visible(visible_rows);
-        let total = s.filtered.len();
-        let start = s.scroll.min(total);
-        let end = (start + visible_rows).min(total);
-        for row in start..end {
+        let range = visible_window(s.cursor, &mut s.scroll, list_area.height as usize, s.filtered.len());
+        for row in range {
             let model_idx = s.filtered[row];
             let model = &s.models[model_idx];
             let is_cursor = row == s.cursor;
-            let y = list_area.y + (row - start) as u16;
+            let y = list_area.y + (row - s.scroll) as u16;
             let line = if is_cursor {
                 Line::from(vec![
                     Span::styled("> ", Theme::bold()),
@@ -729,17 +687,13 @@ fn render_provider_picker(
             .wrap(Wrap { trim: false })
             .render(list_area, buf);
     } else {
-        let visible_rows = list_area.height as usize;
-        s.ensure_cursor_visible(visible_rows);
-        let total = s.filtered.len();
-        let start = s.scroll.min(total);
-        let end = (start + visible_rows).min(total);
-        for row in start..end {
+        let range = visible_window(s.cursor, &mut s.scroll, list_area.height as usize, s.filtered.len());
+        for row in range {
             let entry_idx = s.filtered[row];
             let entry = &s.entries[entry_idx];
             let is_cursor = row == s.cursor;
             let is_active = s.active.as_deref() == Some(entry.id.as_str());
-            let y = list_area.y + (row - start) as u16;
+            let y = list_area.y + (row - s.scroll) as u16;
             let mut spans: Vec<Span<'static>> = Vec::new();
             if is_cursor {
                 spans.push(Span::styled("> ", Theme::bold()));
@@ -800,21 +754,22 @@ fn render_hotkey(area: Rect, buf: &mut Buffer) {
 }
 
 fn render_paste_preview(area: Rect, buf: &mut Buffer, state: &crate::function::PastePreviewState) {
-    use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+    use ratatui::widgets::{Paragraph, Wrap};
     use ratatui::text::{Line, Span};
     use ratatui::layout::{Constraint, Direction, Layout};
     use crate::theme::Theme;
 
+    let content_lines = if state.image.is_some() {
+        2
+    } else if let Some(ref text) = state.text {
+        text.lines().count().min(5) as u16
+    } else {
+        1
+    };
     let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .constraints([Constraint::Length(content_lines), Constraint::Length(1)])
         .split(area);
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title("clipboard");
-    let inner = block.inner(rows[0]);
-    block.render(rows[0], buf);
 
     let mut lines = Vec::new();
 
@@ -829,49 +784,34 @@ fn render_paste_preview(area: Rect, buf: &mut Buffer, state: &crate::function::P
             format!("image {} {dim}· {size_kb}KB", image.media_type),
             Theme::bold(),
         )));
-        lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
-            "┌─ thumbnail ───────────────────────┐",
-            Style::default().dim(),
+            image.asset_path.display().to_string(),
+            Theme::dim(),
         )));
-        lines.push(Line::from(Span::styled(
-            format!("│ {}x{} · {size_kb}KB", image.width, image.height),
-            Style::default().dim(),
-        )));
-        lines.push(Line::from(Span::styled(
-            "└────────────────────────────────────┘",
-            Style::default().dim(),
-        )));
-        lines.push(Line::from(""));
     } else if let Some(ref text) = state.text {
         let preview_lines: Vec<&str> = text.lines().take(5).collect();
-        let overflow = text.lines().count().saturating_sub(5);
         for &line_str in &preview_lines {
             lines.push(Line::from(Span::raw(line_str)));
-        }
-        if overflow > 0 {
-            lines.push(Line::from(Span::styled(
-                format!("... ({overflow} more lines, {} chars)", text.len()),
-                Style::default().dim(),
-            )));
-        } else {
-            lines.push(Line::from(Span::styled(
-                format!("{} chars", text.len()),
-                Style::default().dim(),
-            )));
         }
     } else {
         lines.push(Line::from(Span::styled("clipboard is empty", Style::default().dim())));
     }
 
     let p = Paragraph::new(lines).wrap(Wrap { trim: false });
-    p.render(inner, buf);
+    p.render(rows[0], buf);
 
     // Hint row
-    let hint = Line::from(Span::styled(
-        " Enter: paste | Esc: cancel ",
-        Theme::dim(),
-    ));
+    let hint_text = if let Some(ref text) = state.text {
+        let overflow = text.lines().count().saturating_sub(5);
+        if overflow > 0 {
+            format!(" ... ({overflow} more lines, {} chars)   Enter: paste | Esc: cancel ", text.len())
+        } else {
+            format!(" {} chars   Enter: paste | Esc: cancel ", text.len())
+        }
+    } else {
+        String::from(" Enter: paste | Esc: cancel ")
+    };
+    let hint = Line::from(Span::styled(hint_text, Theme::dim()));
     Paragraph::new(hint).render(rows[1], buf);
 }
 
@@ -908,16 +848,12 @@ fn render_thinking_picker(
             .wrap(Wrap { trim: false })
             .render(list_area, buf);
     } else {
-        let visible_rows = list_area.height as usize;
-        s.ensure_cursor_visible(visible_rows);
-        let total = s.filtered.len();
-        let start = s.scroll.min(total);
-        let end = (start + visible_rows).min(total);
-        for row in start..end {
+        let range = visible_window(s.cursor, &mut s.scroll, list_area.height as usize, s.filtered.len());
+        for row in range {
             let model_idx = s.filtered[row];
             let level = TPS::LEVELS[model_idx];
             let is_cursor = row == s.cursor;
-            let y = list_area.y + (row - start) as u16;
+            let y = list_area.y + (row - s.scroll) as u16;
             let line = if is_cursor {
                 Line::from(vec![
                     Span::styled("> ", Theme::bold()),
@@ -968,16 +904,12 @@ fn render_timeline_picker(
             .wrap(Wrap { trim: false })
             .render(list_area, buf);
     } else {
-        let visible_rows = list_area.height as usize;
-        s.ensure_cursor_visible(visible_rows);
-        let total = s.filtered.len();
-        let start = s.scroll.min(total);
-        let end = (start + visible_rows).min(total);
-        for row in start..end {
+        let range = visible_window(s.cursor, &mut s.scroll, list_area.height as usize, s.filtered.len());
+        for row in range {
             let entry_idx = s.filtered[row];
             let entry = &s.entries[entry_idx];
             let is_cursor = row == s.cursor;
-            let y = list_area.y + (row - start) as u16;
+            let y = list_area.y + (row - s.scroll) as u16;
             let tag = if entry.tool_idx.is_some() {
                 "tool"
             } else {
@@ -1054,15 +986,11 @@ fn render_session_picker(
             .wrap(Wrap { trim: false })
             .render(list_area, buf);
     } else {
-        let visible_rows = list_area.height as usize;
-        s.ensure_cursor_visible(visible_rows);
-        let total = s.filtered.len();
-        let start = s.scroll.min(total);
-        let end = (start + visible_rows).min(total);
-        for row in start..end {
+        let range = visible_window(s.cursor, &mut s.scroll, list_area.height as usize, s.filtered.len());
+        for row in range {
             let idx = s.filtered[row];
             let entry = &s.entries[idx];
-            let y = list_area.y + (row - start) as u16;
+            let y = list_area.y + (row - s.scroll) as u16;
             let active = row == s.cursor;
             let updated = entry.updated_at.format("%m-%d %H:%M").to_string();
             let cwd = std::path::Path::new(&entry.cwd)
@@ -1247,9 +1175,19 @@ fn render_ask(area: Rect, buf: &mut Buffer, s: &mut crate::function::AskState) -
         AskPhase::Asking => ask_active_question_lines(s, active_idx),
         AskPhase::Reviewing => ask_review_lines(s),
     };
-    Paragraph::new(body_lines)
-        .wrap(Wrap { trim: false })
-        .render(rows[1], buf);
+    let body_area = rows[1];
+    let total = body_lines.len();
+    if total > 0 {
+        let cursor = match s.phase {
+            AskPhase::Asking => s.items[active_idx].cursor,
+            AskPhase::Reviewing => 0,
+        };
+        let range = visible_window(cursor, &mut s.scroll, body_area.height as usize, total);
+        for row in range {
+            let y = body_area.y + (row - s.scroll) as u16;
+            buf.set_line(body_area.x, y, &body_lines[row], body_area.width);
+        }
+    }
 
     // --- hint ---
     let hint = match s.phase {

@@ -14,6 +14,7 @@ pub mod notifications;
 pub struct CompletionState {
     pub candidates: Vec<String>,
     pub cursor: usize,
+    pub scroll: usize,
 }
 
 impl CompletionState {
@@ -22,6 +23,7 @@ impl CompletionState {
         let mut s = Self {
             candidates,
             cursor: 0,
+            scroll: 0,
         };
         s.clamp_cursor();
         s
@@ -95,6 +97,51 @@ pub enum SidebarTab {
     Hotkey,
 }
 
+impl SidebarTab {
+    /// Minimum panel height (including borders) required for this tab's
+    /// content to render without clipping.
+    pub fn min_panel_height(&self) -> u16 {
+        match self {
+            Self::PastePreview(s) => {
+                if s.image.is_some() {
+                    5
+                } else if let Some(ref text) = s.text {
+                    let n = text.lines().count().min(5) as u16;
+                    (n + 1 + 2).min(8)
+                } else {
+                    4
+                }
+            }
+            Self::Notifications => 5,
+            Self::Completion(_) => 3,
+            Self::Settings(_) => 5,
+            Self::ModelPicker(_) => 5,
+            Self::ProviderPicker(_) => 5,
+            Self::ThinkingPicker(_) => 4,
+            Self::TimelinePicker(_) => 5,
+            Self::SessionPicker(_) => 5,
+            Self::SessionRename(_) => 4,
+            Self::Plan(_) => 6,
+            Self::Ask(_) => 5,
+            Self::Hotkey => 3,
+        }
+    }
+
+    /// Actual panel height for this tab: for `PastePreview`, the exact
+    /// content height (capped at the percentage); for other tabs, the
+    /// percentage height (never below the minimum).
+    pub fn panel_height(&self, pct_height: u16) -> u16 {
+        match self {
+            Self::PastePreview(s) => {
+                let content_lines = if s.image.is_some() { 2 }
+                    else if let Some(ref text) = s.text { text.lines().count().min(5) as u16 }
+                    else { 1 };
+                (content_lines + 1 + 2).min(pct_height)
+            }
+            _ => pct_height.max(self.min_panel_height()),
+        }
+    }
+}
 // =====================================================================
 // Settings: hierarchical navigation (no more double-tab).
 // =====================================================================
@@ -388,17 +435,6 @@ impl NewProviderPickerState {
         }
     }
 
-    pub fn ensure_cursor_visible(&mut self, visible_rows: usize) {
-        if visible_rows == 0 {
-            return;
-        }
-        if self.cursor < self.scroll {
-            self.scroll = self.cursor;
-        } else if self.cursor >= self.scroll + visible_rows {
-            self.scroll = self.cursor + 1 - visible_rows;
-        }
-    }
-
     pub fn selected_id(&self) -> Option<ProviderId> {
         self.filtered
             .get(self.cursor)
@@ -419,6 +455,8 @@ pub struct SettingsState {
     pub level: SettingsLevel,
     /// Cursor inside the current list view (or the focused field for ConfigForm).
     pub cursor: usize,
+    /// Scroll offset for the list view.
+    pub scroll: usize,
     /// Validation error to surface inline in the form (e.g. empty base_url).
     pub form_error: Option<String>,
     /// Error reason when config failed to parse, so we can show it.
@@ -431,6 +469,7 @@ impl SettingsState {
         Self {
             level: SettingsLevel::TopLevel,
             cursor: 0,
+            scroll: 0,
             form_error: None,
             load_error: None,
             new_provider: NewProviderPickerState::new(),
@@ -523,20 +562,6 @@ impl ModelPickerState {
         }
         // Keep cursor visible after the filter shrinks.
         self.adjust_scroll();
-    }
-
-    /// Move `scroll` so that `cursor` is inside the visible window of
-    /// `visible_rows` rows. Call this from the renderer once the list height
-    /// is known.
-    pub fn ensure_cursor_visible(&mut self, visible_rows: usize) {
-        if visible_rows == 0 {
-            return;
-        }
-        if self.cursor < self.scroll {
-            self.scroll = self.cursor;
-        } else if self.cursor >= self.scroll + visible_rows {
-            self.scroll = self.cursor + 1 - visible_rows;
-        }
     }
 
     fn adjust_scroll(&mut self) {
@@ -647,18 +672,6 @@ impl ProviderPickerState {
         }
     }
 
-    /// Adjust `scroll` so `cursor` stays inside the visible window.
-    pub fn ensure_cursor_visible(&mut self, visible_rows: usize) {
-        if visible_rows == 0 {
-            return;
-        }
-        if self.cursor < self.scroll {
-            self.scroll = self.cursor;
-        } else if self.cursor >= self.scroll + visible_rows {
-            self.scroll = self.cursor + 1 - visible_rows;
-        }
-    }
-
     /// Returns the id of the focused entry, if any.
     pub fn selected_id(&self) -> Option<ProviderId> {
         self.filtered
@@ -718,18 +731,7 @@ impl ThinkingPickerState {
         }
     }
 
-    /// Move `scroll` so that `cursor` is inside the visible window.
-    pub fn ensure_cursor_visible(&mut self, visible_rows: usize) {
-        if visible_rows == 0 {
-            return;
-        }
-        if self.cursor < self.scroll {
-            self.scroll = self.cursor;
-        } else if self.cursor >= self.scroll + visible_rows {
-            self.scroll = self.cursor + 1 - visible_rows;
-        }
     }
-}
 
 impl Default for ThinkingPickerState {
     fn default() -> Self {
@@ -796,18 +798,6 @@ impl TimelinePickerState {
         }
         if self.scroll > self.cursor {
             self.scroll = self.cursor;
-        }
-    }
-
-    /// Move `scroll` so that `cursor` is inside the visible window.
-    pub fn ensure_cursor_visible(&mut self, visible_rows: usize) {
-        if visible_rows == 0 {
-            return;
-        }
-        if self.cursor < self.scroll {
-            self.scroll = self.cursor;
-        } else if self.cursor >= self.scroll + visible_rows {
-            self.scroll = self.cursor + 1 - visible_rows;
         }
     }
 
@@ -965,17 +955,6 @@ impl SessionPickerState {
         }
     }
 
-    pub fn ensure_cursor_visible(&mut self, visible_rows: usize) {
-        if visible_rows == 0 {
-            return;
-        }
-        if self.cursor < self.scroll {
-            self.scroll = self.cursor;
-        } else if self.cursor >= self.scroll + visible_rows {
-            self.scroll = self.cursor + 1 - visible_rows;
-        }
-    }
-
     pub fn selected_id(&self) -> Option<String> {
         self.filtered
             .get(self.cursor)
@@ -1057,6 +1036,7 @@ pub struct AskItem {
     pub question: String,
     pub options: Vec<String>,
     pub cursor: usize,
+    pub scroll: usize,
     pub answered: Option<String>,
 }
 
@@ -1068,6 +1048,7 @@ impl AskItem {
             // 0 is the first option; the final row (the implicit
             // freeform input) is index `options.len()`.
             cursor: 0,
+            scroll: 0,
             answered: None,
         }
     }
@@ -1105,6 +1086,8 @@ pub struct AskState {
     /// question's options.
     pub active: usize,
     pub phase: AskPhase,
+    /// Scroll offset for the body view.
+    pub scroll: usize,
 }
 
 impl AskState {
@@ -1113,6 +1096,7 @@ impl AskState {
             items: vec![AskItem::new(question, options)],
             active: 0,
             phase: AskPhase::Asking,
+            scroll: 0,
         }
     }
 
@@ -1214,6 +1198,7 @@ impl FunctionPanel {
         }
     }
 
+    #[allow(dead_code)]
     pub fn active_kind_name(&self) -> &'static str {
         match self.tabs.get(self.active) {
             Some(SidebarTab::Notifications) => "notifications",
@@ -2114,6 +2099,7 @@ impl App {
                 self.function.push(SidebarTab::Completion(CompletionState {
                     candidates,
                     cursor: 0,
+                    scroll: 0,
                 }));
                 // Typing `/` is a "function trigger" — the user must see
                 // the candidate list, so auto-show the panel and focus
@@ -2332,9 +2318,8 @@ mod tests {
     fn thinking_picker_ensure_cursor_visible_scrolls_down() {
         use crate::function::ThinkingPickerState;
         let mut s = ThinkingPickerState::new();
-        // 5 levels (off/low/med/high/adaptive), 3 visible.
         s.cursor = 4;
-        s.ensure_cursor_visible(3);
+        crate::ui::function_panel::ensure_cursor_visible(s.cursor, &mut s.scroll, 3);
         assert_eq!(s.scroll, 2, "scroll should jump so cursor is last visible row");
     }
 
@@ -2344,7 +2329,7 @@ mod tests {
         let mut s = ThinkingPickerState::new();
         s.scroll = 4;
         s.cursor = 0;
-        s.ensure_cursor_visible(3);
+        crate::ui::function_panel::ensure_cursor_visible(s.cursor, &mut s.scroll, 3);
         assert_eq!(s.scroll, 0, "scroll should follow cursor up to top");
     }
 
@@ -2354,7 +2339,7 @@ mod tests {
         let mut s = ThinkingPickerState::new();
         s.scroll = 0;
         s.cursor = 1;
-        s.ensure_cursor_visible(3);
+        crate::ui::function_panel::ensure_cursor_visible(s.cursor, &mut s.scroll, 3);
         assert_eq!(s.scroll, 0, "no scroll needed when total fits visible");
     }
 
