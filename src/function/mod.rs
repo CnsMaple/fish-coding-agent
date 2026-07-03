@@ -1876,7 +1876,7 @@ impl App {
         }
         self.previous_mode = self.mode;
         self.set_mode(AppMode::Plan);
-        if let Some((i, _)) = self
+        let has_plan_tab = if let Some((i, _)) = self
             .function
             .tabs
             .iter_mut()
@@ -1884,10 +1884,14 @@ impl App {
             .find(|(_, t)| matches!(t, SidebarTab::Plan(_)))
         {
             self.function.active = i;
-        }
-        // Only show the panel when there is content to display,
-        // otherwise the user would see an empty bordered box.
-        if self.function.has_any_tab() {
+            true
+        } else {
+            false
+        };
+        // Only show the panel when there is a Plan tab to display,
+        // otherwise the user would see an empty bordered box even
+        // when other tabs (e.g. Notifications) exist.
+        if has_plan_tab {
             self.function_visible = true;
             self.acknowledge_panel();
         }
