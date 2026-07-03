@@ -694,7 +694,7 @@ pub fn completion_candidates_for(input: &str) -> Vec<String> {
         // so we keep the exact prefix filter rather than fuzzy.
         let rest = rest.trim().to_lowercase();
         return match cmd {
-            "think" | "thinking" => vec!["off", "low", "med", "high", "adaptive"]
+            "think" | "thinking" => vec!["off", "minimal", "low", "medium", "high", "xhigh", "adaptive", "max"]
                 .into_iter()
                 .filter(|c| c.starts_with(&rest) || rest.is_empty())
                 .map(|s| format!("/think {s}"))

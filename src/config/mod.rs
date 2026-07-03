@@ -143,20 +143,27 @@ pub fn id_display(id: &str) -> String {
 pub enum ReasoningMode {
     #[default]
     Off,
+    Minimal,
     Low,
-    Med,
+    #[serde(alias = "med")]
+    Medium,
     High,
+    XHigh,
     Adaptive,
+    Max,
 }
 
 impl ReasoningMode {
     pub fn as_str(&self) -> &'static str {
         match self {
             ReasoningMode::Off => "off",
+            ReasoningMode::Minimal => "minimal",
             ReasoningMode::Low => "low",
-            ReasoningMode::Med => "med",
+            ReasoningMode::Medium => "medium",
             ReasoningMode::High => "high",
+            ReasoningMode::XHigh => "xhigh",
             ReasoningMode::Adaptive => "adaptive",
+            ReasoningMode::Max => "max",
         }
     }
 
@@ -167,25 +174,33 @@ impl ReasoningMode {
         match self {
             ReasoningMode::Off => None,
             ReasoningMode::Adaptive => Some("adaptive"),
-            ReasoningMode::Low | ReasoningMode::Med | ReasoningMode::High => Some("enabled"),
+            ReasoningMode::Minimal
+            | ReasoningMode::Low
+            | ReasoningMode::Medium
+            | ReasoningMode::High
+            | ReasoningMode::XHigh
+            | ReasoningMode::Max => Some("enabled"),
         }
     }
 
     pub fn anthropic_budget(self) -> Option<u32> {
         match self {
             ReasoningMode::Off | ReasoningMode::Adaptive => None,
+            ReasoningMode::Minimal => Some(512),
             ReasoningMode::Low => Some(1024),
-            ReasoningMode::Med => Some(4096),
+            ReasoningMode::Medium => Some(4096),
             ReasoningMode::High => Some(16384),
+            ReasoningMode::XHigh => Some(65536),
+            ReasoningMode::Max => Some(131072),
         }
     }
 
     pub fn openai_effort(self) -> Option<&'static str> {
         match self {
             ReasoningMode::Off | ReasoningMode::Adaptive => None,
-            ReasoningMode::Low => Some("low"),
-            ReasoningMode::Med => Some("medium"),
-            ReasoningMode::High => Some("high"),
+            ReasoningMode::Minimal | ReasoningMode::Low => Some("low"),
+            ReasoningMode::Medium => Some("medium"),
+            ReasoningMode::High | ReasoningMode::XHigh | ReasoningMode::Max => Some("high"),
         }
     }
 }

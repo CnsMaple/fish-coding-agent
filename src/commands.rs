@@ -33,14 +33,17 @@ pub fn dispatch(app: &mut App, cmd: &str, arg: &str) {
             }
             let next = match arg {
                 "off" => ReasoningMode::Off,
+                "minimal" => ReasoningMode::Minimal,
                 "low" => ReasoningMode::Low,
-                "med" | "medium" => ReasoningMode::Med,
+                "med" | "medium" => ReasoningMode::Medium,
                 "high" => ReasoningMode::High,
+                "xhigh" => ReasoningMode::XHigh,
                 "adaptive" => ReasoningMode::Adaptive,
+                "max" => ReasoningMode::Max,
                 _ => {
                     app.notify(
                         ToastLevel::Fail,
-                        format!("unknown thinking level: {arg} (off/low/med/high/adaptive)"),
+                        format!("unknown thinking level: {arg} (off/minimal/low/medium/high/xhigh/adaptive/max)"),
                     );
                     return;
                 }

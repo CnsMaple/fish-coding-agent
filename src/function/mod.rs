@@ -706,7 +706,7 @@ impl ThinkingPickerState {
         s
     }
 
-    pub const LEVELS: &'static [&'static str] = &["off", "low", "med", "high", "adaptive"];
+    pub const LEVELS: &'static [&'static str] = &["off", "minimal", "low", "medium", "high", "xhigh", "adaptive", "max"];
 
     pub fn selected(&self) -> Option<&'static str> {
         self.filtered

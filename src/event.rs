@@ -3317,10 +3317,13 @@ fn handle_thinking_key(
                 use crate::config::ReasoningMode;
                 let next = match level {
                     "off" => ReasoningMode::Off,
+                    "minimal" => ReasoningMode::Minimal,
                     "low" => ReasoningMode::Low,
-                    "med" => ReasoningMode::Med,
+                    "medium" => ReasoningMode::Medium,
                     "high" => ReasoningMode::High,
+                    "xhigh" => ReasoningMode::XHigh,
                     "adaptive" => ReasoningMode::Adaptive,
+                    "max" => ReasoningMode::Max,
                     _ => unreachable!(),
                 };
                 app.config.thinking = next;
