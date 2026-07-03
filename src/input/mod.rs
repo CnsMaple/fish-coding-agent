@@ -421,7 +421,7 @@ pub fn render(area: Rect, buf: &mut Buffer, app: &mut crate::app::App) {
         title.spans.insert(
             0,
             Span::styled(
-                format!("(!{}) ", app.pending_events),
+                format!("(!{}) | ", app.pending_events),
                 Theme::status_warn(),
             ),
         );
@@ -823,6 +823,7 @@ pub fn sidebar_tab_name(t: &SidebarTab) -> &'static str {
         SidebarTab::SessionRename(_) => "rename",
         SidebarTab::Plan(_) => "plan",
         SidebarTab::Ask(_) => "ask",
+        SidebarTab::Todo(_) => "todo",
         SidebarTab::Hotkey => "hotkey",
     }
 }

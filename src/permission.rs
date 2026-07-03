@@ -20,6 +20,7 @@ pub mod tool {
     pub const LIST: &str = "list";
     pub const PLAN: &str = "plan";
     pub const ASK: &str = "ask";
+    pub const TODO_WRITE: &str = "todowrite";
 }
 
 /// `build` / `yolo` agent: every tool is allowed. Used in normal
@@ -34,6 +35,7 @@ fn yolo_rules() -> &'static [(&'static str, Action)] {
         (tool::LIST, Action::Allow),
         (tool::PLAN, Action::Allow),
         (tool::ASK, Action::Allow),
+        (tool::TODO_WRITE, Action::Allow),
     ]
 }
 
@@ -51,6 +53,7 @@ fn plan_rules() -> &'static [(&'static str, Action)] {
         (tool::LIST, Action::Allow),
         (tool::PLAN, Action::Allow),
         (tool::ASK, Action::Allow),
+        (tool::TODO_WRITE, Action::Allow),
     ]
 }
 

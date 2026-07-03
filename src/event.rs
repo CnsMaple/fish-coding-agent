@@ -766,6 +766,34 @@ fn open_tool_function_panel(app: &mut App, name: &str, content: &str) {
     }
 }
 
+fn handle_todowrite_result(app: &mut App, content: &str) {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(content) else {
+        return;
+    };
+    let kind = value.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+    if kind != "todowrite" {
+        return;
+    }
+    let Some(todos) = value.get("todos").and_then(|v| v.as_array()) else {
+        return;
+    };
+    let new_items: Vec<crate::session::TodoItem> = todos
+        .iter()
+        .filter_map(|v| {
+            let content = v.get("content").and_then(|c| c.as_str())?.to_string();
+            let status = v
+                .get("status")
+                .and_then(|s| s.as_str())
+                .unwrap_or("pending")
+                .to_string();
+            Some(crate::session::TodoItem { content, status })
+        })
+        .collect();
+    app.session.todo_items = new_items;
+    app.session.invalidate_layout_cache();
+    app.open_todo_tab();
+}
+
 /// Refresh the MCP status summary displayed in the status bar.
 /// Reads the live snapshot from the MCP service and aggregates
 /// per-server statuses into a compact string like `"2✓ 1✗"`.
@@ -831,6 +859,9 @@ fn handle_msg(msg: AppMsg, app: &mut App) {
             title,
             content,
         } => {
+            if name == "todowrite" {
+                handle_todowrite_result(app, &content);
+            }
             open_tool_function_panel(app, &name, &content);
             app.session.update_last_tool_content(name, title, content);
         }
@@ -840,6 +871,9 @@ fn handle_msg(msg: AppMsg, app: &mut App) {
             content,
             context,
         } => {
+            if name == "todowrite" {
+                handle_todowrite_result(app, &content);
+            }
             open_tool_function_panel(app, &name, &content);
             app.session.push_tool_result_message(name, title, content);
             if let Some(context) = context {
@@ -2671,6 +2705,7 @@ async fn dispatch_to_active_tab(k: crossterm::event::KeyEvent, app: &mut App) ->
         crate::function::SidebarTab::PastePreview(state) => handle_paste_preview_key(k, app, state),
         crate::function::SidebarTab::Plan(state) => handle_plan_key(k, app, state).await,
         crate::function::SidebarTab::Ask(state) => handle_ask_key(k, app, state).await,
+        crate::function::SidebarTab::Todo(state) => handle_todo_key(k, app, state).await,
         _ => false,
     };
     if active < app.function.tabs.len()
@@ -2817,6 +2852,131 @@ async fn handle_plan_key(
             true
         }
         _ => false,
+    }
+}
+
+async fn handle_todo_key(
+    k: crossterm::event::KeyEvent,
+    app: &mut App,
+    state: &mut crate::function::TodoTabState,
+) -> bool {
+    use crossterm::event::KeyCode;
+    use crate::session::TodoItem;
+    let total = app.session.todo_items.len();
+
+    // If editing, handle Enter (confirm) and Esc (cancel)
+    if let Some(edit_idx) = state.editing {
+        match k.code {
+            KeyCode::Enter => {
+                let text = app.input.buffer.trim().to_string();
+                if edit_idx < app.session.todo_items.len() {
+                    app.session.todo_items[edit_idx].content = text;
+                }
+                state.editing = None;
+                app.session.invalidate_layout_cache();
+                return true;
+            }
+            KeyCode::Esc => {
+                // Remove the item if content is still empty
+                if edit_idx < app.session.todo_items.len() {
+                    if app.session.todo_items[edit_idx].content.trim().is_empty() {
+                        app.session.todo_items.remove(edit_idx);
+                        if state.cursor > 0 && state.cursor >= app.session.todo_items.len() {
+                            state.cursor = state.cursor.saturating_sub(1);
+                        }
+                    }
+                }
+                state.editing = None;
+                app.session.invalidate_layout_cache();
+                return true;
+            }
+            _ => {}
+        }
+        return true;
+    }
+
+    match k.code {
+        KeyCode::Up | KeyCode::Char('k') if k.modifiers.is_empty() => {
+            if state.cursor > 0 {
+                state.cursor -= 1;
+            }
+            true
+        }
+        KeyCode::Down | KeyCode::Char('j') if k.modifiers.is_empty() => {
+            if total > 0 {
+                state.cursor = (state.cursor + 1).min(total.saturating_sub(1));
+            }
+            true
+        }
+        KeyCode::Enter => {
+            if total == 0 {
+                return true;
+            }
+            let item = &mut app.session.todo_items[state.cursor];
+            item.status = match item.status.as_str() {
+                "pending" => "in_progress".to_string(),
+                "in_progress" => "completed".to_string(),
+                _ => "pending".to_string(),
+            };
+            app.session.invalidate_layout_cache();
+            true
+        }
+        KeyCode::Delete => {
+            if total == 0 {
+                return true;
+            }
+            app.session.todo_items.remove(state.cursor);
+            if state.cursor > 0 && state.cursor >= app.session.todo_items.len() {
+                state.cursor = state.cursor.saturating_sub(1);
+            }
+            app.session.invalidate_layout_cache();
+            true
+        }
+        _ => {
+            if k.modifiers.contains(crossterm::event::KeyModifiers::ALT) {
+                match k.code {
+                    KeyCode::Char('i') => {
+                        let text = app.input.buffer.trim().to_string();
+                        let insert_at = (state.cursor + 1).min(total);
+                        app.session.todo_items.insert(insert_at, TodoItem {
+                            content: text,
+                            status: "pending".to_string(),
+                        });
+                        state.cursor = insert_at;
+                        state.editing = Some(insert_at);
+                        app.session.invalidate_layout_cache();
+                        true
+                    }
+                    KeyCode::Char('I') => {
+                        let text = app.input.buffer.trim().to_string();
+                        let insert_at = state.cursor.min(total);
+                        app.session.todo_items.insert(insert_at, TodoItem {
+                            content: text,
+                            status: "pending".to_string(),
+                        });
+                        state.cursor = insert_at;
+                        state.editing = Some(insert_at);
+                        app.session.invalidate_layout_cache();
+                        true
+                    }
+                    KeyCode::Char('e') | KeyCode::Char('E') => {
+                        if total == 0 {
+                            return true;
+                        }
+                        // Copy current todo content to input buffer for editing
+                        let content = app.session.todo_items[state.cursor].content.clone();
+                        app.input.buffer = content;
+                        app.input.cursor = app.input.buffer.len();
+                        state.editing = Some(state.cursor);
+                        app.session.invalidate_layout_cache();
+                        true
+                    }
+                    _ => false,
+                }
+            } else {
+                false
+            }
+        }
     }
 }
 
@@ -2976,8 +3136,8 @@ fn handle_session_picker_key(
         }
         KeyCode::Enter => {
             if let Some(id) = state.selected_id() {
-                app.resume_session(&id);
                 close_active_function_tab(app);
+                app.resume_session(&id);
             }
             true
         }
@@ -4483,6 +4643,7 @@ mod tests {
             session_scroll: crate::event::ScrollAnimator::default(),
             compacting: false,
             pending_post_compaction_prompt: None,
+            last_mouse_event: None,
         }
     }
 

@@ -15,6 +15,12 @@ pub struct StoredSession {
     pub messages: Vec<Message>,
     #[serde(default)]
     pub todo_items: Vec<TodoItem>,
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub thinking: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -68,7 +74,7 @@ pub fn title_from_prompt(prompt: &str) -> String {
     title
 }
 
-pub fn save(id: &str, title: &str, cwd: &Path, session: &Session) -> Result<()> {
+pub fn save(id: &str, title: &str, cwd: &Path, session: &Session, provider: Option<String>, model: Option<String>, thinking: Option<String>) -> Result<()> {
     let dir = sessions_dir()?;
     let session_dir = dir.join(sanitize_id(id));
     std::fs::create_dir_all(&session_dir).with_context(|| format!("create {}", session_dir.display()))?;
@@ -83,6 +89,9 @@ pub fn save(id: &str, title: &str, cwd: &Path, session: &Session) -> Result<()> 
         updated_at: now,
         messages: session.messages.clone(),
         todo_items: session.todo_items.clone(),
+        provider,
+        model,
+        thinking,
     };
     let raw = serde_json::to_string_pretty(&stored)?;
     std::fs::write(&path, raw).with_context(|| format!("write {}", path.display()))?;
@@ -134,6 +143,9 @@ pub fn fork(source_id: &str, cwd: &Path, title: Option<&str>) -> Result<StoredSe
         updated_at: now,
         messages: source.messages,
         todo_items: source.todo_items,
+        provider: source.provider,
+        model: source.model,
+        thinking: source.thinking,
     };
     write_stored(&forked)?;
     Ok(forked)

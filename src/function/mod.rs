@@ -79,6 +79,27 @@ impl AppMode {
     }
 }
 
+/// State for the todo-list sidebar tab.
+#[derive(Debug, Clone)]
+pub struct TodoTabState {
+    pub scroll: usize,
+    pub cursor: usize,
+    /// Index of the todo item currently being edited. `None` when not editing.
+    pub editing: Option<usize>,
+}
+
+impl TodoTabState {
+    pub fn new() -> Self {
+        Self { scroll: 0, cursor: 0, editing: None }
+    }
+}
+
+impl Default for TodoTabState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// One sidebar tab entry.
 #[derive(Debug)]
 pub enum SidebarTab {
@@ -94,6 +115,7 @@ pub enum SidebarTab {
     SessionRename(SessionRenameState),
     Plan(PlanState),
     Ask(AskState),
+    Todo(TodoTabState),
     Hotkey,
 }
 
@@ -123,6 +145,7 @@ impl SidebarTab {
             Self::SessionRename(_) => 4,
             Self::Plan(_) => 6,
             Self::Ask(_) => 5,
+            Self::Todo(_) => 5,
             Self::Hotkey => 3,
         }
     }
@@ -1213,6 +1236,7 @@ impl FunctionPanel {
             Some(SidebarTab::SessionRename(_)) => "rename",
             Some(SidebarTab::Plan(_)) => "plan",
             Some(SidebarTab::Ask(_)) => "ask",
+            Some(SidebarTab::Todo(_)) => "todo",
             Some(SidebarTab::Hotkey) => "hotkey",
             None => "?",
         }
@@ -1686,11 +1710,25 @@ impl App {
             return;
         }
         self.ensure_prompt_title();
+        let provider = if self.status.provider.is_empty() {
+            None
+        } else {
+            Some(self.status.provider.clone())
+        };
+        let model = if self.status.model.is_empty() || self.status.model == "(no model)" {
+            None
+        } else {
+            Some(self.status.model.clone())
+        };
+        let thinking = Some(self.status.thinking.as_str().to_string());
         if let Err(e) = crate::session::store::save(
             &self.session_id,
             &self.session_title,
             &self.cwd,
             &self.session,
+            provider,
+            model,
+            thinking,
         ) {
             self.notify(
                 crate::function::notifications::ToastLevel::Fail,
@@ -1707,6 +1745,12 @@ impl App {
         self.session_id = crate::session::store::new_session_id();
         self.session_title = crate::session::store::default_title(&self.cwd);
         self.image_blocks.clear();
+        // Remove the todo tab when the session is cleared.
+        self.function.tabs.retain(|t| !matches!(t, SidebarTab::Todo(_)));
+        if self.function.active >= self.function.tabs.len() {
+            self.function.active = self.function.tabs.len().saturating_sub(1);
+        }
+        self.maybe_hide_panel();
         // Land at the tail immediately; cancel any in-flight momentum.
         self.set_scroll_anchored(0);
     }
@@ -1768,8 +1812,20 @@ impl App {
                 };
                 self.image_blocks.clear();
                 self.session.invalidate_layout_cache();
+                if !stored.todo_items.is_empty() {
+                    self.open_todo_tab();
+                }
                 self.session_id = stored.id;
                 self.session_title = stored.title;
+                if let Some(ref p) = stored.provider {
+                    self.status.set_provider_name(p);
+                }
+                if let Some(ref m) = stored.model {
+                    self.status.set_model(m);
+                }
+                if let Some(ref t) = stored.thinking {
+                    self.status.set_thinking(crate::config::ReasoningMode::parse(t));
+                }
                 self.notify(
                     crate::function::notifications::ToastLevel::Ok,
                     format!("resumed session: {}", self.session_title),
@@ -1841,7 +1897,19 @@ impl App {
                     render_cache: Default::default(),
                     last_rendered_total: None,
                 };
+                if let Some(ref p) = stored.provider {
+                    self.status.set_provider_name(p);
+                }
+                if let Some(ref m) = stored.model {
+                    self.status.set_model(m);
+                }
+                if let Some(ref t) = stored.thinking {
+                    self.status.set_thinking(crate::config::ReasoningMode::parse(t));
+                }
                 self.session.invalidate_layout_cache();
+                if !stored.todo_items.is_empty() {
+                    self.open_todo_tab();
+                }
                 self.notify(
                     crate::function::notifications::ToastLevel::Ok,
                     format!("forked session: {}", self.session_title),
@@ -2005,6 +2073,15 @@ impl App {
         }
         self.function_visible = true;
         self.acknowledge_panel();
+    }
+
+    pub fn open_todo_tab(&mut self) {
+        if !self.function.tabs.iter().any(|t| matches!(t, SidebarTab::Todo(_))) {
+            self.function.push(SidebarTab::Todo(TodoTabState::new()));
+        }
+        if !self.function_visible {
+            self.function_visible = true;
+        }
     }
 
     /// Append one question's merged-list lines to the pending ask
@@ -2174,7 +2251,10 @@ impl App {
     /// after any tab removal so the panel returns to the default hidden
     /// state when nothing is open.
     pub fn maybe_hide_panel(&mut self) {
-        if !self.function.has_any_tab() {
+        let has_non_trivial = self.function.tabs.iter().any(|t| {
+            !matches!(t, SidebarTab::Notifications)
+        });
+        if !has_non_trivial {
             self.function_visible = false;
             if self.mode == AppMode::Plan {
                 self.set_mode(self.previous_mode);

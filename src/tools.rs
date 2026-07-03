@@ -238,6 +238,29 @@ fn tool_defs() -> Vec<ToolDef> {
                 "additionalProperties": false
             }),
         },
+        ToolDef {
+            name: "todowrite",
+            description: "Create and maintain a structured task list for the current coding session. Tracks progress, organizes multi-step work, and surfaces status to the user.".to_string(),
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "todos": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "content": { "type": "string", "description": "Description of the task." },
+                                "status": { "type": "string", "enum": ["pending", "in_progress", "completed"], "description": "Task status." }
+                            },
+                            "required": ["content", "status"]
+                        },
+                        "description": "Full list of todo items to replace the current task list. Each call must send ALL items (existing + new/changed), not just the diff."
+                    }
+                },
+                "required": ["todos"],
+                "additionalProperties": false
+            }),
+        },
     ]
 }
 
@@ -268,6 +291,7 @@ pub async fn execute_tool_with_agent(
         t::LIST => list_path(args, cwd).await,
         t::PLAN => plan_review(args).await,
         t::ASK => ask_question(args).await,
+        t::TODO_WRITE => todowrite(args).await,
         _ => Err(anyhow!("unknown tool: {name}")),
     };
 
@@ -783,6 +807,58 @@ async fn ask_question(args: &str) -> Result<String> {
         "options": options,
         "status": "pending",
         "instruction": "Do not call this tool again. The question is now shown to the user in the session. Stop and wait for the user to type their answer into the main input. Their reply will be sent back to you automatically -- you will be re-prompted with the user's response."
+    })
+    .to_string())
+}
+
+async fn todowrite(args: &str) -> Result<String> {
+    let value: serde_json::Value = serde_json::from_str(args)?;
+    let todos = value
+        .get("todos")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| anyhow!("todowrite: missing or invalid `todos` array"))?;
+    if todos.is_empty() {
+        return Ok(json!({
+            "kind": "todowrite",
+            "action": "clear",
+            "todos": [],
+            "status": "ok",
+            "summary": "Todo list cleared."
+        })
+        .to_string());
+    }
+    let mut validated = Vec::new();
+    for (i, item) in todos.iter().enumerate() {
+        let content = item
+            .get("content")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| anyhow!("todowrite: todos[{}] missing or empty `content`", i))?;
+        let status = item
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("pending");
+        let status = match status {
+            "pending" | "in_progress" | "completed" => status,
+            _ => return Err(anyhow!(
+                "todowrite: todos[{}] invalid status `{status}` (must be pending, in_progress, or completed)", i
+            )),
+        };
+        validated.push(json!({
+            "content": content,
+            "status": status,
+        }));
+    }
+    let pending = validated.iter().filter(|v| v["status"] == "pending").count();
+    let in_progress = validated.iter().filter(|v| v["status"] == "in_progress").count();
+    let completed = validated.iter().filter(|v| v["status"] == "completed").count();
+    Ok(json!({
+        "kind": "todowrite",
+        "action": "replace",
+        "todos": validated,
+        "status": "ok",
+        "summary": format!("{} pending, {} in progress, {} completed", pending, in_progress, completed),
     })
     .to_string())
 }

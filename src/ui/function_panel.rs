@@ -5,7 +5,7 @@ use crate::function::SidebarTab;
 use crate::theme::Theme;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
@@ -58,6 +58,7 @@ pub fn render(area: Rect, buf: &mut Buffer, app: &mut App) {
             SidebarTab::SessionRename(_) => "rename",
             SidebarTab::Plan(_) => "plan",
             SidebarTab::Ask(_) => "ask",
+            SidebarTab::Todo(_) => "todo",
             SidebarTab::PastePreview(_) => "paste",
             SidebarTab::Hotkey => "hotkey",
         };
@@ -79,6 +80,7 @@ pub fn render(area: Rect, buf: &mut Buffer, app: &mut App) {
         return;
     }
 
+    let todo_items: Vec<crate::session::TodoItem> = app.session.todo_items.clone();
     if let Some(tab) = app.function.tabs.get_mut(app.function.active) {
         let cfg = &app.config;
         let cursor = match tab {
@@ -101,6 +103,10 @@ pub fn render(area: Rect, buf: &mut Buffer, app: &mut App) {
             SidebarTab::Ask(s) => render_ask(inner, buf, s),
             SidebarTab::PastePreview(s) => {
                 render_paste_preview(inner, buf, s);
+                None
+            }
+            SidebarTab::Todo(s) => {
+                render_todo(inner, buf, &todo_items, s);
                 None
             }
             SidebarTab::Hotkey => {
@@ -1218,9 +1224,11 @@ fn render_ask(area: Rect, buf: &mut Buffer, s: &mut crate::function::AskState) -
 /// implicit "Type your own answer…" row is appended as the last
 /// row.
 ///
-///     <question>
-///     >  - <option>
-///        - <option>
+/// ```text
+/// <question>
+/// >  - <option>
+///    - <option>
+/// ```
 fn ask_active_question_lines(
     s: &crate::function::AskState,
     active_idx: usize,
@@ -1255,12 +1263,68 @@ fn ask_active_question_lines(
     lines
 }
 
+fn render_todo(area: Rect, buf: &mut Buffer, todos: &[crate::session::TodoItem], s: &mut crate::function::TodoTabState) {
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .split(area);
+    let list_area = rows[0];
+    if todos.is_empty() {
+        Paragraph::new(Line::from(Span::styled("  [no tasks]", Theme::dim())))
+            .wrap(Wrap { trim: false })
+            .render(list_area, buf);
+    } else {
+        ensure_cursor_visible(s.cursor, &mut s.scroll, list_area.height as usize);
+        let range = visible_window(s.cursor, &mut s.scroll, list_area.height as usize, todos.len());
+        for row in range {
+            let item = &todos[row];
+            let y = list_area.y + (row - s.scroll) as u16;
+            let selected = row == s.cursor;
+            let editing = s.editing == Some(row);
+            let prefix = if editing { ">" } else if selected { ">" } else { " " };
+            let status_style = match item.status.as_str() {
+                "pending" => Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                "in_progress" => Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                "completed" => Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                _ => Theme::dim(),
+            };
+            let status_label = match item.status.as_str() {
+                "pending" => "○",
+                "in_progress" => "◌",
+                "completed" => "✓",
+                _ => "?",
+            };
+            let content_display = if editing { format!("{} [edit]", item.content) } else { item.content.clone() };
+            let line = Line::from(vec![
+                Span::styled(format!("{} ", prefix), if selected { Theme::bold() } else { Theme::base() }),
+                Span::styled(format!("{} ", status_label), status_style),
+                Span::styled(content_display, status_style),
+            ]);
+            buf.set_line(list_area.x, y, &line, list_area.width);
+        }
+    }
+    let hint = if s.editing.is_some() {
+        Line::from(Span::styled(
+            " Enter:confirm | Esc:cancel ",
+            Theme::dim(),
+        ))
+    } else {
+        Line::from(Span::styled(
+            " j/k:nav | Alt+I:add | Alt+Shift+I:add above | Del:delete | Enter:toggle | Alt+E:edit | Esc:close ",
+            Theme::dim(),
+        ))
+    };
+    Paragraph::new(hint).render(rows[1], buf);
+}
+
 /// Body lines for the Reviewing phase: one Q/A pair per question.
 ///
-///     Q1. <question>
-///        A. <answer>
-///     Q2. <question>
-///        A. <answer>
+/// ```text
+/// Q1. <question>
+///    A. <answer>
+/// Q2. <question>
+///    A. <answer>
+/// ```
 fn ask_review_lines(s: &crate::function::AskState) -> Vec<Line<'static>> {
     let mut lines: Vec<Line> = Vec::new();
     for (i, it) in s.items.iter().enumerate() {

@@ -154,6 +154,20 @@ pub enum ReasoningMode {
 }
 
 impl ReasoningMode {
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "off" => ReasoningMode::Off,
+            "minimal" => ReasoningMode::Minimal,
+            "low" => ReasoningMode::Low,
+            "medium" | "med" => ReasoningMode::Medium,
+            "high" => ReasoningMode::High,
+            "xhigh" => ReasoningMode::XHigh,
+            "adaptive" => ReasoningMode::Adaptive,
+            "max" => ReasoningMode::Max,
+            _ => ReasoningMode::default(),
+        }
+    }
+
     pub fn as_str(&self) -> &'static str {
         match self {
             ReasoningMode::Off => "off",
