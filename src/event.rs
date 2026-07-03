@@ -1292,11 +1292,6 @@ async fn handle_key(k: crossterm::event::KeyEvent, app: &mut App) {
                 return;
             }
             // close current sidebar tab, or clear input
-            let closing_plan = app.function.active < app.function.tabs.len()
-                && matches!(
-                    app.function.tabs[app.function.active],
-                    crate::function::SidebarTab::Plan(_)
-                );
             if !app.function.close_active() {
                 if !app.input.buffer.is_empty() {
                     app.input.buffer.clear();
@@ -1304,10 +1299,6 @@ async fn handle_key(k: crossterm::event::KeyEvent, app: &mut App) {
                     app.paste_blocks.clear();
                 }
             } else {
-                // Restore previous mode when Plan tab is closed via Esc.
-                if closing_plan && app.mode == AppMode::Plan {
-                    app.set_mode(app.previous_mode);
-                }
                 // A function tab was closed. If it was the last non-
                 // Notification tab, hide the panel so we return to the
                 // default state.
@@ -2640,16 +2631,9 @@ async fn dispatch_to_active_tab(k: crossterm::event::KeyEvent, app: &mut App) ->
 fn close_active_function_tab(app: &mut App) {
     let active = app.function.active;
     if active < app.function.tabs.len() {
-        let is_plan = matches!(
-            app.function.tabs[active],
-            crate::function::SidebarTab::Plan(_)
-        );
         app.function.tabs.remove(active);
         if app.function.active >= app.function.tabs.len() {
             app.function.active = app.function.tabs.len().saturating_sub(1);
-        }
-        if is_plan && app.mode == AppMode::Plan {
-            app.set_mode(app.previous_mode);
         }
     }
     app.maybe_hide_panel();
@@ -2761,6 +2745,7 @@ async fn handle_plan_key(
         }
         KeyCode::Esc => {
             close_active_function_tab(app);
+            app.set_mode(app.previous_mode);
             true
         }
         _ => false,

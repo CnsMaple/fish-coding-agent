@@ -1854,12 +1854,18 @@ impl App {
         self.status.set_mode(mode.as_str());
     }
 
-    /// Jump to the Plan tab. If no Plan tab exists, create a minimal one.
-    /// Saves the current mode as `previous_mode` and switches to Plan.
+    /// Toggle Plan mode. If not in Plan mode: save current mode as
+    /// `previous_mode`, switch to Plan (read-only), and focus the
+    /// existing Plan tab if any. The panel is only shown when there
+    /// is at least one tab to display. If already in Plan mode:
+    /// restore `previous_mode` and hide the panel.
     pub fn jump_to_plan(&mut self) {
-        if self.mode != AppMode::Plan {
-            self.previous_mode = self.mode;
+        if self.mode == AppMode::Plan {
+            self.set_mode(self.previous_mode);
+            self.maybe_hide_panel();
+            return;
         }
+        self.previous_mode = self.mode;
         self.set_mode(AppMode::Plan);
         if let Some((i, _)) = self
             .function
@@ -1869,12 +1875,13 @@ impl App {
             .find(|(_, t)| matches!(t, SidebarTab::Plan(_)))
         {
             self.function.active = i;
-        } else {
-            let state = PlanState::new(String::new(), String::new());
-            self.function.push(SidebarTab::Plan(state));
         }
-        self.function_visible = true;
-        self.acknowledge_panel();
+        // Only show the panel when there is content to display,
+        // otherwise the user would see an empty bordered box.
+        if self.function.has_any_tab() {
+            self.function_visible = true;
+            self.acknowledge_panel();
+        }
     }
 
     pub fn open_plan(&mut self, title: String, content: String) {
