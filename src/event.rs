@@ -2643,7 +2643,18 @@ async fn dispatch_to_active_tab(k: crossterm::event::KeyEvent, app: &mut App) ->
             crate::function::SidebarTab::Notifications
         )
     {
-        app.function.tabs[active] = tab;
+        // If the Plan tab was approved or rejected, close it instead
+        // of restoring it. The handler already set state.approved
+        // and switched the app mode.
+        if matches!(&tab, crate::function::SidebarTab::Plan(state) if state.approved.is_some()) {
+            app.function.tabs.remove(active);
+            if app.function.active >= app.function.tabs.len() {
+                app.function.active = app.function.tabs.len().saturating_sub(1);
+            }
+            app.maybe_hide_panel();
+        } else {
+            app.function.tabs[active] = tab;
+        }
     }
     consumed
 }
@@ -2731,7 +2742,9 @@ async fn handle_plan_key(
             // send_chat -> send_message pushes the user message into
             // the session; do NOT push it here too, otherwise the
             // message appears twice in the session.
-            close_active_function_tab(app);
+            // close_active_function_tab is intentionally NOT called
+            // here: dispatch_to_active_tab swapped the Plan state out
+            // of tabs and will close it after we return.
             app.set_mode(crate::function::AppMode::Yolo);
             app.notify(
                 crate::function::notifications::ToastLevel::Ok,
@@ -2743,7 +2756,6 @@ async fn handle_plan_key(
         KeyCode::Char('r') | KeyCode::Char('R') => {
             state.approved = Some(false);
             let prompt = "Plan rejected. Please revise or ask a follow-up question.".to_string();
-            close_active_function_tab(app);
             app.set_mode(crate::function::AppMode::Yolo);
             app.notify(
                 crate::function::notifications::ToastLevel::Warn,
