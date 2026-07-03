@@ -44,6 +44,7 @@ pub struct Notifications {
     pub query: String,
     pub cursor: usize,
     pub scroll: usize,
+    pub searching: bool,
 }
 
 use std::collections::VecDeque;
@@ -82,6 +83,7 @@ impl Notifications {
         self.query.clear();
         self.cursor = 0;
         self.scroll = 0;
+        self.searching = false;
     }
 
     pub fn latest_n(&self, n: usize) -> Vec<&Toast> {
@@ -153,6 +155,14 @@ impl Notifications {
         } else {
             false
         }
+    }
+
+    pub fn enter_search_mode(&mut self) {
+        self.searching = true;
+    }
+
+    pub fn exit_search_mode(&mut self) {
+        self.searching = false;
     }
 }
 

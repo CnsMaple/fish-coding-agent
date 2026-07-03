@@ -8,21 +8,24 @@ use unicode_width::UnicodeWidthStr;
 
 /// Renders a picker-style search row with focus-aware styling.
 ///
-/// When the search field is focused (`focus == Search`), the label uses
-/// bold style and a blank span at cursor position.
-/// The actual terminal cursor is positioned at the end of the query text
-/// (or at the label end when empty), so the terminal cursor color is used
-/// instead of a drawn `█` character.
+/// When `searching` is true, the search field is active and shows the
+/// query text with a cursor. When `searching` is false, a dim placeholder
+/// `"(press 'i' to search)"` is shown instead.
 ///
-/// When unfocused, the label is dimmed and the placeholder
-/// `"(type to filter)"` is shown instead.
+/// The `focus` parameter is used for the standard picker search rows
+/// (notifications always use the `searching` flag to decide).
 pub fn render_search_row(
     area: Rect,
     buf: &mut Buffer,
     query: &str,
     focus: PickerFocus,
+    searching: bool,
 ) -> Option<(u16, u16)> {
-    let focused = focus == PickerFocus::Search;
+    let focused = if searching {
+        true
+    } else {
+        focus == PickerFocus::Search
+    };
     let prefix = if focused {
         Span::styled(" search: ", Theme::bold())
     } else {
@@ -33,8 +36,10 @@ pub fn render_search_row(
         if focused {
             // Show a visible empty-input indicator
             spans.push(Span::styled("\u{200B}", Theme::cursor()));
-        } else {
+        } else if searching {
             spans.push(Span::styled("(type to filter)", Theme::dim()));
+        } else {
+            spans.push(Span::styled("(press 'i' to search)", Theme::dim()));
         }
     } else {
         spans.push(Span::raw(query.to_string()));

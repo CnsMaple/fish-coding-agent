@@ -130,6 +130,7 @@ fn render_notifications(area: Rect, buf: &mut Buffer, app: &mut App) {
         buf,
         &app.notifications.query,
         crate::function::PickerFocus::List,
+        app.notifications.searching,
     );
 
     let filtered = app.notifications.filtered_indices();
@@ -201,10 +202,17 @@ fn render_notifications(area: Rect, buf: &mut Buffer, app: &mut App) {
         List::new(visible).render(list_area, buf);
     }
 
-    let hint = Line::from(Span::styled(
-        " Up/Down: nav | type: filter | Backspace: edit | Ctrl+E: edit | Esc: close ",
-        Theme::dim(),
-    ));
+    let hint = if app.notifications.searching {
+        Line::from(Span::styled(
+            " Up/Down: nav | type: filter | Backspace: edit | Esc: close ",
+            Theme::dim(),
+        ))
+    } else {
+        Line::from(Span::styled(
+            " Up/Down: nav | i: search | Esc: close ",
+            Theme::dim(),
+        ))
+    };
     Paragraph::new(hint).render(rows[2], buf);
 }
 
@@ -253,7 +261,7 @@ fn render_new_provider_picker(
         ])
         .split(area);
     let search_cursor =
-        crate::ui::picker_widget::render_search_row(rows[0], buf, &s.query, s.focus);
+        crate::ui::picker_widget::render_search_row(rows[0], buf, &s.query, s.focus, false);
     let list_area = rows[1];
     if s.filtered.is_empty() {
         Paragraph::new(Line::from(Span::styled("  [no matches]", Theme::dim())))
@@ -594,7 +602,7 @@ fn render_picker(
 
     // --- search row -----------------------------------------------------
     let search_cursor =
-        crate::ui::picker_widget::render_search_row(rows[0], buf, &s.query, s.focus);
+        crate::ui::picker_widget::render_search_row(rows[0], buf, &s.query, s.focus, false);
 
     // --- list -----------------------------------------------------------
     let list_area = rows[1];
@@ -671,7 +679,7 @@ fn render_provider_picker(
 
     // --- search row -----------------------------------------------------
     let search_cursor =
-        crate::ui::picker_widget::render_search_row(rows[0], buf, &s.query, s.focus);
+        crate::ui::picker_widget::render_search_row(rows[0], buf, &s.query, s.focus, false);
 
     // --- list -----------------------------------------------------------
     let list_area = rows[1];
@@ -837,6 +845,7 @@ fn render_thinking_picker(
         buf,
         &s.query,
         crate::function::PickerFocus::Search,
+        false,
     );
 
     // List — scroll the visible window so the cursor row is always
@@ -888,7 +897,7 @@ fn render_timeline_picker(
 
     // --- search row ---
     let search_cursor =
-        crate::ui::picker_widget::render_search_row(rows[0], buf, &s.query, s.focus);
+        crate::ui::picker_widget::render_search_row(rows[0], buf, &s.query, s.focus, false);
 
     // --- list ---
     let list_area = rows[1];
@@ -972,7 +981,7 @@ fn render_session_picker(
         .split(area);
 
     let search_cursor =
-        crate::ui::picker_widget::render_search_row(rows[0], buf, &s.query, s.focus);
+        crate::ui::picker_widget::render_search_row(rows[0], buf, &s.query, s.focus, false);
     let list_area = rows[1];
     if s.entries.is_empty() {
         Paragraph::new(Line::from(Span::styled(

@@ -1312,6 +1312,9 @@ pub struct App {
     pub session_id: String,
     pub session_title: String,
     pub mode: AppMode,
+    /// Mode to restore when the function panel is hidden or the
+    /// Plan tab is closed. Updated when tab switching enters Plan mode.
+    pub previous_mode: AppMode,
     /// Active agent role. Drives the tool permission gate and the
     /// system prompt template. Synced with `mode` by `set_mode`.
     pub active_agent: crate::permission::Agent,
@@ -1526,6 +1529,7 @@ impl App {
             session_id,
             session_title,
             mode: AppMode::Yolo,
+            previous_mode: AppMode::Yolo,
             function: FunctionPanel::new(),
             active_agent: crate::permission::Agent::Build,
             input: crate::input::InputState::new(),
@@ -1619,35 +1623,33 @@ impl App {
         // default) inside `StatusBar::recompute_compact_pct`.
     }
 
-    /// Push a toast; if level is important and panel is hidden, force-show
-    /// and bump pending_events. The Notifications tab is created on-demand
-    /// — it no longer sits permanently at index 0.
+    /// Push a toast; force-show the panel when a notification arrives.
+    /// The Notifications tab is created on-demand — when no other tab
+    /// is already open, it also becomes the active tab.
     pub fn notify(
         &mut self,
         level: crate::function::notifications::ToastLevel,
         text: impl Into<String>,
     ) {
         let text = text.into();
-        if level.is_important() {
-            let notif_exists = self
-                .function
-                .tabs
-                .iter()
-                .any(|t| matches!(t, SidebarTab::Notifications));
-            if notif_exists {
-                for (i, t) in self.function.tabs.iter().enumerate() {
-                    if matches!(t, SidebarTab::Notifications) {
-                        self.function.active = i;
-                        break;
-                    }
-                }
-            } else {
-                self.function.push(SidebarTab::Notifications);
+        let notif_exists = self
+            .function
+            .tabs
+            .iter()
+            .any(|t| matches!(t, SidebarTab::Notifications));
+        if !notif_exists {
+            let saved_active = self.function.active;
+            self.function.push(SidebarTab::Notifications);
+            // Restore the previous active tab — push() always sets
+            // active to the new tab, but we don't want to steal focus
+            // from an existing tab (e.g. Settings, Ask).
+            if saved_active < self.function.tabs.len() - 1 {
+                self.function.active = saved_active;
             }
-            if !self.function_visible {
-                self.function_visible = true;
-                self.pending_events = self.pending_events.saturating_add(1);
-            }
+        }
+        if !self.function_visible {
+            self.function_visible = true;
+            self.pending_events = self.pending_events.saturating_add(1);
         }
         self.notifications.push(level, text);
     }
@@ -1852,7 +1854,33 @@ impl App {
         self.status.set_mode(mode.as_str());
     }
 
+    /// Jump to the Plan tab. If no Plan tab exists, create a minimal one.
+    /// Saves the current mode as `previous_mode` and switches to Plan.
+    pub fn jump_to_plan(&mut self) {
+        if self.mode != AppMode::Plan {
+            self.previous_mode = self.mode;
+        }
+        self.set_mode(AppMode::Plan);
+        if let Some((i, _)) = self
+            .function
+            .tabs
+            .iter_mut()
+            .enumerate()
+            .find(|(_, t)| matches!(t, SidebarTab::Plan(_)))
+        {
+            self.function.active = i;
+        } else {
+            let state = PlanState::new(String::new(), String::new());
+            self.function.push(SidebarTab::Plan(state));
+        }
+        self.function_visible = true;
+        self.acknowledge_panel();
+    }
+
     pub fn open_plan(&mut self, title: String, content: String) {
+        if self.mode != AppMode::Plan {
+            self.previous_mode = self.mode;
+        }
         self.set_mode(AppMode::Plan);
         // Plans are not auto-saved: the user reviews the plan in the
         // session and presses S in the plan tab to persist it.
@@ -1907,21 +1935,32 @@ impl App {
     /// open, the new question is appended to its queue and becomes
     /// the active one.
     pub fn open_ask(&mut self, question: String, options: Vec<String>) {
-        // Surface a short toast summary so the user notices the ask
-        // even if the panel is hidden.
-        let summary = {
-            let s = question.trim();
-            if s.chars().count() > 60 {
-                let cut: String = s.chars().take(57).collect();
-                format!("{cut}…")
-            } else {
-                s.to_string()
-            }
-        };
-        self.notify(
+        // Ensure the Notifications tab exists so the toast is recorded.
+        let notif_exists = self
+            .function
+            .tabs
+            .iter()
+            .any(|t| matches!(t, SidebarTab::Notifications));
+        if !notif_exists {
+            self.function.push(SidebarTab::Notifications);
+        }
+        // Surface a short toast summary so the notification panel records it.
+        self.notifications.push(
             crate::function::notifications::ToastLevel::Info,
-            format!("AI asks: {summary}"),
+            format!("AI asks: {}", {
+                let s = question.trim();
+                if s.chars().count() > 60 {
+                    let cut: String = s.chars().take(57).collect();
+                    format!("{cut}…")
+                } else {
+                    s.to_string()
+                }
+            }),
         );
+        // Ensure the panel is visible when it was hidden.
+        if !self.function_visible {
+            self.function_visible = true;
+        }
 
         // Also accumulate the merged-list body so a single `+--- Ask
         // ---+` block can land in the session at the end of the
@@ -2117,6 +2156,9 @@ impl App {
     pub fn maybe_hide_panel(&mut self) {
         if !self.function.has_any_tab() {
             self.function_visible = false;
+            if self.mode == AppMode::Plan {
+                self.set_mode(self.previous_mode);
+            }
         }
     }
 }
@@ -2160,6 +2202,7 @@ mod tests {
             session_id: crate::session::store::new_session_id(),
             session_title: "test".to_string(),
             mode: AppMode::Yolo,
+            previous_mode: AppMode::Yolo,
             active_agent: crate::permission::Agent::Build,
             function: FunctionPanel::new(),
             input: crate::input::InputState::new(),
@@ -2236,8 +2279,9 @@ mod tests {
     fn open_ask_pushes_first_question() {
         let mut app = make_test_app();
         app.open_ask("Q?".to_string(), vec!["a".to_string(), "b".to_string()]);
-        let state = match app.function.tabs.first().unwrap() {
-            SidebarTab::Ask(s) => s.clone(),
+        // Notifications tab at 0, Ask tab at 1.
+        let state = match app.function.tabs.get(1) {
+            Some(SidebarTab::Ask(s)) => s.clone(),
             _ => panic!("expected ask tab"),
         };
         assert_eq!(state.items.len(), 1);
@@ -2252,8 +2296,8 @@ mod tests {
         let mut app = make_test_app();
         app.open_ask("first".to_string(), vec!["a".to_string()]);
         app.open_ask("second".to_string(), vec!["x".to_string(), "y".to_string()]);
-        let state = match app.function.tabs.first().unwrap() {
-            SidebarTab::Ask(s) => s.clone(),
+        let state = match app.function.tabs.get(1) {
+            Some(SidebarTab::Ask(s)) => s.clone(),
             _ => panic!(),
         };
         assert_eq!(state.items.len(), 2);

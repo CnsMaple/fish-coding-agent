@@ -10,6 +10,7 @@ use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::time::interval;
 
 use crate::app::App;
+use crate::function::AppMode;
 
 /// Position the hardware cursor for IME support.
 ///
@@ -1291,6 +1292,11 @@ async fn handle_key(k: crossterm::event::KeyEvent, app: &mut App) {
                 return;
             }
             // close current sidebar tab, or clear input
+            let closing_plan = app.function.active < app.function.tabs.len()
+                && matches!(
+                    app.function.tabs[app.function.active],
+                    crate::function::SidebarTab::Plan(_)
+                );
             if !app.function.close_active() {
                 if !app.input.buffer.is_empty() {
                     app.input.buffer.clear();
@@ -1298,6 +1304,10 @@ async fn handle_key(k: crossterm::event::KeyEvent, app: &mut App) {
                     app.paste_blocks.clear();
                 }
             } else {
+                // Restore previous mode when Plan tab is closed via Esc.
+                if closing_plan && app.mode == AppMode::Plan {
+                    app.set_mode(app.previous_mode);
+                }
                 // A function tab was closed. If it was the last non-
                 // Notification tab, hide the panel so we return to the
                 // default state.
@@ -1308,13 +1318,12 @@ async fn handle_key(k: crossterm::event::KeyEvent, app: &mut App) {
             if complete_focused_candidate(app) {
                 return;
             }
-            // Tab cycles sidebar tabs forward. The Settings form and
-            // ModelPicker each consume Tab themselves (for field-navigation
-            // and search/list toggle), so they never reach here.
-            cycle_sidebar_forward(app);
+            // Tab jumps to the Plan tab (or creates one).
+            app.jump_to_plan();
         }
         KeyCode::BackTab => {
-            cycle_sidebar_tab_back(app);
+            // Shift+Tab cycles forward through tabs (wrap last→first).
+            cycle_sidebar_forward(app);
         }
         KeyCode::Enter => {
             // If the completion tab is showing for a partial command, complete
@@ -1476,16 +1485,7 @@ async fn handle_key(k: crossterm::event::KeyEvent, app: &mut App) {
     }
 }
 
-fn cycle_sidebar_tab_back(app: &mut App) {
-    if app.function.tabs.is_empty() {
-        return;
-    }
-    app.function.active =
-        (app.function.active + app.function.tabs.len() - 1) % app.function.tabs.len();
-    if app.function_visible {
-        app.acknowledge_panel();
-    }
-}
+
 
 /// Returns the index of the Completion sidebar tab, if any.
 fn completion_idx(app: &App) -> Option<usize> {
@@ -1849,6 +1849,10 @@ pub fn cycle_sidebar_forward(app: &mut App) {
         return;
     }
     app.function.active = (app.function.active + 1) % app.function.tabs.len();
+    if app.mode != AppMode::Plan {
+        app.previous_mode = app.mode;
+    }
+    app.set_mode(AppMode::Plan);
     if app.function_visible {
         app.acknowledge_panel();
     }
@@ -2636,9 +2640,16 @@ async fn dispatch_to_active_tab(k: crossterm::event::KeyEvent, app: &mut App) ->
 fn close_active_function_tab(app: &mut App) {
     let active = app.function.active;
     if active < app.function.tabs.len() {
+        let is_plan = matches!(
+            app.function.tabs[active],
+            crate::function::SidebarTab::Plan(_)
+        );
         app.function.tabs.remove(active);
         if app.function.active >= app.function.tabs.len() {
             app.function.active = app.function.tabs.len().saturating_sub(1);
+        }
+        if is_plan && app.mode == AppMode::Plan {
+            app.set_mode(app.previous_mode);
         }
     }
     app.maybe_hide_panel();
@@ -2659,9 +2670,18 @@ fn handle_notifications_key(k: crossterm::event::KeyEvent, app: &mut App) -> boo
             }
             true
         }
-        KeyCode::Backspace => app.notifications.backspace_query(),
+        KeyCode::Backspace => {
+            if app.notifications.searching {
+                app.notifications.backspace_query()
+            } else {
+                false
+            }
+        }
         KeyCode::Esc => {
-            if !app.notifications.query.is_empty() {
+            if app.notifications.searching {
+                app.notifications.exit_search_mode();
+                true
+            } else if !app.notifications.query.is_empty() {
                 app.notifications.query.clear();
                 app.notifications.cursor = 0;
                 app.notifications.scroll = 0;
@@ -2671,8 +2691,19 @@ fn handle_notifications_key(k: crossterm::event::KeyEvent, app: &mut App) -> boo
                 true
             }
         }
+        KeyCode::Char('i') | KeyCode::Char('I') => {
+            if k.modifiers.is_empty() && !app.notifications.searching {
+                app.notifications.enter_search_mode();
+                true
+            } else if app.notifications.searching {
+                app.notifications.insert_query_char('i');
+                true
+            } else {
+                false
+            }
+        }
         KeyCode::Char(c) => {
-            if k.modifiers.is_empty() || k.modifiers == crossterm::event::KeyModifiers::SHIFT {
+            if app.notifications.searching {
                 app.notifications.insert_query_char(c);
                 true
             } else {
@@ -2730,7 +2761,6 @@ async fn handle_plan_key(
         }
         KeyCode::Esc => {
             close_active_function_tab(app);
-            app.set_mode(crate::function::AppMode::Yolo);
             true
         }
         _ => false,
@@ -4263,14 +4293,13 @@ pub fn commit_model(
         }
     }
 
-    // 3. Refresh the status bar and persist to disk.
+    // 3. Refresh the status bar.
     app.status.set_provider_name(&app.config.active_name());
     app.status.set_model(&app.config.active_model_display());
     app.refresh_status_model_context();
     if let Some(tokens) = selected_model.and_then(|m| m.context_window_tokens) {
         app.status.set_context_window_tokens(tokens);
     }
-    app.save_config();
 
     // 4. Close the picker tab.
     if app.function.active < app.function.tabs.len() {
@@ -4296,7 +4325,11 @@ pub fn commit_model(
     }
     app.maybe_hide_panel();
 
-    // 5. Toast.
+    // 5. Persist to disk (after tab cleanup so notify() doesn't
+    //    shift indices when creating a Notifications tab).
+    app.save_config();
+
+    // 6. Toast.
     if manual {
         app.notify(ToastLevel::Ok, format!("manual model id set: {model_id}"));
     } else {
@@ -4350,6 +4383,7 @@ mod tests {
             session_id: crate::session::store::new_session_id(),
             session_title: "test".to_string(),
             mode: crate::function::AppMode::Yolo,
+            previous_mode: crate::function::AppMode::Yolo,
             active_agent: crate::permission::Agent::Build,
             function: FunctionPanel::new(),
             input: crate::input::InputState::new(),
@@ -4873,9 +4907,9 @@ mod tests {
     #[test]
     fn commit_model_with_empty_function_panel_does_not_panic() {
         // The function panel has only the picker, no Notifications. After
-        // commit, the function is empty. Verify no panic.
+        // commit, the function panel should only have the Notifications tab
+        // (created by save_config's notify). Verify no panic.
         let mut app = make_app();
-        // Remove the default Notifications tab.
         app.function.tabs.clear();
         app.function.active = 0;
         app.config.active = Some(make_id(ProviderKind::Openai, ProviderMode::Key));
@@ -4886,7 +4920,12 @@ mod tests {
 
         commit_model(&mut app, ProviderKind::Openai, "gpt-4o".to_string(), false);
 
-        assert_eq!(app.function.tabs.len(), 0);
+        // After commit, the Notifications tab is created by save_config.
+        assert_eq!(app.function.tabs.len(), 1);
+        assert!(matches!(
+            app.function.tabs[0],
+            SidebarTab::Notifications
+        ));
         assert_eq!(app.function.active, 0);
     }
 
@@ -6518,7 +6557,8 @@ mod tests {
             .iter()
             .any(|t| matches!(t, SidebarTab::Ask(_))));
 
-        let mut state = match app.function.tabs.remove(0) {
+        let ask_idx = app.function.tabs.iter().position(|t| matches!(t, SidebarTab::Ask(_))).unwrap();
+        let mut state = match app.function.tabs.remove(ask_idx) {
             SidebarTab::Ask(s) => s,
             _ => unreachable!(),
         };
@@ -6558,7 +6598,8 @@ mod tests {
 
         let before = app.session.messages.len();
 
-        let mut state = match app.function.tabs.remove(0) {
+        let ask_idx = app.function.tabs.iter().position(|t| matches!(t, SidebarTab::Ask(_))).unwrap();
+        let mut state = match app.function.tabs.remove(ask_idx) {
             SidebarTab::Ask(s) => s,
             _ => unreachable!(),
         };
@@ -6582,7 +6623,7 @@ mod tests {
         );
 
         // Tab still open so the user can confirm.
-        app.function.tabs.insert(0, SidebarTab::Ask(state));
+        app.function.tabs.insert(ask_idx, SidebarTab::Ask(state));
         assert!(app
             .function
             .tabs
@@ -6602,13 +6643,14 @@ mod tests {
 
         // open_ask lands on the latest question; pull active back to
         // the first question so the test exercises the advance path.
-        match &mut app.function.tabs[0] {
+        let ask_idx = app.function.tabs.iter().position(|t| matches!(t, SidebarTab::Ask(_))).unwrap();
+        match &mut app.function.tabs[ask_idx] {
             SidebarTab::Ask(s) => s.active = 0,
             _ => unreachable!(),
         }
         let before = app.session.messages.len();
 
-        let mut state = match app.function.tabs.remove(0) {
+        let mut state = match app.function.tabs.remove(ask_idx) {
             SidebarTab::Ask(s) => s,
             _ => unreachable!(),
         };
@@ -6636,11 +6678,12 @@ mod tests {
         let mut app = make_app_with_provider();
         app.open_ask("Q1?".to_string(), vec!["a".into()]);
         app.open_ask("Q2?".to_string(), vec!["x".into(), "y".into()]);
-        match &mut app.function.tabs[0] {
+        let ask_idx = app.function.tabs.iter().position(|t| matches!(t, SidebarTab::Ask(_))).unwrap();
+        match &mut app.function.tabs[ask_idx] {
             SidebarTab::Ask(s) => s.active = 0,
             _ => unreachable!(),
         }
-        let mut state = match app.function.tabs.remove(0) {
+        let mut state = match app.function.tabs.remove(ask_idx) {
             SidebarTab::Ask(s) => s,
             _ => unreachable!(),
         };
@@ -6686,11 +6729,12 @@ mod tests {
         let mut app = make_app_with_provider();
         app.open_ask("Q1?".to_string(), vec!["a".into()]);
         app.open_ask("Q2?".to_string(), vec!["x".into()]);
-        match &mut app.function.tabs[0] {
+        let ask_idx = app.function.tabs.iter().position(|t| matches!(t, SidebarTab::Ask(_))).unwrap();
+        match &mut app.function.tabs[ask_idx] {
             SidebarTab::Ask(s) => s.active = 0,
             _ => unreachable!(),
         }
-        let mut state = match app.function.tabs.remove(0) {
+        let mut state = match app.function.tabs.remove(ask_idx) {
             SidebarTab::Ask(s) => s,
             _ => unreachable!(),
         };
@@ -6710,17 +6754,18 @@ mod tests {
     }
 
     /// Esc at any phase dismisses the whole ask round with a single
-    /// summary (mixing answered and dismissed entries).
+    /// summary (mixing answered and skipped entries).
     #[tokio::test]
     async fn ask_esc_dismiss_summary_includes_answered_and_skipped() {
         let mut app = make_app_with_provider();
         app.open_ask("Q1?".to_string(), vec!["a".into()]);
         app.open_ask("Q2?".to_string(), vec!["x".into()]);
-        match &mut app.function.tabs[0] {
+        let ask_idx = app.function.tabs.iter().position(|t| matches!(t, SidebarTab::Ask(_))).unwrap();
+        match &mut app.function.tabs[ask_idx] {
             SidebarTab::Ask(s) => s.active = 0,
             _ => unreachable!(),
         }
-        let mut state = match app.function.tabs.remove(0) {
+        let mut state = match app.function.tabs.remove(ask_idx) {
             SidebarTab::Ask(s) => s,
             _ => unreachable!(),
         };
@@ -6754,7 +6799,8 @@ mod tests {
     async fn ask_up_down_moves_per_question_cursor() {
         let mut app = make_app_with_provider();
         app.open_ask("Q1?".to_string(), vec!["a".into(), "b".into()]);
-        let mut state = match app.function.tabs.remove(0) {
+        let ask_idx = app.function.tabs.iter().position(|t| matches!(t, SidebarTab::Ask(_))).unwrap();
+        let mut state = match app.function.tabs.remove(ask_idx) {
             SidebarTab::Ask(s) => s,
             _ => unreachable!(),
         };
@@ -6803,7 +6849,8 @@ mod tests {
         let mut app = make_app_with_provider();
         app.open_ask("Q1?".to_string(), vec!["a".into()]);
         app.open_ask("Q2?".to_string(), vec!["x".into()]);
-        let mut state = match app.function.tabs.remove(0) {
+        let ask_idx = app.function.tabs.iter().position(|t| matches!(t, SidebarTab::Ask(_))).unwrap();
+        let mut state = match app.function.tabs.remove(ask_idx) {
             SidebarTab::Ask(s) => s,
             _ => unreachable!(),
         };
@@ -6851,11 +6898,12 @@ mod tests {
         let mut app = make_app_with_provider();
         app.open_ask("Q1?".to_string(), vec!["a".into()]);
         app.open_ask("Q2?".to_string(), vec!["x".into()]);
-        match &mut app.function.tabs[0] {
+        let ask_idx = app.function.tabs.iter().position(|t| matches!(t, SidebarTab::Ask(_))).unwrap();
+        match &mut app.function.tabs[ask_idx] {
             SidebarTab::Ask(s) => s.active = 0,
             _ => unreachable!(),
         }
-        let mut state = match app.function.tabs.remove(0) {
+        let mut state = match app.function.tabs.remove(ask_idx) {
             SidebarTab::Ask(s) => s,
             _ => unreachable!(),
         };
