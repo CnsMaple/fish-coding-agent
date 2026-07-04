@@ -1607,6 +1607,20 @@ fn plan_tool_display(content: &str) -> Option<(String, String)> {
     Some((rendered, footer))
 }
 
+#[derive(Debug, Clone)]
+enum DiffLineKind {
+    Context,
+    Removed,
+    Added,
+}
+
+#[derive(Debug, Clone)]
+struct DiffLine {
+    kind: DiffLineKind,
+    line_no: usize,
+    content: String,
+}
+
 fn build_write_file_diff_rows(
     tool: &ToolResultBlock,
     visible: bool,
@@ -1618,27 +1632,35 @@ fn build_write_file_diff_rows(
     let diff = unified_diff_rows(&old, &new);
     let added = diff
         .iter()
-        .filter(|line| line.starts_with(" ") && is_diff_added(line))
+        .filter(|line| matches!(line.kind, DiffLineKind::Added))
         .count();
-    let removed = diff.iter().filter(|line| line.starts_with('-')).count();
+    let removed = diff
+        .iter()
+        .filter(|line| matches!(line.kind, DiffLineKind::Removed))
+        .count();
     let ext = std::path::Path::new(&path)
         .extension()
         .and_then(|ext| ext.to_str())
         .unwrap_or("file");
     let title = format!(" ~ Edit: {ext} {path} [+{added}/-{removed}] ");
+    let lang = ext;
 
     let width = width.max(4);
     let mut rows = vec![border_with_label_line(width, &title, bg)];
-    let body = diff.join("\n");
     if visible {
         if diff.is_empty() {
             rows.extend(box_row_lines("[no changes]", width, bg));
         } else {
             for line in &diff {
-                rows.push(diff_box_row_line(line, width, bg));
+                rows.push(diff_box_row_line(line, width, bg, lang));
             }
         }
     } else {
+        let body = diff
+            .iter()
+            .map(diff_line_to_plain_str)
+            .collect::<Vec<_>>()
+            .join("\n");
         let (preview, skipped) = collapsed_output_lines(&body, preview_lines, width, bg);
         rows.extend(preview);
         if skipped > 0 {
@@ -1649,34 +1671,60 @@ fn build_write_file_diff_rows(
     Some(rows)
 }
 
-fn is_diff_added(line: &str) -> bool {
-    line.find('│')
-        .and_then(|pos| line[..pos].chars().last())
-        .map(|c| c == '+')
-        .unwrap_or(false)
-}
-
-fn diff_box_row_line(diff_line: &str, width: usize, bg: Color) -> Line<'static> {
-    let fg = if diff_line.starts_with('-') {
-        Color::Red
-    } else if is_diff_added(diff_line) {
-        Color::Green
-    } else {
-        Color::Reset
+fn diff_box_row_line(diff: &DiffLine, width: usize, bg: Color, lang: &str) -> Line<'static> {
+    let (line_bg, sign) = match diff.kind {
+        DiffLineKind::Removed => (Color::Rgb(237, 218, 213), "-"),
+        DiffLineKind::Added => (Color::Rgb(212, 233, 218), "+"),
+        DiffLineKind::Context => (bg, " "),
     };
 
-    let pad = width
-        .saturating_sub(4)
-        .saturating_sub(visible_width(diff_line));
-    let mut spans = vec![
-        Span::styled("| ", dim_bg_style(bg)),
-        Span::styled(diff_line.to_string(), Style::default().fg(fg).bg(bg)),
-    ];
+    let sign_color = match diff.kind {
+        DiffLineKind::Removed => Color::Rgb(237, 218, 213),
+        DiffLineKind::Added => Color::Rgb(212, 233, 218),
+        DiffLineKind::Context => Color::Reset,
+    };
+
+    let number_width = 3.max(diff.line_no.to_string().len());
+    let prefix = format!("{}{:>width$} ", sign, diff.line_no, width = number_width);
+
+    let content = &diff.content;
+    let content_spans = crate::session::markdown::highlight_line(content, lang);
+    let content_spans = spans_with_bg(&content_spans, line_bg);
+
+    let content_width: usize = content_spans
+        .iter()
+        .map(|s| unicode_width::UnicodeWidthStr::width(s.content.as_ref()))
+        .sum();
+    let prefix_width = unicode_width::UnicodeWidthStr::width(prefix.as_str());
+    let inner_w = width.saturating_sub(4);
+    let pad = inner_w.saturating_sub(prefix_width).saturating_sub(content_width);
+
+    let mut spans = vec![Span::styled("| ", dim_bg_style(bg))];
+    spans.push(Span::styled(prefix, Style::default().fg(sign_color).bg(line_bg)));
+    spans.push(Span::styled("│ ", bg_style(line_bg)));
+    spans.extend(content_spans);
     if pad > 0 {
-        spans.push(Span::styled(" ".repeat(pad), Style::default().bg(bg)));
+        spans.push(Span::styled(" ".repeat(pad), bg_style(line_bg)));
     }
     spans.push(Span::styled(" |", dim_bg_style(bg)));
     Line::from(spans)
+}
+
+fn diff_line_to_plain_str(dl: &DiffLine) -> String {
+    let nw = 3usize.max(dl.line_no.to_string().len());
+    match dl.kind {
+        DiffLineKind::Context => {
+            format!(" {:>width$}│{}", dl.line_no, dl.content, width = nw)
+        }
+        DiffLineKind::Removed => {
+            let text = mark_leading_spaces(&dl.content);
+            format!("-{:>width$}│{}", dl.line_no, text, width = nw)
+        }
+        DiffLineKind::Added => {
+            let text = mark_leading_spaces(&dl.content);
+            format!(" {:>width$}│{}", "+", text, width = nw)
+        }
+    }
 }
 
 fn parse_write_file_diff(content: &str) -> Option<(String, String, String)> {
@@ -1691,7 +1739,7 @@ fn parse_write_file_diff(content: &str) -> Option<(String, String, String)> {
     ))
 }
 
-fn unified_diff_rows(old: &str, new: &str) -> Vec<String> {
+fn unified_diff_rows(old: &str, new: &str) -> Vec<DiffLine> {
     let old_lines: Vec<&str> = old.lines().collect();
     let new_lines: Vec<&str> = new.lines().collect();
     if old_lines == new_lines {
@@ -1719,12 +1767,6 @@ fn unified_diff_rows(old: &str, new: &str) -> Vec<String> {
     let context = 3usize;
     let context_start = prefix.saturating_sub(context);
     let context_after = suffix.min(context);
-    let number_width = old_lines
-        .len()
-        .max(new_lines.len())
-        .to_string()
-        .len()
-        .max(3);
 
     let mut rows = Vec::new();
     for (idx, line) in old_lines
@@ -1733,7 +1775,11 @@ fn unified_diff_rows(old: &str, new: &str) -> Vec<String> {
         .take(prefix)
         .skip(context_start)
     {
-        rows.push(diff_context_line(idx + 1, line, number_width));
+        rows.push(DiffLine {
+            kind: DiffLineKind::Context,
+            line_no: idx + 1,
+            content: line.to_string(),
+        });
     }
     for (idx, line) in old_lines
         .iter()
@@ -1741,10 +1787,23 @@ fn unified_diff_rows(old: &str, new: &str) -> Vec<String> {
         .take(old_change_end)
         .skip(prefix)
     {
-        rows.push(diff_removed_line(idx + 1, line, number_width));
+        rows.push(DiffLine {
+            kind: DiffLineKind::Removed,
+            line_no: idx + 1,
+            content: line.to_string(),
+        });
     }
-    for line in new_lines.iter().take(new_change_end).skip(prefix) {
-        rows.push(diff_added_line(line, number_width));
+    for (idx, line) in new_lines
+        .iter()
+        .enumerate()
+        .take(new_change_end)
+        .skip(prefix)
+    {
+        rows.push(DiffLine {
+            kind: DiffLineKind::Added,
+            line_no: idx + 1,
+            content: line.to_string(),
+        });
     }
     for (idx, line) in old_lines
         .iter()
@@ -1752,31 +1811,13 @@ fn unified_diff_rows(old: &str, new: &str) -> Vec<String> {
         .take(old_change_end.saturating_add(context_after))
         .skip(old_change_end)
     {
-        rows.push(diff_context_line(idx + 1, line, number_width));
+        rows.push(DiffLine {
+            kind: DiffLineKind::Context,
+            line_no: idx + 1,
+            content: line.to_string(),
+        });
     }
     rows
-}
-
-fn diff_context_line(line_no: usize, text: &str, width: usize) -> String {
-    format!(" {:>width$}│{}", line_no, text, width = width)
-}
-
-fn diff_removed_line(line_no: usize, text: &str, width: usize) -> String {
-    format!(
-        "-{:>width$}│{}",
-        line_no,
-        mark_leading_spaces(text),
-        width = width
-    )
-}
-
-fn diff_added_line(text: &str, width: usize) -> String {
-    format!(
-        " {:>width$}│{}",
-        "+",
-        mark_leading_spaces(text),
-        width = width
-    )
 }
 
 fn mark_leading_spaces(text: &str) -> String {
