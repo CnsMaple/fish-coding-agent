@@ -1307,10 +1307,12 @@ fn output_row_lines(output: &str, width: usize, bg: Color) -> Vec<Line<'static>>
     rows
 }
 
-/// Render the last `preview_lines` lines of `output` as a collapsed
-/// preview block. Returns the rendered rows *plus* the number of
-/// hidden lines so callers can build their own Ctrl+O hint layout
-/// (single full-width line, or combined with a footer on one row).
+/// Render the last ~`preview_lines` *visual* rows of `output` as a
+/// collapsed preview block.  Wrapped logical lines are counted as
+/// multiple visual rows so the collapsed preview doesn't explode when
+/// one logical line wraps to many rows.  Returns the rendered rows
+/// *plus* the number of hidden *visual* rows so callers can build
+/// their own Ctrl+O hint layout.
 fn collapsed_output_lines(
     output: &str,
     preview_lines: usize,
@@ -1322,15 +1324,34 @@ fn collapsed_output_lines(
         return (box_row_lines("[no output]", width, bg), 0);
     }
 
-    let total = lines.len();
-    let shown = total.min(preview_lines);
-    let skipped = total.saturating_sub(shown);
+    let inner_w = width.saturating_sub(4).max(1);
+    let visual_counts: Vec<usize> = lines
+        .iter()
+        .map(|line| wrap_line(line, inner_w).len())
+        .collect();
+    let total_visual: usize = visual_counts.iter().sum();
+
+    // Walk backwards through logical lines, accumulating their visual
+    // row counts, until we reach `preview_lines` visual rows.
+    // Always show at least one logical line so the preview is never empty.
+    let mut preview_visual = 0usize;
+    let mut shown_logical = 0usize;
+    for &count in visual_counts.iter().rev() {
+        if preview_visual + count > preview_lines && shown_logical > 0 {
+            break;
+        }
+        preview_visual += count;
+        shown_logical += 1;
+    }
+
+    let skipped_visual = total_visual.saturating_sub(preview_visual);
+    let skip_logical = lines.len().saturating_sub(shown_logical);
+
     let mut rows = Vec::new();
-    // Show preview lines
-    for line in lines.iter().skip(skipped) {
+    for line in lines.iter().skip(skip_logical) {
         rows.extend(box_row_lines(line, width, bg));
     }
-    (rows, skipped)
+    (rows, skipped_visual)
 }
 
 /// Single full-width Ctrl+O hint line for collapsed blocks that
