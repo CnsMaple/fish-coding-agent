@@ -119,6 +119,12 @@ pub enum SidebarTab {
     Hotkey,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FocusTarget {
+    Input,
+    FunctionPanel,
+}
+
 impl SidebarTab {
     /// Minimum panel height (including borders) required for this tab's
     /// content to render without clipping.
@@ -1433,6 +1439,9 @@ pub struct App {
     /// when set, so IME composition windows appear at the right location
     /// when the user is typing in a picker search field.
     pub function_panel_cursor: Option<(u16, u16)>,
+
+    /// Which area currently receives directional key events.
+    pub focus_target: FocusTarget,
     pub paste_blocks: VecDeque<String>,
     /// Image blocks pasted from clipboard, indexed by VecDeque position.
     /// The input buffer shows `[image #K]` where K = 1-based index.
@@ -1593,6 +1602,7 @@ impl App {
             tui_drag_start: None,
             last_mouse_event: None,
             input_cursor_screen: None,
+            focus_target: FocusTarget::Input,
             function_panel_cursor: None,
             paste_blocks: VecDeque::new(),
             image_blocks: VecDeque::new(),
@@ -1826,6 +1836,8 @@ impl App {
                 if let Some(ref t) = stored.thinking {
                     self.status.set_thinking(crate::config::ReasoningMode::parse(t));
                 }
+                self.focus_target = FocusTarget::Input;
+                self.function_panel_cursor = None;
                 self.notify(
                     crate::function::notifications::ToastLevel::Ok,
                     format!("resumed session: {}", self.session_title),
@@ -2256,6 +2268,8 @@ impl App {
         });
         if !has_non_trivial {
             self.function_visible = false;
+            self.focus_target = FocusTarget::Input;
+            self.function_panel_cursor = None;
             if self.mode == AppMode::Plan {
                 self.set_mode(self.previous_mode);
             }

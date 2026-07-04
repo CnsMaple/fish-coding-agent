@@ -21,7 +21,11 @@ use crate::function::AppMode;
 /// The function panel cursor (e.g. picker search input) takes priority
 /// over the main input cursor.
 fn position_ime_cursor(app: &mut App) {
-    let Some((cx, cy)) = app.function_panel_cursor.or(app.input_cursor_screen) else {
+    let cursor = match app.focus_target {
+        crate::function::FocusTarget::FunctionPanel => app.function_panel_cursor,
+        crate::function::FocusTarget::Input => app.input_cursor_screen,
+    };
+    let Some((cx, cy)) = cursor else {
         return;
     };
 
@@ -1322,8 +1326,28 @@ async fn handle_key(k: crossterm::event::KeyEvent, app: &mut App) {
         return;
     }
 
+    // Alt+L: toggle focus between function panel and input.
+    if k.modifiers.contains(KeyModifiers::ALT)
+        && matches!(k.code, KeyCode::Char('l') | KeyCode::Char('L'))
+    {
+        if app.focus_target == crate::function::FocusTarget::FunctionPanel {
+            app.focus_target = crate::function::FocusTarget::Input;
+        } else if app.function_visible {
+            app.focus_target = crate::function::FocusTarget::FunctionPanel;
+        }
+        return;
+    }
+
     // If a sidebar tab is open, give it a chance to handle the key first.
-    if dispatch_to_active_tab(k, app).await {
+    // Arrow keys are forwarded to the tab only when focus is on the
+    // function panel — otherwise they go to the input area.
+    let is_arrow = matches!(
+        k.code,
+        KeyCode::Up | KeyCode::Down | KeyCode::Left | KeyCode::Right
+    );
+    let skip_dispatch = is_arrow && app.focus_target == crate::function::FocusTarget::Input;
+
+    if !skip_dispatch && dispatch_to_active_tab(k, app).await {
         return;
     }
 
@@ -2893,13 +2917,13 @@ async fn handle_todo_key(
     }
 
     match k.code {
-        KeyCode::Up | KeyCode::Char('k') if k.modifiers.is_empty() => {
+        KeyCode::Up => {
             if state.cursor > 0 {
                 state.cursor -= 1;
             }
             true
         }
-        KeyCode::Down | KeyCode::Char('j') if k.modifiers.is_empty() => {
+        KeyCode::Down => {
             if total > 0 {
                 state.cursor = (state.cursor + 1).min(total.saturating_sub(1));
             }

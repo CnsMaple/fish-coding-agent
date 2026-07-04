@@ -72,7 +72,10 @@ pub fn render(area: Rect, buf: &mut Buffer, app: &mut App) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_set(app.config.border_type.ratatui_set())
-        .border_style(Theme::unfocused_border())
+        .border_style(match app.focus_target {
+            crate::function::FocusTarget::FunctionPanel => Theme::focused_border(),
+            crate::function::FocusTarget::Input => Theme::unfocused_border(),
+        })
         .title(Line::from(title_spans));
     let inner = block.inner(area);
     block.render(area, buf);
@@ -735,11 +738,12 @@ fn render_provider_picker(
 
 fn render_hotkey(area: Rect, buf: &mut Buffer) {
     let rows: Vec<(&str, &str)> = vec![
+        ("Alt+L", "Toggle focus: input ↔ panel"),
         ("Tab", "Cycle sidebar tabs"),
         ("Shift+Tab", "Cycle sidebar tabs backwards"),
         ("Enter", "Send / confirm"),
-        ("Esc", "Close sidebar tab / clear input"),
-        ("Up / Down", "Navigate list / history"),
+        ("Esc", "Close sidebar tab / focus input"),
+        ("Up / Down", "Navigate (focused area)"),
         ("Ctrl+C", "Quit"),
         ("Ctrl+L", "Clear session"),
         ("Ctrl+N", "Toggle notifications panel"),

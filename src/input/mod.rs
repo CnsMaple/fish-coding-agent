@@ -434,7 +434,10 @@ pub fn render(area: Rect, buf: &mut Buffer, app: &mut crate::app::App) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_set(app.config.border_type.ratatui_set())
-        .border_style(Theme::unfocused_border())
+        .border_style(match app.focus_target {
+            crate::function::FocusTarget::Input => Theme::focused_border(),
+            crate::function::FocusTarget::FunctionPanel => Theme::unfocused_border(),
+        })
         .title(title);
     let inner = block.inner(area);
     block.render(area, buf);
