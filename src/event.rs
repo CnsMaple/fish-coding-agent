@@ -2777,12 +2777,9 @@ fn handle_notifications_key(k: crossterm::event::KeyEvent, app: &mut App) -> boo
                 true
             }
         }
-        KeyCode::Char('i') | KeyCode::Char('I') => {
-            if k.modifiers.is_empty() && !app.notifications.searching {
+        KeyCode::Char('i') | KeyCode::Char('I') if k.modifiers.contains(KeyModifiers::ALT) => {
+            if !app.notifications.searching {
                 app.notifications.enter_search_mode();
-                true
-            } else if app.notifications.searching {
-                app.notifications.insert_query_char('i');
                 true
             } else {
                 false

@@ -10,7 +10,7 @@ use unicode_width::UnicodeWidthStr;
 ///
 /// When `searching` is true, the search field is active and shows the
 /// query text with a cursor. When `searching` is false, a dim placeholder
-/// `"(press 'i' to search)"` is shown instead.
+/// `"(press Alt+i to search)"` is shown instead.
 ///
 /// The `focus` parameter is used for the standard picker search rows
 /// (notifications always use the `searching` flag to decide).
@@ -39,7 +39,7 @@ pub fn render_search_row(
         } else if searching {
             spans.push(Span::styled("(type to filter)", Theme::dim()));
         } else {
-            spans.push(Span::styled("(press 'i' to search)", Theme::dim()));
+            spans.push(Span::styled("(press Alt+i to search)", Theme::dim()));
         }
     } else {
         spans.push(Span::raw(query.to_string()));

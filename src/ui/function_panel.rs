@@ -215,7 +215,7 @@ fn render_notifications(area: Rect, buf: &mut Buffer, app: &mut App) {
         ))
     } else {
         Line::from(Span::styled(
-            " Up/Down: nav | i: search | Esc: close ",
+            " Up/Down: nav | Alt+i: search | Esc: close ",
             Theme::dim(),
         ))
     };
