@@ -137,12 +137,12 @@ pub fn render(f: &mut Frame, app: &mut App) {
     // Re-uses the per-block cache populated above.
     //
     // `line_idx` mirrors `Session::compute_total_lines` /
-    // `build_lines_viewport` so toggle rows land on the exact screen
+// `build_lines_viewport` so toggle rows land on the exact screen
     // row of the corresponding block's first line. That means:
     //   - no phantom role prefix line
     //   - +1 for each thinking/tool block (the trailing blank)
-    //   - +1 leading gap if a block appears with empty content
-    //   - +1 final spacer (this is also the visual gap to the input)
+    //   - +1 leading gap if content precedes the first block
+    //   - +1 gap after each message (inter-message or bottom gap)
     let mut line_idx: usize = 0;
     for (msg_idx, m) in app.session.messages.iter().enumerate() {
         // Thinking segments.
@@ -206,12 +206,14 @@ pub fn render(f: &mut Frame, app: &mut App) {
             }
         }
 
-        // Leading gap: always added before the first block (whether
-        // the content is empty or not — `ensure_gap_before_block`
-        // pushes a blank either way). Without this +1 the line
-        // indices for the thinking/tool toggles land one row too
-        // high and the click hit-boxes miss.
-        if thinking_blocks > 0 || tool_blocks > 0 {
+        // Leading gap: added before the first thinking/tool block
+        // only when content precedes it (offset > 0). When the
+        // message starts with a block, the message-level gap
+        // provides spacing.
+        let first_offset = m.thinking_segments.iter().map(|s| s.offset)
+            .chain(m.tool_results.iter().map(|t| t.content_offset))
+            .min();
+        if first_offset.map_or(false, |off| off > 0) && (thinking_blocks > 0 || tool_blocks > 0) {
             line_idx += 1;
         }
 
@@ -234,7 +236,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
             line_idx += 2;
         }
 
-        // Spacer (final blank).
+        // Gap after this message (inter-message or bottom gap).
         line_idx += 1;
     }
 
@@ -309,8 +311,8 @@ fn render_session_scrollbar(
     let x = area.right().saturating_sub(1);
     // Scrollbar uses the full session area height. The thumb lands at
     // the bottom when `scroll == 0`, overwriting the last message's
-    // final spacer (a blank line) with `█` — that's a no-op visually
-    // because the spacer was empty anyway.
+    // bottom gap (a blank line) with `█` — that's a no-op visually
+    // because the gap was empty anyway.
     let track_height = area.height as usize;
     if track_height == 0 {
         return;

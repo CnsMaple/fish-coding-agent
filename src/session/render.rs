@@ -145,9 +145,9 @@ pub fn render(
 /// hasn't been warmed by the caller.
 ///
 /// Mirrors `Session::compute_total_lines`: no phantom role prefix,
-/// plus the per-block trailing blank and (when applicable) the
-/// leading gap and final spacer, so the rough estimate tracks the
-/// real structure of `build_message_lines`.
+/// plus the per-block trailing blank and leading gap, so the rough
+/// estimate tracks the real structure of `build_message_lines`.
+/// Inter-message and bottom gaps are added at the session level.
 fn count_lines_estimate(session: &Session) -> u32 {
     let mut n: u32 = 0;
     for m in &session.messages {
@@ -168,7 +168,10 @@ fn count_lines_estimate(session: &Session) -> u32 {
         }
         let tool_blocks = m.tool_results.len() as u32;
         n += tool_blocks * 2; // rough per-block estimate + 1 trailing blank
-        if !m.attachments.is_empty() || thinking_blocks > 0 || tool_blocks > 0 {
+        let first_offset = m.thinking_segments.iter().map(|s| s.offset)
+            .chain(m.tool_results.iter().map(|t| t.content_offset))
+            .min();
+        if first_offset.map_or(false, |off| off > 0) && (thinking_blocks > 0 || tool_blocks > 0) {
             n += 1; // leading gap
         }
         if m.role == super::Role::User {
@@ -181,7 +184,10 @@ fn count_lines_estimate(session: &Session) -> u32 {
             }
             n += 2; // user-bg padding above and below
         }
-        n += 1; // spacer
+    }
+    // Inter-message gaps + bottom gap (one per message).
+    if !session.messages.is_empty() {
+        n += session.messages.len() as u32;
     }
     n
 }
@@ -475,13 +481,8 @@ pub fn build_message_lines(session: &Session, msg_idx: usize, width: usize) -> V
     // Render remaining content
     render_content_segment(&strip_legacy_markers(&raw[cursor..]), width, &mut msg_lines);
 
-    // streaming cursor removed — content is immediately visible
-    msg_lines.push(Line::from(""));
-
     if m.role == Role::User {
         let user_bg = active_colors().user_bg;
-        // Pop the trailing spacer; we'll re-add it after the background block.
-        let spacer = msg_lines.pop();
         // Apply background and full-width padding to content lines.
         for line in &mut msg_lines {
             for span in &mut line.spans {
@@ -511,11 +512,7 @@ pub fn build_message_lines(session: &Session, msg_idx: usize, width: usize) -> V
             " ".repeat(width),
             Style::default().bg(user_bg),
         )));
-        // Re-add the spacer (no background) so there's a gap to the next message.
-        if let Some(s) = spacer {
-            msg_lines.push(s);
         }
-    }
 
     {
         let mut lru = session.message_lines_cache.lock().unwrap();
@@ -538,11 +535,9 @@ pub fn build_message_lines(session: &Session, msg_idx: usize, width: usize) -> V
 /// `start_line` and `end_line` are absolute line indices into the
 /// full rendered output.
 ///
-/// No session-wide trailing blank is appended here: the visual gap
-/// between the session and the input/function panel below is the
-/// `final spacer` of the last message (a blank line emitted by
-/// `build_message_lines`). Removing the extra blank avoids the
-/// double-gap that appeared when both were present.
+/// Gaps between messages and the bottom gap (between session and
+/// input/function panel) are inserted here, ONE blank line each.
+/// `build_message_lines` no longer emits a per-message final spacer.
 fn build_lines_viewport(
     session: &Session,
     width: usize,
@@ -552,10 +547,6 @@ fn build_lines_viewport(
     let mut out: Vec<Line<'static>> = Vec::new();
     let mut global_line: u32 = 0;
 
-    // The last message's `final spacer` (the blank line emitted by
-    // `build_message_lines`) is the visual gap between the session and
-    // the input block below, so no extra session-wide trailing blank is
-    // pushed here.
     let msg_end_line = end_line;
 
     for msg_idx in 0..session.messages.len() {
@@ -566,8 +557,8 @@ fn build_lines_viewport(
         // Must match the structure produced by `build_message_lines` exactly:
         //   content (post-markdown) + (thinking rows + 1 trailing blank per
         //   segment) + (tool rows + 1 trailing blank per block) + 1 leading
-        //   gap if a block precedes empty content + 1 final spacer
-        //   (this final spacer is also the visual gap to the input).
+        //   gap if a block precedes empty content
+        // (No final spacer — inter-message/bottom gaps are managed here.)
         let content_lines = read_cached_content_count_at(m, width as u16);
         let mut msg_total: u32 = content_lines;
         let mut thinking_blocks: u32 = 0;
@@ -598,10 +589,6 @@ fn build_lines_viewport(
         }
         if session.tool_display != crate::config::ToolResultDisplay::Hide {
             for t in &m.tool_results {
-                // `t.running` no longer forces expansion — the
-                // preview form is used during streaming so the chat
-                // stays readable. The pending background colour
-                // (driven by `running`) still signals "in flight".
                 let t_vis = match session.tool_display {
                     crate::config::ToolResultDisplay::Show => t.visible,
                     crate::config::ToolResultDisplay::ShowWhileStreaming => {
@@ -618,30 +605,24 @@ fn build_lines_viewport(
                 tool_blocks += 1;
             }
         }
-        if !m.attachments.is_empty() || thinking_blocks > 0 || tool_blocks > 0 {
+        let first_offset = m.thinking_segments.iter().map(|s| s.offset)
+            .chain(m.tool_results.iter().map(|t| t.content_offset))
+            .min();
+        if first_offset.map_or(false, |off| off > 0) && (thinking_blocks > 0 || tool_blocks > 0) {
             msg_total += 1; // leading gap
         }
         if m.role == super::Role::User {
-            // Include the `[skill]` marker block rows when present
-            // (5-6 rows + 1 trailing blank) so `msg_total` matches
-            // the actual rendered line count and the slice math
-            // below advances `global_line` by the right amount.
             if let Some(skill_ref) = &m.skill_ref {
                 msg_total += skill_block_line_count(skill_ref, width);
             }
             msg_total += 2; // user-bg padding above and below
         }
-        msg_total += 1; // final spacer
 
         let msg_end = global_line + msg_total;
 
-        // Does this message intersect the viewport (excluding the
-        // reserved trailing-blank slot)?
+        // Does this message intersect the viewport?
         if msg_end > start_line && global_line < msg_end_line {
-            // Full render this message (maybe from cache).
             let rendered = build_message_lines(session, msg_idx, width);
-            // Compute the slice of this message's lines that overlap
-            // the message portion of the viewport.
             let local_start = start_line.saturating_sub(global_line) as usize;
             let local_end = msg_end_line
                 .saturating_sub(global_line)
@@ -651,18 +632,18 @@ fn build_lines_viewport(
             }
         }
 
+        // Gap after this message (inter-message or bottom gap).
         global_line = msg_end;
+        if global_line >= start_line && global_line < msg_end_line {
+            out.push(Line::from(""));
+        }
+        global_line += 1;
+
         if global_line >= msg_end_line {
             break;
         }
     }
 
-    // The `final spacer` emitted by `build_message_lines` is the visual
-    // gap between the session and the input block below. With the
-    // segmented line-count fix (`content_line_count_segmented`) the
-    // viewport boundary calculation is now consistent with the actual
-    // rendered output, so the last line of a properly-sized viewport is
-    // always this blank spacer.
     out
 }
 
@@ -675,14 +656,14 @@ pub fn build_lines(
 ) -> (Vec<Line<'static>>, Vec<(usize, usize, usize)>) {
     let mut out: Vec<Line<'static>> = Vec::new();
     for msg_idx in 0..session.messages.len() {
+        if msg_idx > 0 {
+            out.push(Line::from("")); // inter-message gap
+        }
         let rendered = build_message_lines(session, msg_idx, width);
         out.extend(rendered);
     }
-    while out.last().map(|l| l.width() == 0).unwrap_or(false) {
-        out.pop();
-    }
     if !out.is_empty() {
-        out.push(Line::from(""));
+        out.push(Line::from("")); // bottom gap
     }
     (out, Vec::new())
 }
@@ -916,6 +897,9 @@ fn count_md_segment(text: &str, inner_w: usize) -> u32 {
 }
 
 fn ensure_gap_before_block(msg_lines: &mut Vec<Line<'static>>) {
+    if msg_lines.is_empty() {
+        return; // viewport-level gap handles spacing before first block
+    }
     if msg_lines.last().map(|l| l.width() != 0).unwrap_or(true) {
         msg_lines.push(Line::from(""));
     }
@@ -2078,12 +2062,11 @@ mod content_line_count_tests {
         //   content lines (seg_count) +
         //   thinking block rows (for 1 segment, expanded) +
         //   1 trailing blank after thinking +
-        //   1 leading gap +
-        //   1 final spacer
-        // We verify that seg_count matches by subtracting the
-        // known overhead from the total.
+        //   1 leading gap
+        // (No final spacer — inter-message/bottom gaps are managed
+        // at the viewport level.)
         let think_lines = thinking_block_line_count("thinking content", true, 10, width) as u32;
-        let overhead = think_lines + 1 + 1 + 1; // thinking rows + trailing blank + leading gap + spacer
+        let overhead = think_lines + 1 + 1; // thinking rows + trailing blank + leading gap
         assert_eq!(
             seg_count + overhead,
             rendered_content_count,
@@ -2198,9 +2181,8 @@ mod tool_block_count_tests {
     }
 
     /// The exact total returned by `compute_total_lines` must equal
-    /// the sum of lines `build_message_lines` produces for each
-    /// message (each message already includes its own `final spacer`,
-    /// and there is no session-wide trailing blank).
+    /// the sum of `build_message_lines` per-message outputs plus the
+    /// session-level gaps (one per message).
     #[test]
     fn tool_block_count_matches_rendered_no_content() {
         let mut s = session_with_tool(make_write_file_tool(), false);
@@ -2208,10 +2190,11 @@ mod tool_block_count_tests {
         let total = count_all(&mut s, width);
         let user_lines = lines_for_msg(&s, 0, width as usize).len() as u32;
         let asst_lines = lines_for_msg(&s, 1, width as usize).len() as u32;
-        let expected = user_lines + asst_lines;
+        let expected = user_lines + asst_lines + s.messages.len() as u32;
         assert_eq!(
             total, expected,
-            "total={total} but user={user_lines} + asst={asst_lines} = {expected}"
+            "total={total} but user={user_lines} + asst={asst_lines} + gaps({}) = {expected}",
+            s.messages.len()
         );
     }
 
@@ -2222,7 +2205,7 @@ mod tool_block_count_tests {
         let total = count_all(&mut s, width);
         let user_lines = lines_for_msg(&s, 0, width as usize).len() as u32;
         let asst_lines = lines_for_msg(&s, 1, width as usize).len() as u32;
-        let expected = user_lines + asst_lines;
+        let expected = user_lines + asst_lines + s.messages.len() as u32;
         assert_eq!(total, expected);
     }
 
@@ -2234,7 +2217,7 @@ mod tool_block_count_tests {
         let total = count_all(&mut s, width);
         let asst_lines = lines_for_msg(&s, 1, width as usize).len() as u32;
         let user_lines = lines_for_msg(&s, 0, width as usize).len() as u32;
-        let expected = user_lines + asst_lines;
+        let expected = user_lines + asst_lines + s.messages.len() as u32;
         assert_eq!(total, expected);
     }
 
@@ -2257,16 +2240,14 @@ mod tool_block_count_tests {
         let total = count_all(&mut s, width);
         let asst_lines = lines_for_msg(&s, 1, width as usize).len() as u32;
         let user_lines = lines_for_msg(&s, 0, width as usize).len() as u32;
-        let expected = user_lines + asst_lines;
+        let expected = user_lines + asst_lines + s.messages.len() as u32;
         assert_eq!(total, expected);
     }
 
-    /// The bug, narrowed to a single assertion: the very last line
-    /// emitted by `build_message_lines` for an assistant message that
-    /// contains a tool block must be the block's bottom border
-    /// (`+---…---+`), and the viewport slice built by
-    /// `build_lines_viewport` at the bottom of the session must
-    /// include that border.
+    /// The bug, narrowed to a single assertion: the tool block's
+    /// bottom border (`+---…---+`) must be visible in the viewport
+    /// slice built by `build_lines_viewport` at the bottom of the
+    /// session, with only the bottom-gap blank line after it.
     #[test]
     fn bottom_border_line_is_in_viewport() {
         let mut s = session_with_tool(make_write_file_tool(), false);
@@ -2296,8 +2277,8 @@ mod tool_block_count_tests {
 
     /// Regression test for the "trailing gap clipped" bug. The blank
     /// line that visually separates the chat from the input/function
-    /// panel is now the LAST message's `final spacer` (a blank line
-    /// emitted by `build_message_lines`); it must still be the LAST
+    /// panel is now the bottom gap (a blank line inserted by
+    /// `build_lines_viewport`); it must still be the LAST
     /// line of `build_lines_viewport`'s output even when the total
     /// session height exceeds the viewport. Previously, the
     /// session-wide trailing blank was the source of the gap, and
@@ -2320,7 +2301,7 @@ mod tool_block_count_tests {
         let total = count_all(&mut s, width as u16) as usize;
 
         // Force the viewport to be SMALLER than the total: the
-        // last rendered line MUST be the final-spacer blank.
+        // last rendered line MUST be the bottom-gap blank.
         let inner_h = 5usize;
         let start = total.saturating_sub(inner_h);
         let end = total;
@@ -2341,7 +2322,7 @@ mod tool_block_count_tests {
         // And the count from `compute_total_lines` must match the
         // actual viewport-rendered line count when the viewport is
         // big enough: `inner_h = total` fits everything, last line
-        // is still the final-spacer blank.
+        // is still the bottom-gap blank.
         let full_rendered = build_lines_viewport(&s, width, 0, total as u32);
         assert_eq!(
             full_rendered.len(),
@@ -2356,7 +2337,7 @@ mod tool_block_count_tests {
                 .spans
                 .iter()
                 .all(|s| s.content.is_empty()),
-            "final spacer must be the very last line in full-viewport mode too"
+            "bottom gap must be the very last line in full-viewport mode too"
         );
     }
 
@@ -2685,11 +2666,12 @@ mod skill_block_count_tests {
         let total = s.count_all_lines_with_width(width) as usize;
         let user_lines = build_message_lines(&s, 0, width).len();
         let asst_lines = build_message_lines(&s, 1, width).len();
-        let expected = user_lines + asst_lines;
+        let expected = user_lines + asst_lines + s.messages.len();
         assert_eq!(
             total, expected,
             "compute_total_lines returned {total} but actual rendered lines = \
-             user({user_lines}) + asst({asst_lines}) = {expected}"
+             user({user_lines}) + asst({asst_lines}) + gaps({}) = {expected}",
+            s.messages.len()
         );
     }
 
@@ -2705,7 +2687,7 @@ mod skill_block_count_tests {
         let total = s.count_all_lines_with_width(width) as usize;
         let user_lines = build_message_lines(&s, 0, width).len();
         let asst_lines = build_message_lines(&s, 1, width).len();
-        assert_eq!(total, user_lines + asst_lines);
+        assert_eq!(total, user_lines + asst_lines + s.messages.len());
     }
 
     #[test]
@@ -2751,9 +2733,10 @@ mod skill_block_count_tests {
 
     #[test]
     fn lines_before_accounts_for_skill_block() {
-        // `lines_before` must also count the skill block rows.
-        // Without the fix, the undercount shifts the scroll target
-        // computed by `jump_to_message` and `timeline`.
+        // `lines_before` must also count the skill block rows and the
+        // gap after the user message. Without the fix, the undercount
+        // shifts the scroll target computed by `jump_to_message` and
+        // `timeline`.
         let mut s = Session::default();
         s.push(user_with_skill(None));
         s.push(Message::new(Role::Assistant, ""));
@@ -2761,12 +2744,12 @@ mod skill_block_count_tests {
         // Warm the per-message content cache that lines_before relies on.
         let _ = s.count_all_lines_with_width(120);
         let n = s.lines_before(1);
-        // lines_before(1) should equal the line count of the user
-        // message as rendered at width 120.
+        // lines_before(1) = user message lines + gap after user message.
         let user_lines = build_message_lines(&s, 0, 120).len() as u32;
         assert_eq!(
-            n, user_lines,
-            "lines_before(1) = {n} but the user message renders as {user_lines} lines"
+            n, user_lines + 1,
+            "lines_before(1) = {n} but user message ({user_lines} lines) + 1 gap = {}",
+            user_lines + 1
         );
     }
 }
@@ -3306,7 +3289,7 @@ mod tests {
         );
         assert_eq!(
             total as usize,
-            asst_lines.len() + user_lines.len(),
+            asst_lines.len() + user_lines.len() + s.messages.len(),
             "viewport line count must match the rendered output line for line"
         );
     }
@@ -3432,11 +3415,13 @@ mod tests {
         let width: u16 = 80;
         let total = s.count_all_lines_with_width(width as usize);
         let rendered = build_message_lines(&s, 0, width as usize);
+        // total = rendered message lines + bottom gap
         assert_eq!(
             total as usize,
+            rendered.len() + s.messages.len(),
+            "viewport total ({total}) must equal rendered line count ({}) + bottom gap ({})",
             rendered.len(),
-            "viewport total ({total}) must equal rendered line count ({})",
-            rendered.len()
+            s.messages.len()
         );
     }
 }

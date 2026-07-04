@@ -799,12 +799,13 @@ impl Session {
     ///   1. Content lines (post-markdown, cached by width).
     ///   2. For each thinking block: the block rows + 1 trailing blank.
     ///   3. For each tool block: the block rows + 1 trailing blank.
-    ///   4. If there is at least one block (thinking or tool) and the
-    ///      content is empty: 1 leading gap line.
+    ///   4. If content precedes the first thinking/tool block: 1
+    ///      leading gap line (inserted by `ensure_gap_before_block`).
     ///   5. For user messages: 2 extra background-fill lines (one
     ///      inserted above content, one pushed below content) so the
     ///      user-bg block visually wraps the message.
-    ///   6. A final trailing blank line ("spacer").
+    ///   6. Inter-message gaps and bottom gap are added at the
+    ///      session level (below the loop).
     ///
     /// Previously this function (and `build_lines_viewport` /
     /// `count_lines_estimate`) added 1 for a phantom "role prefix" line
@@ -913,16 +914,15 @@ impl Session {
                 }
             }
 
-            // Leading gap: `ensure_gap_before_block` in
-            // `build_message_lines` always inserts a blank line
-            // immediately before the first block (thinking, tool,
-            // or attachment) of a message — both when the content
-            // is empty (the message vec starts empty) and when it
-            // is non-empty (the content's final line is non-empty,
-            // so the gap is added on top). Without this +1, the
-            // count is off by 1 per message that has at least one
-            // block.
-            if !m.attachments.is_empty() || thinking_blocks > 0 || tool_blocks > 0 {
+            // Leading gap: `ensure_gap_before_block` inserts a blank
+            // line before the first thinking/tool block ONLY when
+            // content text precedes it (first block offset > 0).
+            // When the message starts with a block (offset == 0),
+            // the viewport-level gap provides the spacing.
+            let first_offset = m.thinking_segments.iter().map(|s| s.offset)
+                .chain(m.tool_results.iter().map(|t| t.content_offset))
+                .min();
+            if first_offset.map_or(false, |off| off > 0) && (thinking_blocks > 0 || tool_blocks > 0) {
                 n += 1;
             }
 
@@ -946,8 +946,12 @@ impl Session {
                 n += 2;
             }
 
-            // Spacer (final blank line emitted by `build_message_lines`).
-            n += 1;
+            }
+        // Inter-message gaps + bottom gap (one per message).
+        // Each message gets a gap after it; the last message's gap
+        // serves as the bottom gap between session and input panel.
+        if !self.messages.is_empty() {
+            n += self.messages.len() as u32;
         }
         n
     }
@@ -1054,7 +1058,10 @@ impl Session {
                     tool_blocks += 1;
                 }
             }
-            if !m.attachments.is_empty() || thinking_blocks > 0 || tool_blocks > 0 {
+            let first_offset = m.thinking_segments.iter().map(|s| s.offset)
+                .chain(m.tool_results.iter().map(|t| t.content_offset))
+                .min();
+            if first_offset.map_or(false, |off| off > 0) && (thinking_blocks > 0 || tool_blocks > 0) {
                 n += 1; // leading gap
             }
             if m.role == Role::User {
@@ -1071,7 +1078,7 @@ impl Session {
                 }
                 n += 2; // user-bg padding above and below
             }
-            n += 1; // spacer
+            n += 1; // gap after this message
         }
         n
     }
