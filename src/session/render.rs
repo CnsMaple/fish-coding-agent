@@ -1355,17 +1355,33 @@ fn collapsed_output_lines(
     }
 
     let shown_logical = preview_lines.min(lines.len());
-    let skipped = lines.len().saturating_sub(shown_logical);
     let skip_logical = lines.len().saturating_sub(shown_logical);
 
     let mut rows = Vec::new();
     for line in lines.iter().skip(skip_logical) {
         rows.extend(box_row_lines(line, width, bg));
     }
-    // Once the output has reached `preview_lines` logical lines,
-    // pin the preview height so the block does not jitter while
-    // content continues streaming.
-    if lines.len() >= preview_lines {
+
+    let mut skipped = lines.len().saturating_sub(shown_logical);
+
+    if rows.len() > preview_lines {
+        // Keep the last `preview_lines` display rows so the collapsed
+        // block height stays fixed and does not jitter.
+        let excess = rows.len() - preview_lines;
+        rows.drain(0..excess);
+        // Recalculate skipped: count logical lines that are completely
+        // hidden after the display-row truncation.
+        let mut shown_rows = 0;
+        for line in lines.iter().skip(skip_logical).rev() {
+            let line_rows = wrap_line(line, width.saturating_sub(4)).len().max(1);
+            if shown_rows + line_rows <= preview_lines {
+                shown_rows += line_rows;
+            } else {
+                skipped += 1;
+                break;
+            }
+        }
+    } else if lines.len() >= preview_lines {
         while rows.len() < preview_lines {
             rows.push(box_row_line("", width, bg));
         }
