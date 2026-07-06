@@ -2289,14 +2289,16 @@ impl App {
 
     /// Hide the function panel when the last tab is removed. Called
     /// after any tab removal so the panel returns to the default hidden
-    /// state when nothing is open.
+    /// state when nothing is open. Focus is only returned to the input
+    /// when the panel actually disappears; if other tabs remain visible
+    /// the focus stays where it is (the user can switch with Alt+L).
     pub fn maybe_hide_panel(&mut self) {
         let has_non_trivial = self.function.tabs.iter().any(|t| {
             !matches!(t, SidebarTab::Notifications)
         });
-        self.focus_target = FocusTarget::Input;
-        self.function_panel_cursor = None;
         if !has_non_trivial {
+            self.focus_target = FocusTarget::Input;
+            self.function_panel_cursor = None;
             self.function_visible = false;
             if self.mode == AppMode::Plan {
                 self.set_mode(self.previous_mode);
