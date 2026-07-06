@@ -2845,7 +2845,10 @@ async fn handle_plan_key(
     match k.code {
         KeyCode::Enter => {
             state.approved = Some(true);
-            let prompt = "Plan approved. Please proceed.".to_string();
+            let prompt = format!(
+                "Plan approved. Please proceed with the following plan:\n\n{}",
+                state.content
+            );
             // send_chat -> send_message pushes the user message into
             // the session; do NOT push it here too, otherwise the
             // message appears twice in the session.
