@@ -708,7 +708,13 @@ When a task requires one of these actions you MUST invoke the appropriate tool v
 If your API does not support structured tool_calls, describe each tool call as a single-line JSON object on its own line in the following format:
   >>> {{\"name\": \"tool_name\", \"arguments\": {{...}}}} <<<
 
-Do NOT claim a tool was used unless you actually see its result.",
+Do NOT claim a tool was used unless you actually see its result.
+
+## Tone and style
+- Keep responses short and direct. Aim for 1-3 sentences when possible.
+- Skip preamble, greetings, and explanations — get straight to the point.
+- Do not summarize what you already did or what you are about to do.
+- Only elaborate when the user explicitly asks for detail.",
             shell = crate::tools::shell_description(),
             shell_details = crate::tools::shell_guidance()
         ),
