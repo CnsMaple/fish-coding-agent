@@ -86,6 +86,26 @@ pub struct ToolResultBlock {
     pub cached_line_count_collapsed: Option<u32>,
 }
 
+impl ThinkingSegment {
+    pub fn cached_line_count(&self, expanded: bool) -> Option<u32> {
+        if expanded {
+            self.cached_line_count_expanded
+        } else {
+            self.cached_line_count_collapsed
+        }
+    }
+}
+
+impl ToolResultBlock {
+    pub fn cached_line_count(&self, visible: bool) -> Option<u32> {
+        if visible {
+            self.cached_line_count_visible
+        } else {
+            self.cached_line_count_collapsed
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
@@ -1101,10 +1121,11 @@ fn render_cached_content_lines(m: &mut Message, width: u16) -> u32 {
             return c.count;
         }
     }
+    let segments = crate::session::render::get_thinking_segments(m);
     let n = crate::session::render::content_line_count_segmented(
         &m.content,
         width as usize,
-        &m.thinking_segments,
+        &segments,
         &m.tool_results,
     );
     m.cached_content_line_count = Some(CachedLineCount { width, count: n });

@@ -225,10 +225,11 @@ pub(crate) fn read_cached_content_count_at(m: &super::Message, width: u16) -> u3
             return c.count;
         }
     }
+    let segments = get_thinking_segments(m);
     content_line_count_segmented(
         &m.content,
         width as usize,
-        &m.thinking_segments,
+        &segments,
         &m.tool_results,
     )
 }
@@ -577,12 +578,17 @@ fn build_lines_viewport(
                 && m.thinking_visible)
                 || (session.display == crate::config::ThinkingDisplay::ShowWhileStreaming
                     && (m.streaming || m.thinking_visible));
-            for seg in &m.thinking_segments {
-                if expanded {
-                    msg_total += seg.cached_line_count_expanded.unwrap_or(0);
-                } else {
-                    msg_total += seg.cached_line_count_collapsed.unwrap_or(0);
-                }
+            let segments = get_thinking_segments(m);
+            for seg in &segments {
+                let lines = seg.cached_line_count(expanded).unwrap_or_else(|| {
+                    thinking_block_line_count(
+                        &seg.content,
+                        expanded,
+                        session.tool_preview_lines,
+                        width,
+                    ) as u32
+                });
+                msg_total += lines;
                 msg_total += 1; // trailing blank
                 thinking_blocks += 1;
             }
@@ -597,16 +603,15 @@ fn build_lines_viewport(
                         }
                         _ => false,
                     };
-                if t_vis {
-                    msg_total += t.cached_line_count_visible.unwrap_or(0);
-                } else {
-                    msg_total += t.cached_line_count_collapsed.unwrap_or(0);
-                }
+                let lines = t.cached_line_count(t_vis).unwrap_or_else(|| {
+                    tool_block_line_count(t, t_vis, session.tool_preview_lines, width) as u32
+                });
+                msg_total += lines;
                 msg_total += 1; // trailing blank
                 tool_blocks += 1;
             }
         }
-        let first_offset = m.thinking_segments.iter().map(|s| s.offset)
+        let first_offset = get_thinking_segments(m).iter().map(|s| s.offset)
             .chain(m.tool_results.iter().map(|t| t.content_offset))
             .min();
         if first_offset.map_or(false, |off| off > 0) && (thinking_blocks > 0 || tool_blocks > 0) {
