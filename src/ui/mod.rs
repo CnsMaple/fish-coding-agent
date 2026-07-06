@@ -1,11 +1,12 @@
 use crate::app::App;
-use crate::function::Selection;
+use crate::function::{CancelState, Selection};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 use ratatui::Frame;
+use unicode_width::UnicodeWidthStr;
 
 pub mod border_type;
 pub mod function_panel;
@@ -13,8 +14,6 @@ pub mod picker_widget;
 
 /// Height of the standalone cwd line that sits below the input block.
 const CWD_HEIGHT: u16 = 1;
-/// Height of the cancel-hint / progress-hint line above the input block.
-const CANCEL_HEIGHT: u16 = 1;
 
 pub fn render(f: &mut Frame, app: &mut App) {
     let area = f.area();
@@ -26,7 +25,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
         // For PastePreview the panel height is exactly the content height
         // (capped at 20%); for other tabs it grows with 20% but never below
         // the minimum renderable height.
-        let remaining = area.height.saturating_sub(input_height + CANCEL_HEIGHT + CWD_HEIGHT);
+        let remaining = area.height.saturating_sub(input_height + CWD_HEIGHT);
         let pct_height = (remaining as f64 * 0.20) as u16;
         let panel_height = app.function.tabs.get(app.function.active)
             .map_or(4, |t| t.panel_height(pct_height));
@@ -35,7 +34,6 @@ pub fn render(f: &mut Frame, app: &mut App) {
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Min(0),
-                Constraint::Length(CANCEL_HEIGHT),
                 Constraint::Length(panel_height),
                 Constraint::Length(input_height),
                 Constraint::Length(CWD_HEIGHT),
@@ -46,7 +44,6 @@ pub fn render(f: &mut Frame, app: &mut App) {
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Min(0),
-                Constraint::Length(CANCEL_HEIGHT),
                 Constraint::Length(input_height),
                 Constraint::Length(CWD_HEIGHT),
             ])
@@ -73,10 +70,9 @@ pub fn render(f: &mut Frame, app: &mut App) {
             &app.session,
             &mut app.tool_toggle_rows,
         );
-        crate::input::render_cancel_hint(chunks[1], f.buffer_mut(), app);
-        function_panel::render(chunks[2], f.buffer_mut(), app);
-        crate::input::render(chunks[3], f.buffer_mut(), app);
-        render_cwd(chunks[4], f.buffer_mut(), &app.status.cwd);
+        function_panel::render(chunks[1], f.buffer_mut(), app);
+        crate::input::render(chunks[2], f.buffer_mut(), app);
+        render_cwd(chunks[3], f.buffer_mut(), app);
     } else {
         crate::session::render::render(
             area,
@@ -84,9 +80,8 @@ pub fn render(f: &mut Frame, app: &mut App) {
             &app.session,
             &mut app.tool_toggle_rows,
         );
-        crate::input::render_cancel_hint(chunks[1], f.buffer_mut(), app);
-        crate::input::render(chunks[2], f.buffer_mut(), app);
-        render_cwd(chunks[3], f.buffer_mut(), &app.status.cwd);
+        crate::input::render(chunks[1], f.buffer_mut(), app);
+        render_cwd(chunks[2], f.buffer_mut(), app);
     }
 
     // Re-derive which line of the scroll window each screen row maps to
@@ -350,17 +345,89 @@ fn render_session_scrollbar(
 }
 
 /// Render the project cwd as a dim line below the input block.
-fn render_cwd(area: Rect, buf: &mut Buffer, cwd: &str) {
+/// When a request is in flight, the cancel/interrupt hint is shown
+/// on the left, separated by ` | ` from the path.
+fn render_cwd(area: Rect, buf: &mut Buffer, app: &App) {
     use crate::theme::Theme;
     if area.height == 0 || area.width == 0 {
         return;
     }
-    let line = Line::from(vec![
-        Span::styled("~ ", Theme::dim()),
-        Span::styled(cwd.to_string(), Theme::dim()),
-    ]);
-    let p = ratatui::widgets::Paragraph::new(line);
-    p.render(area, buf);
+    let avail = area.width as usize;
+    let path = &app.status.cwd;
+
+    if app.inflight.is_some() {
+        let hint = match app.cancel_state {
+            CancelState::Idle => {
+                format!("{} esc to interrupt", crate::input::spinner_prompt().trim())
+            }
+            CancelState::Confirming(_) => {
+                format!("{} esc again", crate::input::spinner_prompt().trim())
+            }
+        };
+        let hint_w = UnicodeWidthStr::width(hint.as_str());
+        let sep = " | ";
+        let prefix = "~ ";
+        let fixed_w = hint_w + sep.len() + prefix.len();
+        let path_max = avail.saturating_sub(fixed_w);
+        let truncated = truncate_path(path, path_max);
+        let line = Line::from(vec![
+            Span::styled(hint, Theme::dim()),
+            Span::styled(sep, Theme::dim()),
+            Span::styled(prefix, Theme::dim()),
+            Span::styled(truncated, Theme::dim()),
+        ]);
+        let p = ratatui::widgets::Paragraph::new(line);
+        p.render(area, buf);
+    } else {
+        let prefix = "~ ";
+        let path_max = avail.saturating_sub(prefix.len());
+        let truncated = truncate_path(path, path_max);
+        let line = Line::from(vec![
+            Span::styled(prefix, Theme::dim()),
+            Span::styled(truncated, Theme::dim()),
+        ]);
+        let p = ratatui::widgets::Paragraph::new(line);
+        p.render(area, buf);
+    }
+}
+
+/// Truncate a path to fit within `max_width` columns.
+/// Progressive shortening: full → `D:\...\dirname` → dirname → `xx...xxx`.
+fn truncate_path(path: &str, max_width: usize) -> String {
+    if UnicodeWidthStr::width(path) <= max_width {
+        return path.to_string();
+    }
+    let sep = if path.contains('\\') { '\\' } else { '/' };
+    let components: Vec<&str> = path.split(sep).collect();
+    let dir_name = components.last().copied().unwrap_or(path);
+
+    if components.len() >= 3 {
+        let first = components[0];
+        let abbreviated = format!("{first}{sep}...{sep}{dir_name}");
+        if UnicodeWidthStr::width(abbreviated.as_str()) <= max_width {
+            return abbreviated;
+        }
+    }
+
+    if UnicodeWidthStr::width(dir_name) <= max_width {
+        return dir_name.to_string();
+    }
+
+    let dot_count = 3;
+    let half = max_width.saturating_sub(dot_count) / 2;
+    if half == 0 {
+        return dir_name.chars().take(max_width).collect();
+    }
+    let prefix: String = dir_name.chars().take(half).collect();
+    let suffix: String = dir_name
+        .chars()
+        .rev()
+        .take(half)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    format!("{prefix}...{suffix}")
 }
 
 /// Apply a REVERSED style to every cell inside the selection rectangle so
