@@ -1493,6 +1493,14 @@ pub struct App {
     /// call `set_scroll_anchored` to land immediately.
     pub session_scroll: crate::event::ScrollAnimator,
 
+    /// Scroll animator for the input area. Decoupled from cursor
+    /// position when the user scrolls with the mouse wheel; snaps back
+    /// to cursor on any edit action.
+    pub input_scroll: crate::event::ScrollAnimator,
+    /// `true` when the input view has been scrolled away from the
+    /// cursor by the mouse wheel; reset to `false` on any edit action.
+    pub input_scroll_decoupled: bool,
+
     /// `true` while an auto- or manual-compaction stream is in
     /// flight. Independent from `inflight` so the spinner logic /
     /// inflight-based cancel do not interfere with a compaction
@@ -1633,6 +1641,8 @@ impl App {
             burst_snapshot: None,
             pending_ask_snapshot: String::new(),
             session_scroll: crate::event::ScrollAnimator::default(),
+            input_scroll: crate::event::ScrollAnimator::default(),
+            input_scroll_decoupled: false,
             compacting: false,
             pending_post_compaction_prompt: None,
         };
@@ -2395,6 +2405,8 @@ mod tests {
             burst_snapshot: None,
             pending_ask_snapshot: String::new(),
             session_scroll: crate::event::ScrollAnimator::default(),
+            input_scroll: crate::event::ScrollAnimator::default(),
+            input_scroll_decoupled: false,
             compacting: false,
             pending_post_compaction_prompt: None,
         }

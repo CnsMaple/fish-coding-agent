@@ -407,6 +407,65 @@ fn byte_at_display_col(s: &str, col: usize) -> usize {
     s.len()
 }
 
+fn compute_total_visual_lines(all_lines: &[&str], inner_w: usize, prompt_width: usize) -> usize {
+    let mut total = 0usize;
+    for text in all_lines {
+        let text_width = UnicodeWidthStr::width(*text);
+        let seg_total = prompt_width + text_width;
+        let n = if seg_total <= inner_w { 1 } else { seg_total.div_ceil(inner_w) };
+        total += n;
+    }
+    total.max(1)
+}
+
+fn compute_visual_offset(all_lines: &[&str], raw_line_idx: usize, inner_w: usize, prompt_width: usize) -> usize {
+    let mut offset = 0usize;
+    for (i, text) in all_lines.iter().enumerate() {
+        if i >= raw_line_idx {
+            break;
+        }
+        let text_width = UnicodeWidthStr::width(*text);
+        let seg_total = prompt_width + text_width;
+        let n = if seg_total <= inner_w { 1 } else { seg_total.div_ceil(inner_w) };
+        offset += n;
+    }
+    offset
+}
+
+fn render_input_scrollbar(
+    area: Rect,
+    buf: &mut Buffer,
+    total_visual: usize,
+    visible: usize,
+    scroll: usize,
+) {
+    if area.width == 0 || area.height == 0 || total_visual <= visible || visible == 0 {
+        return;
+    }
+    let x = area.right().saturating_sub(1);
+    let track_height = area.height as usize;
+    let max_start = total_visual.saturating_sub(visible);
+    let thumb_height = ((visible * track_height) / total_visual).clamp(1, track_height);
+    let available = track_height.saturating_sub(thumb_height);
+    let thumb_top = if max_start == 0 {
+        0
+    } else {
+        (scroll * available + max_start / 2) / max_start
+    };
+    for row in 0..track_height {
+        let y = area.y + row as u16;
+        if let Some(cell) = buf.cell_mut((x, y)) {
+            if row >= thumb_top && row < thumb_top + thumb_height {
+                cell.set_symbol("█");
+                cell.set_style(Theme::bold());
+            } else {
+                cell.set_symbol("│");
+                cell.set_style(Theme::dim());
+            }
+        }
+    }
+}
+
 /// Renders the input area. The status line (model | think | hit) lives
 /// in the input block's title, not inside the box, so the body is just
 /// the prompt row. When there are unread notifications while the
@@ -452,7 +511,13 @@ format!("[!{}] | ", app.pending_events),
     let cursor_line_idx = buffer[..cursor].chars().filter(|&c| c == '\n').count();
     let all_lines: Vec<&str> = buffer.split('\n').collect();
     let visible_count = (all_lines.len() as u16).min(inner.height).max(1) as usize;
-    let start_line = (cursor_line_idx + 1).saturating_sub(visible_count);
+    let start_line = if app.input_scroll_decoupled {
+        let scroll = app.input_scroll.current.round() as usize;
+        let max_scroll = all_lines.len().saturating_sub(visible_count);
+        scroll.min(max_scroll)
+    } else {
+        (cursor_line_idx + 1).saturating_sub(visible_count)
+    };
     let end_line = (start_line + visible_count).min(all_lines.len().max(1));
 
     let inner_w = inner.width as usize;
@@ -553,6 +618,16 @@ format!("[!{}] | ", app.pending_events),
     let p = Paragraph::new(visual_lines);
     p.render(inner, buf);
     app.input_prompt_area = Some(inner);
+
+    // Render input scrollbar when scrolled away from cursor.
+    if app.input_scroll_decoupled {
+        let total_visual = compute_total_visual_lines(&all_lines, inner.width as usize, prompt_width);
+        let visible = (inner.height as usize).max(1);
+        if total_visual > visible {
+            let scroll_visual = compute_visual_offset(&all_lines, start_line, inner.width as usize, prompt_width);
+            render_input_scrollbar(inner, buf, total_visual, visible, scroll_visual);
+        }
+    }
 
     // Cursor position: find which visual_line the cursor is on
     if app.inflight.is_none() {

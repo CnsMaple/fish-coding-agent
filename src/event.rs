@@ -271,6 +271,9 @@ Event::Resize(_, _) => {}
                 if app.session_scroll.animating {
                     let _ = app.session_scroll.step(Instant::now());
                 }
+                if app.input_scroll.animating {
+                    let _ = app.input_scroll.step(Instant::now());
+                }
             }
             _ = tick.tick() => {
                 // Always render on tick while inflight so the spinner
@@ -372,6 +375,7 @@ fn open_paste_preview(app: &mut App) {
 }
 
 async fn handle_paste(text: String, app: &mut App) {
+    app.input_scroll_decoupled = false;
     insert_paste_block(text, app, false);
 }
 
@@ -384,6 +388,7 @@ fn handle_paste_preview_key(
     match k.code {
         KeyCode::Enter => {
             // Confirm paste.
+            app.input_scroll_decoupled = false;
             if let Some(ref image) = state.image {
                 // Insert [image #N] marker.
                 let idx = app.image_blocks.len() + 1;
@@ -1356,6 +1361,8 @@ async fn handle_key(k: crossterm::event::KeyEvent, app: &mut App) {
         return;
     }
 
+    app.input_scroll_decoupled = false;
+
     match k.code {
         KeyCode::Esc => {
             // If a request has been prepared but not yet dispatched
@@ -1473,7 +1480,30 @@ async fn handle_key(k: crossterm::event::KeyEvent, app: &mut App) {
                 app.input.insert_newline();
                 app.sync_completion();
             } else {
-                submit_input(app);
+                // During a burst (legacy paste without bracketed-paste
+                // support), multi-line text may contain Enter keys. Force
+                // newline instead of submitting so the full pasted text
+                // arrives intact.
+                let now = Instant::now();
+                let in_burst = app
+                    .burst_snapshot
+                    .map(|(t, _, _)| now.duration_since(t) <= Duration::from_millis(100))
+                    .unwrap_or(false);
+                if in_burst {
+                    if app.input.has_selection() {
+                        app.input.delete_selection();
+                        app.burst_buf.clear();
+                        app.burst_snapshot = None;
+                    }
+                    app.burst_buf.push('\n');
+                    if let Some((_, sc, sl)) = app.burst_snapshot {
+                        app.burst_snapshot = Some((now, sc, sl));
+                    }
+                    app.input.insert_newline();
+                    app.sync_completion();
+                } else {
+                    submit_input(app);
+                }
             }
         }
         KeyCode::Backspace => {
@@ -1799,11 +1829,6 @@ fn handle_mouse(m: MouseEvent, app: &mut App) {
         MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
     );
     if is_wheel {
-        if app.session_scroll.animating {
-            // Gating window active — drop this event.
-            return;
-        }
-        // Adaptive step: fast scrolling → larger step, slow → smaller.
         let now = std::time::Instant::now();
         let step: u32 = if let Ok(mut state) = SCROLL_STATE.lock() {
             let (last, mut step) = *state;
@@ -1825,6 +1850,38 @@ fn handle_mouse(m: MouseEvent, app: &mut App) {
             MouseEventKind::ScrollDown => -(step as f32),
             _ => unreachable!(),
         };
+
+        // Route wheel to input area when the mouse is over it.
+        if let Some(input_area) = app.input_prompt_area {
+            if m.row >= input_area.y && m.row < input_area.y + input_area.height {
+                if app.input_scroll.animating {
+                    return;
+                }
+                let inner_h = (input_area.height.saturating_sub(2)).max(1) as usize;
+                let visible_count = (app.input.buffer.split('\n').count() as u16).min(inner_h as u16).max(1) as usize;
+                let max_scroll = app.input.buffer.split('\n').count().saturating_sub(visible_count) as f32;
+                // Input scroll: offset from top. ScrollUp → see older
+                // lines → decrease offset (negative delta).
+                // ScrollDown → see newer lines → increase offset.
+                let input_delta: f32 = match m.kind {
+                    MouseEventKind::ScrollUp => -(step as f32),
+                    MouseEventKind::ScrollDown => step as f32,
+                    _ => unreachable!(),
+                };
+                app.input_scroll.begin_gesture(input_delta, step, now);
+                if app.input_scroll.target > max_scroll {
+                    app.input_scroll.target = max_scroll;
+                    app.input_scroll.current = max_scroll;
+                }
+                app.input_scroll_decoupled = true;
+                return;
+            }
+        }
+
+        if app.session_scroll.animating {
+            // Gating window active — drop this event.
+            return;
+        }
         // Clamp the gesture against the real viewport max so a
         // scroll-up at the top of the session doesn't aim past the
         // ceiling.
@@ -2188,6 +2245,9 @@ fn submit_input(app: &mut App) {
     // can confirm it was sent) — not pushed off the bottom. Also
     // cancels any in-flight momentum so the jump lands immediately.
     app.set_scroll_anchored(0);
+    // Snap input view back to cursor.
+    app.input_scroll_decoupled = false;
+    app.input_scroll.snap(0.0);
     // Expand image markers first (while the input buffer still has
     // the markers), then expand paste blocks.
     let raw = app.input.take();
@@ -4679,6 +4739,8 @@ mod tests {
             burst_snapshot: None,
             pending_ask_snapshot: String::new(),
             session_scroll: crate::event::ScrollAnimator::default(),
+            input_scroll: crate::event::ScrollAnimator::default(),
+            input_scroll_decoupled: false,
             compacting: false,
             pending_post_compaction_prompt: None,
             last_mouse_event: None,
