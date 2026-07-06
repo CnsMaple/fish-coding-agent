@@ -545,11 +545,7 @@ format!("[!{}] | ", app.pending_events),
         let mut text_byte_offset = 0usize;
         for vi in 0..n_vis {
             let is_first = vi == 0;
-            let max_text_w = if is_first {
-                inner_w.saturating_sub(prompt_width)
-            } else {
-                inner_w
-            };
+            let max_text_w = inner_w.saturating_sub(prompt_width);
 
             // Find how many bytes of remaining text fit in max_text_w display width
             let remaining = &text[text_byte_offset..];
@@ -643,21 +639,23 @@ format!("[!{}] | ", app.pending_events),
                 continue;
             }
             // cursor is in this segment
-            let text_width = UnicodeWidthStr::width(*text);
-            let seg_total_w = prompt_width + text_width;
-            let n_vis = if seg_total_w <= inner_w {
-                1
-            } else {
-                seg_total_w.div_ceil(inner_w)
-            };
             let text_before = &text[..cursor - line_start];
-            let width_before = prompt_width + UnicodeWidthStr::width(text_before);
-            let vi = if n_vis <= 1 {
-                0
-            } else {
-                width_before / inner_w
-            };
-            cursor_col = (width_before % inner_w) as u16;
+            let mut vi = 0usize;
+            cursor_col = prompt_width as u16;
+            let mut line_w = prompt_width;
+            for (_, ch) in text_before.char_indices() {
+                let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
+                if line_w + cw > inner_w {
+                    vi += 1;
+                    line_w = prompt_width;
+                }
+                line_w += cw;
+                cursor_col = line_w as u16;
+            }
+            if cursor_col as usize >= inner_w {
+                vi += 1;
+                cursor_col = prompt_width as u16;
+            }
             // Count visual lines from all earlier visible segments
             let mut vis_before = 0usize;
             for (j, t) in all_lines.iter().enumerate() {

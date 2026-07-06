@@ -69,8 +69,7 @@ pub fn render(
                 for y in area.top()..area.bottom() {
                     for x in area.left()..area.right() {
                         if let Some(cell) = buf.cell_mut((x, y)) {
-                            cell.set_symbol(" ");
-                            cell.set_style(Style::reset());
+                            cell.reset();
                         }
                     }
                 }
@@ -119,8 +118,7 @@ pub fn render(
     for y in area.top()..area.bottom() {
         for x in area.left()..area.right() {
             if let Some(cell) = buf.cell_mut((x, y)) {
-                cell.set_symbol(" ");
-                cell.set_style(Style::reset());
+                cell.reset();
             }
         }
     }
