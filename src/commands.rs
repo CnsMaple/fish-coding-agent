@@ -689,10 +689,18 @@ pub fn open_session_rename(app: &mut App, target_id: Option<String>, title: Stri
 /// Stresses using the structured tool_calls API, and provides a
 /// text-based fallback format for providers that don't support it.
 fn system_prompt(agent: crate::permission::Agent) -> String {
+    let now = chrono::Local::now();
+    let date = now.format("%Y-%m-%d %A").to_string();
+    let cwd = std::env::current_dir()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| ".".to_string());
     match agent {
         crate::permission::Agent::Build => format!(
             "\
-You are a coding assistant with access to the following tools in the user's workspace:
+You are a coding assistant with access to the following tools. All file paths are relative to the current workspace directory; use `list` and `grep` to discover files within it. Never invent or guess file paths from outside the current workspace:
+
+Current date: {date}
+Current workspace: {workspace}
 
   - read_file(path, start_line?, end_line?)
   - write_file(path, content, start_line?, end_line?)
@@ -714,17 +722,25 @@ Do NOT claim a tool was used unless you actually see its result.
 - Keep responses short and direct. Aim for 1-3 sentences when possible.
 - Skip preamble, greetings, and explanations — get straight to the point.
 - Do not summarize what you already did or what you are about to do.
-- Only elaborate when the user explicitly asks for detail.",
+- Only elaborate when the user explicitly asks for detail.
+
+## Language
+- Respond in the same language as the user's first prompt. If the user explicitly requests a different language in a later message, switch to that language.",
+            date = date,
+            workspace = cwd,
             shell = crate::tools::shell_description(),
             shell_details = crate::tools::shell_guidance()
         ),
-        crate::permission::Agent::Plan => String::from(
+        crate::permission::Agent::Plan => format!(
             "\
 ## Responsibility
 
 You are operating in **plan mode**, a read-only research and planning role. \
 Your job is to understand the user's task, gather only the evidence you need, \
 and present a concrete plan the user can approve before any code is written.
+
+Current date: {date}
+Current workspace: {workspace}
 
 ## What you can do
 
@@ -774,7 +790,9 @@ its result.
    exist and the choice meaningfully changes the plan, call `ask`. When \
    the choice is cosmetic, pick one and note it in the plan.
 5. **Stop after the plan tool.** Do not call additional tools after `plan`; \
-   wait for the user's decision.",
+    wait for the user's decision.",
+            date = date,
+            workspace = cwd,
         ),
     }
 }
@@ -1358,9 +1376,46 @@ fn tool_result_title(call: &ToolCall) -> String {
         return "Ask".to_string();
     }
 
+if call.name == "read_file" || call.name == "write_file" {
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&call.arguments) {
+            let start = val.get("start_line").and_then(|v| v.as_u64());
+            let end = val.get("end_line").and_then(|v| v.as_u64());
+            match (start, end) {
+                (Some(s), Some(e)) => return format!("[tool:{} {}:{}]", call.name, s, e),
+                (Some(s), None) => return format!("[tool:{} {}:]", call.name, s),
+                (None, Some(e)) => return format!("[tool:{} :{}]", call.name, e),
+                (None, None) => {}
+            }
+        }
+    }
+
+    if call.name == "grep" {
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&call.arguments) {
+            if let Some(pattern) = val.get("pattern").and_then(|v| v.as_str()) {
+                let short = pattern.trim();
+                let display = if short.len() > 40 {
+                    format!("{}…", &short[..40])
+                } else {
+                    short.to_string()
+                };
+                return format!("[tool:grep {}]", display);
+            }
+        }
+    }
+
+    if call.name == "list" {
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&call.arguments) {
+            if let Some(path) = val.get("path").and_then(|v| v.as_str()) {
+                let p = path.trim();
+                if !p.is_empty() {
+                    return format!("[tool:list {}]", p);
+                }
+            }
+        }
+    }
+
     format!("[tool:{}]", call.name)
 }
-
 /// Fallback: parse text-based tool call descriptions from assistant
 /// content when the model did not emit structured tool_calls.
 /// Looks for JSON objects `{"name": "...", "arguments": {...}}` in
