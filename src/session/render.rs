@@ -1203,7 +1203,6 @@ fn build_tool_block_rows(
         } else {
             build_output_block_rows(
                 &tool.title,
-                " Output ",
                 &output,
                 &footer,
                 visible,
@@ -1291,7 +1290,6 @@ fn build_shell_command_rows(
 #[allow(clippy::too_many_arguments)]
 fn build_output_block_rows(
     title: &str,
-    label: &str,
     output: &str,
     footer: &str,
     visible: bool,
@@ -1301,9 +1299,7 @@ fn build_output_block_rows(
 ) -> Vec<Line<'static>> {
     let width = width.max(4);
     let mut rows = Vec::new();
-    rows.push(border_line(width, bg));
-    rows.extend(box_row_lines(title, width, bg));
-    rows.push(border_with_label_line(width, label, bg));
+    rows.push(border_with_label_line(width, title, bg));
 
     if visible {
         let body_rows = output_row_lines(output, width, bg);
@@ -1677,7 +1673,7 @@ fn build_write_file_diff_rows(
         .extension()
         .and_then(|ext| ext.to_str())
         .unwrap_or("file");
-    let title = format!(" ~ Edit: {ext} {path} [+{added}/-{removed}] ");
+    let title = format!(" Edit [{path} +{added}/-{removed}] ");
     let lang = ext;
 
     let width = width.max(4);
@@ -2217,7 +2213,7 @@ mod tool_block_count_tests {
         // border is part of the rendered block.
         ToolResultBlock {
             name: "write_file".to_string(),
-            title: "[tool:write_file]".to_string(),
+            title: "write_file".to_string(),
             content: serde_json::json!({
                 "kind": "write_file_diff",
                 "path": "src/demo.py",
@@ -2554,8 +2550,7 @@ mod tool_block_count_tests {
         let rendered = build_message_lines(&s, 1, width);
         let text = lines_to_text(&rendered);
         let tool_idx = text
-            .find("Edit:")
-            .or_else(|| text.find("Output"))
+            .find("Edit [")
             .expect("tool block missing");
         let think_idx = text.find("Thinking").expect("Thinking block missing");
         assert!(
@@ -3016,7 +3011,7 @@ mod tests {
     fn build_tool_block_renders_write_file_diff() {
         let tool = ToolResultBlock {
             name: "write_file".to_string(),
-            title: "[tool:write_file]".to_string(),
+            title: "write_file".to_string(),
             content: serde_json::json!({
                 "kind": "write_file_diff",
                 "path": "src/demo.py",
@@ -3033,15 +3028,15 @@ mod tests {
         let rows = build_tool_block_rows(&tool, true, 10, 80);
         let text = lines_to_text(&rows);
         assert!(
-            text.contains("~ Edit: py src/demo.py [+1/-1]"),
+            text.contains("Edit [src/demo.py +1/-1]"),
             "title missing:\n{text}"
         );
         assert!(
-            text.contains("-  2│····old_call()"),
+            text.contains("-  2 │     old_call()"),
             "removed line missing:\n{text}"
         );
         assert!(
-            text.contains("   +│····new_call()"),
+            text.contains("+  2 │     new_call()"),
             "added line missing:\n{text}"
         );
     }

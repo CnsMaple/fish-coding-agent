@@ -1392,9 +1392,9 @@ if call.name == "read_file" || call.name == "write_file" {
             let start = val.get("start_line").and_then(|v| v.as_u64());
             let end = val.get("end_line").and_then(|v| v.as_u64());
             match (start, end) {
-                (Some(s), Some(e)) => return format!("[tool:{} {}:{}]", call.name, s, e),
-                (Some(s), None) => return format!("[tool:{} {}:]", call.name, s),
-                (None, Some(e)) => return format!("[tool:{} :{}]", call.name, e),
+                (Some(s), Some(e)) => return format!("{} [{}:{}]", call.name, s, e),
+                (Some(s), None) => return format!("{} [{}:]", call.name, s),
+                (None, Some(e)) => return format!("{} [{}:]", call.name, e),
                 (None, None) => {}
             }
         }
@@ -1409,7 +1409,7 @@ if call.name == "read_file" || call.name == "write_file" {
                 } else {
                     short.to_string()
                 };
-                return format!("[tool:grep {}]", display);
+                return format!("grep [{}]", display);
             }
         }
     }
@@ -1419,13 +1419,13 @@ if call.name == "read_file" || call.name == "write_file" {
             if let Some(path) = val.get("path").and_then(|v| v.as_str()) {
                 let p = path.trim();
                 if !p.is_empty() {
-                    return format!("[tool:list {}]", p);
+                    return format!("list [{}]", p);
                 }
             }
         }
     }
 
-    format!("[tool:{}]", call.name)
+    call.name.clone()
 }
 /// Fallback: parse text-based tool call descriptions from assistant
 /// content when the model did not emit structured tool_calls.
