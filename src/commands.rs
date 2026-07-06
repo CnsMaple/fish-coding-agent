@@ -795,7 +795,11 @@ its result.
    exist and the choice meaningfully changes the plan, call `ask`. When \
    the choice is cosmetic, pick one and note it in the plan.
 5. **Stop after the plan tool.** Do not call additional tools after `plan`; \
-    wait for the user's decision.",
+    wait for the user's decision.
+6. **Handle interruptions directly.** If the user interrupts you and asks a \
+    follow-up question (e.g. translation, clarification, summary), answer \
+    using the information you already have. Do not re-explore the codebase \
+    or call `plan` again.",
             date = date,
             workspace = cwd,
             os = os,
