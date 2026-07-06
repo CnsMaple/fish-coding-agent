@@ -968,6 +968,25 @@ pub fn shell_description() -> String {
     }
 }
 
+pub fn os_name() -> &'static str {
+    #[cfg(target_os = "windows")]
+    {
+        "Windows"
+    }
+    #[cfg(target_os = "linux")]
+    {
+        "Linux"
+    }
+    #[cfg(target_os = "macos")]
+    {
+        "macOS"
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
+    {
+        std::env::consts::OS
+    }
+}
+
 #[cfg(windows)]
 fn windows_shell_program() -> &'static str {
     static SHELL: OnceLock<&'static str> = OnceLock::new();

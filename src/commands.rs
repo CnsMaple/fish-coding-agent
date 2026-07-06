@@ -694,6 +694,8 @@ fn system_prompt(agent: crate::permission::Agent) -> String {
     let cwd = std::env::current_dir()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| ".".to_string());
+    let os = crate::tools::os_name();
+    let shell = crate::tools::shell_description();
     match agent {
         crate::permission::Agent::Build => format!(
             "\
@@ -701,6 +703,7 @@ You are a coding assistant with access to the following tools. All file paths ar
 
 Current date: {date}
 Current workspace: {workspace}
+Current OS: {os}, shell: {shell}
 
   - read_file(path, start_line?, end_line?)
   - write_file(path, content, start_line?, end_line?)
@@ -728,7 +731,8 @@ Do NOT claim a tool was used unless you actually see its result.
 - Respond in the same language as the user's first prompt. If the user explicitly requests a different language in a later message, switch to that language.",
             date = date,
             workspace = cwd,
-            shell = crate::tools::shell_description(),
+            os = os,
+            shell = shell,
             shell_details = crate::tools::shell_guidance()
         ),
         crate::permission::Agent::Plan => format!(
@@ -741,6 +745,7 @@ and present a concrete plan the user can approve before any code is written.
 
 Current date: {date}
 Current workspace: {workspace}
+Current OS: {os}, shell: {shell}
 
 ## What you can do
 
@@ -793,6 +798,8 @@ its result.
     wait for the user's decision.",
             date = date,
             workspace = cwd,
+            os = os,
+            shell = shell,
         ),
     }
 }
