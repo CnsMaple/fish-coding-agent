@@ -74,7 +74,7 @@ pub fn render(
                         }
                     }
                 }
-                let p = Paragraph::new(cached.lines.clone());
+                let p = Paragraph::new(cached.lines.clone()).style(Style::reset());
                 p.render(area, buf);
                 return;
             }
@@ -124,7 +124,7 @@ pub fn render(
             }
         }
     }
-    let p = Paragraph::new(visible.clone());
+    let p = Paragraph::new(visible.clone()).style(Style::reset());
     p.render(area, buf);
 
     // Store in render cache for the next frame.
