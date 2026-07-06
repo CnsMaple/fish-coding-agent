@@ -4651,6 +4651,10 @@ mod tests {
             response_output_chars: 0,
             response_output_tokens: None,
             reqwest: reqwest::Client::new(),
+            stream_client: reqwest::Client::builder()
+                .connect_timeout(std::time::Duration::from_secs(10))
+                .build()
+                .expect("stream client"),
             inflight: None,
             cancel_state: CancelState::Idle,
             focus_target: crate::function::FocusTarget::Input,

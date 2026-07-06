@@ -470,7 +470,7 @@ pub fn compact_now(app: &mut App, _arg: &str) {
         .map(|c| c.base_url.clone())
         .unwrap_or_default();
     let model = app.config.active_model().to_string();
-    let client = app.reqwest.clone();
+    let client = app.stream_client.clone();
     let tx = match app.msg_tx.clone() {
         Some(tx) => tx,
         None => {
@@ -913,13 +913,13 @@ pub fn send_message(app: &mut App, user_msg: Message) {
     };
 
     if let Some(tx) = app.msg_tx.clone() {
-        let client = app.reqwest.clone();
-        let cwd = app.cwd.clone();
-        let agent = app.active_agent;
-        // Defer the actual `tokio::spawn` until after the next
-        // `terminal.draw(...)` returns, so the freshly-pushed user
-        // message is on screen before the HTTP request goes out. The
-        // main event loop pulls this in `flush_pending_request`.
+let client = app.stream_client.clone();
+    let cwd = app.cwd.clone();
+    let agent = app.active_agent;
+    // Defer the actual `tokio::spawn` until after the next
+    // `terminal.draw(...)` returns, so the freshly-pushed user
+    // message is on screen before the HTTP request goes out. The
+    // main event loop pulls this in `flush_pending_request`.
         app.pending_request = Some(crate::function::PendingRequest::Chat(
             crate::function::ChatPending {
                 client,

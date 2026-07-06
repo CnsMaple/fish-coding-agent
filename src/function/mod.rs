@@ -1374,7 +1374,10 @@ pub struct App {
     pub response_output_chars: usize,
     pub response_output_tokens: Option<u64>,
 
+    /// Non-streaming HTTP client (30s total timeout for list_models, OAuth, etc.)
     pub reqwest: reqwest::Client,
+    /// Streaming HTTP client (no total timeout — relies on stream idle timeout)
+    pub stream_client: reqwest::Client,
     pub inflight: Option<InflightHandle>,
     pub cancel_state: CancelState,
 
@@ -1601,6 +1604,10 @@ impl App {
                 .connect_timeout(std::time::Duration::from_secs(10))
                 .build()
                 .expect("reqwest client"),
+            stream_client: reqwest::Client::builder()
+                .connect_timeout(std::time::Duration::from_secs(10))
+                .build()
+                .expect("stream client"),
             inflight: None,
             cancel_state: CancelState::default(),
             current_request_seq: 0,
@@ -2345,6 +2352,10 @@ mod tests {
             response_output_chars: 0,
             response_output_tokens: None,
             reqwest: reqwest::Client::new(),
+            stream_client: reqwest::Client::builder()
+                .connect_timeout(std::time::Duration::from_secs(10))
+                .build()
+                .expect("stream client"),
             inflight: None,
             cancel_state: CancelState::Idle,
             focus_target: FocusTarget::Input,
