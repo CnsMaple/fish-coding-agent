@@ -532,6 +532,41 @@ pub fn build_message_lines(session: &Session, msg_idx: usize, width: usize) -> V
     msg_lines
 }
 
+/// Count the number of blank-line gaps that `ensure_gap_before_block`
+/// inserts before thinking/tool blocks.  A gap is inserted before the
+/// *first* block when content text precedes it (offset > 0), and before
+/// each *subsequent* block whose offset differs from the previous
+/// block's offset (i.e. content text sits between them).
+pub(crate) fn count_block_gaps(
+    thinking_segments: &[super::ThinkingSegment],
+    tool_results: &[super::ToolResultBlock],
+) -> u32 {
+    let mut offsets: Vec<usize> = thinking_segments
+        .iter()
+        .map(|s| s.offset)
+        .chain(tool_results.iter().map(|t| t.content_offset))
+        .collect();
+    offsets.sort();
+    let mut gaps: u32 = 0;
+    let mut prev: Option<usize> = None;
+    for &off in &offsets {
+        match prev {
+            None => {
+                if off > 0 {
+                    gaps += 1;
+                }
+            }
+            Some(p) => {
+                if off > p {
+                    gaps += 1;
+                }
+            }
+        }
+        prev = Some(off);
+    }
+    gaps
+}
+
 /// Build only the lines that intersect the visible viewport.
 /// `start_line` and `end_line` are absolute line indices into the
 /// full rendered output.
@@ -562,14 +597,13 @@ fn build_lines_viewport(
         // (No final spacer — inter-message/bottom gaps are managed here.)
         let content_lines = read_cached_content_count_at(m, width as u16);
         let mut msg_total: u32 = content_lines;
-        let mut thinking_blocks: u32 = 0;
-        let mut tool_blocks: u32 = 0;
 
         // Attachment blocks.
         if !m.attachments.is_empty() {
             msg_total += attachment_block_line_count(&m.attachments);
         }
 
+        let segments = get_thinking_segments(m);
         if m.role == super::Role::Assistant
             && message_has_thinking(m)
             && session.display != crate::config::ThinkingDisplay::Hide
@@ -578,7 +612,6 @@ fn build_lines_viewport(
                 && m.thinking_visible)
                 || (session.display == crate::config::ThinkingDisplay::ShowWhileStreaming
                     && (m.streaming || m.thinking_visible));
-            let segments = get_thinking_segments(m);
             for seg in &segments {
                 let lines = seg.cached_line_count(expanded).unwrap_or_else(|| {
                     thinking_block_line_count(
@@ -590,7 +623,6 @@ fn build_lines_viewport(
                 });
                 msg_total += lines;
                 msg_total += 1; // trailing blank
-                thinking_blocks += 1;
             }
         }
         if session.tool_display != crate::config::ToolResultDisplay::Hide {
@@ -608,15 +640,10 @@ fn build_lines_viewport(
                 });
                 msg_total += lines;
                 msg_total += 1; // trailing blank
-                tool_blocks += 1;
             }
         }
-        let first_offset = get_thinking_segments(m).iter().map(|s| s.offset)
-            .chain(m.tool_results.iter().map(|t| t.content_offset))
-            .min();
-        if first_offset.map_or(false, |off| off > 0) && (thinking_blocks > 0 || tool_blocks > 0) {
-            msg_total += 1; // leading gap
-        }
+        let gap_count = count_block_gaps(&segments, &m.tool_results);
+        msg_total += gap_count;
         if m.role == super::Role::User {
             if let Some(skill_ref) = &m.skill_ref {
                 msg_total += skill_block_line_count(skill_ref, width);

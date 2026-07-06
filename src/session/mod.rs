@@ -858,7 +858,6 @@ impl Session {
             // Thinking blocks: each contributes its rendered line count
             // plus the trailing blank that `build_message_lines` pushes
             // immediately after it.
-            let mut thinking_blocks: u32 = 0;
             let show_thinking = m.role == Role::Assistant
                 && crate::session::render::message_has_thinking(m)
                 && self.display != crate::config::ThinkingDisplay::Hide;
@@ -892,13 +891,11 @@ impl Session {
                         n += seg.cached_line_count_collapsed.unwrap_or(0);
                     }
                     n += 1; // trailing blank after this thinking block
-                    thinking_blocks += 1;
                 }
             }
 
             // Tool result blocks: each contributes its rendered line
             // count plus the trailing blank.
-            let mut tool_blocks: u32 = 0;
             if self.tool_display != crate::config::ToolResultDisplay::Hide {
                 for t in m.tool_results.iter_mut() {
                     // `t.running` no longer forces expansion — see
@@ -935,21 +932,16 @@ impl Session {
                         n += t.cached_line_count_collapsed.unwrap_or(0);
                     }
                     n += 1; // trailing blank after this tool block
-                    tool_blocks += 1;
                 }
             }
 
-            // Leading gap: `ensure_gap_before_block` inserts a blank
-            // line before the first thinking/tool block ONLY when
-            // content text precedes it (first block offset > 0).
-            // When the message starts with a block (offset == 0),
-            // the viewport-level gap provides the spacing.
-            let first_offset = m.thinking_segments.iter().map(|s| s.offset)
-                .chain(m.tool_results.iter().map(|t| t.content_offset))
-                .min();
-            if first_offset.map_or(false, |off| off > 0) && (thinking_blocks > 0 || tool_blocks > 0) {
-                n += 1;
-            }
+            // Gaps before thinking/tool blocks: `ensure_gap_before_block`
+            // inserts a blank line before the first block when content
+            // precedes it, and before each subsequent block whose offset
+            // differs from the previous block's offset.
+            let segments = crate::session::render::get_thinking_segments(m);
+            let gap_count = crate::session::render::count_block_gaps(&segments, &m.tool_results);
+            n += gap_count;
 
             // User messages get a background-filled padding line
             // above and below the content so the user-bg block
