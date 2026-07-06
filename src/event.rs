@@ -1350,16 +1350,9 @@ async fn handle_key(k: crossterm::event::KeyEvent, app: &mut App) {
         return;
     }
 
-    // If a sidebar tab is open, give it a chance to handle the key first.
-    // Arrow keys are forwarded to the tab only when focus is on the
-    // function panel — otherwise they go to the input area.
-    let is_arrow = matches!(
-        k.code,
-        KeyCode::Up | KeyCode::Down | KeyCode::Left | KeyCode::Right
-    );
-    let skip_dispatch = is_arrow && app.focus_target == crate::function::FocusTarget::Input;
-
-    if !skip_dispatch && dispatch_to_active_tab(k, app).await {
+    if app.focus_target == crate::function::FocusTarget::FunctionPanel
+        && dispatch_to_active_tab(k, app).await
+    {
         return;
     }
 
