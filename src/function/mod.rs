@@ -1710,7 +1710,7 @@ impl App {
         }
         if !self.function_visible {
             if level == crate::function::notifications::ToastLevel::Fail {
-                self.function_visible = true;
+                self.show_panel();
             }
             self.pending_events = self.pending_events.saturating_add(1);
         }
@@ -1992,7 +1992,7 @@ impl App {
         // otherwise the user would see an empty bordered box even
         // when other tabs (e.g. Notifications) exist.
         if has_plan_tab {
-            self.function_visible = true;
+            self.show_panel();
             self.acknowledge_panel();
         }
     }
@@ -2017,7 +2017,7 @@ impl App {
         } else {
             self.function.push(SidebarTab::Plan(state));
         }
-        self.function_visible = true;
+        self.show_panel();
         self.acknowledge_panel();
     }
 
@@ -2079,7 +2079,7 @@ impl App {
         );
         // Ensure the panel is visible when it was hidden.
         if !self.function_visible {
-            self.function_visible = true;
+            self.show_panel();
         }
 
         // Also accumulate the merged-list body so a single `+--- Ask
@@ -2103,7 +2103,7 @@ impl App {
         } else {
             self.function.push(SidebarTab::Ask(AskState::new(question, options)));
         }
-        self.function_visible = true;
+        self.show_panel();
         self.acknowledge_panel();
     }
 
@@ -2112,7 +2112,7 @@ impl App {
             self.function.push(SidebarTab::Todo(TodoTabState::new()));
         }
         if !self.function_visible {
-            self.function_visible = true;
+            self.show_panel();
         }
     }
 
@@ -2218,6 +2218,12 @@ impl App {
         self.pending_events = 0;
     }
 
+    /// Show the function panel and move focus to it.
+    pub fn show_panel(&mut self) {
+        self.function_visible = true;
+        self.focus_target = FocusTarget::FunctionPanel;
+    }
+
     /// Ensure the Completion sidebar tab reflects the current input buffer.
     /// - If the buffer is a partial `/` command, populate (or create) the tab
     ///   with matching candidates and reset its cursor.
@@ -2273,7 +2279,7 @@ impl App {
                 // the candidate list, so auto-show the panel and focus
                 // the new Completion tab.
                 self.function.active = self.function.tabs.len() - 1;
-                self.function_visible = true;
+                self.show_panel();
                 self.acknowledge_panel();
             }
         }
@@ -2286,10 +2292,10 @@ impl App {
         let has_non_trivial = self.function.tabs.iter().any(|t| {
             !matches!(t, SidebarTab::Notifications)
         });
+        self.focus_target = FocusTarget::Input;
+        self.function_panel_cursor = None;
         if !has_non_trivial {
             self.function_visible = false;
-            self.focus_target = FocusTarget::Input;
-            self.function_panel_cursor = None;
             if self.mode == AppMode::Plan {
                 self.set_mode(self.previous_mode);
             }

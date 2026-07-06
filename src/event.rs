@@ -367,7 +367,7 @@ fn open_paste_preview(app: &mut App) {
     }
 
     app.function.push(crate::function::SidebarTab::PastePreview(Box::new(state)));
-    app.function_visible = true;
+    app.show_panel();
     app.acknowledge_panel();
 }
 
@@ -3861,7 +3861,7 @@ pub(crate) fn handle_ctrl_n(app: &mut App) {
             app.function
                 .push(crate::function::SidebarTab::Notifications);
         }
-        app.function_visible = true;
+        app.show_panel();
         app.acknowledge_panel();
     } else if notif_active {
         // Remove the Notifications tab.
@@ -4254,7 +4254,7 @@ fn settings_save_form(app: &mut App, form: crate::function::ConfigFormState) {
         let should_fetch = state.fetching;
         app.function
             .push(crate::function::SidebarTab::ModelPicker(state));
-        app.function_visible = true;
+        app.show_panel();
         app.acknowledge_panel();
 
         if should_fetch {

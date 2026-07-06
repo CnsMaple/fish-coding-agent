@@ -507,7 +507,7 @@ pub fn open_settings_at(app: &mut App, initial_level: crate::function::SettingsL
     state.level = initial_level;
     state.clamp_cursor(&app.config);
     app.function.push(SidebarTab::Settings(Box::new(state)));
-    app.function_visible = true;
+    app.show_panel();
     app.acknowledge_panel();
 }
 
@@ -534,7 +534,7 @@ pub fn open_model_picker(app: &mut App) {
         .position(|t| matches!(t, SidebarTab::ModelPicker(_)))
     {
         app.function.active = idx;
-        app.function_visible = true;
+        app.show_panel();
         app.acknowledge_panel();
         return;
     }
@@ -584,7 +584,7 @@ pub fn open_model_picker_for_kind(app: &mut App, provider: crate::config::Provid
         .position(|t| matches!(t, SidebarTab::ModelPicker(s) if s.provider == provider))
     {
         app.function.active = idx;
-        app.function_visible = true;
+        app.show_panel();
         app.acknowledge_panel();
         return;
     }
@@ -594,7 +594,7 @@ pub fn open_model_picker_for_kind(app: &mut App, provider: crate::config::Provid
         state.rebuild_filter();
     }
     app.function.push(SidebarTab::ModelPicker(state));
-    app.function_visible = true;
+    app.show_panel();
     app.acknowledge_panel();
 }
 
@@ -610,7 +610,7 @@ pub fn open_provider_picker(app: &mut App) {
         let state = crate::function::ProviderPickerState::new(&app.config);
         app.function.push(SidebarTab::ProviderPicker(state));
     }
-    app.function_visible = true;
+    app.show_panel();
     app.acknowledge_panel();
 }
 
@@ -625,7 +625,7 @@ pub fn open_hotkey(app: &mut App) {
     } else {
         app.function.push(SidebarTab::Hotkey);
     }
-    app.function_visible = true;
+    app.show_panel();
     app.acknowledge_panel();
 }
 
@@ -633,7 +633,7 @@ pub fn open_thinking_picker(app: &mut App) {
     app.function.push(SidebarTab::ThinkingPicker(
         crate::function::ThinkingPickerState::new(),
     ));
-    app.function_visible = true;
+    app.show_panel();
     app.acknowledge_panel();
 }
 
@@ -649,7 +649,7 @@ pub fn open_timeline_picker(app: &mut App) {
         let state = crate::function::TimelinePickerState::new(&app.session);
         app.function.push(SidebarTab::TimelinePicker(state));
     }
-    app.function_visible = true;
+    app.show_panel();
     app.acknowledge_panel();
 }
 
@@ -671,7 +671,7 @@ pub fn open_session_picker(app: &mut App, mode: crate::function::SessionPickerMo
             crate::function::SessionPickerState::new(mode, &app.cwd),
         ));
     }
-    app.function_visible = true;
+    app.show_panel();
     app.acknowledge_panel();
 }
 
@@ -681,7 +681,7 @@ pub fn open_session_rename(app: &mut App, target_id: Option<String>, title: Stri
             Some(id) => crate::function::SessionRenameState::new_target(id, title),
             None => crate::function::SessionRenameState::new_current(&title),
         }));
-    app.function_visible = true;
+    app.show_panel();
     app.acknowledge_panel();
 }
 
