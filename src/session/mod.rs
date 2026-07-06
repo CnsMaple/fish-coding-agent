@@ -275,6 +275,12 @@ pub struct Session {
     /// the viewport geometry changes (width change, session clear).
     #[serde(skip)]
     pub last_rendered_total: Option<(u16, u32)>,
+    /// When `true`, newly created tool result blocks default to
+    /// expanded. Set by `toggle_all_tool_results` when the user
+    /// presses Ctrl+O to expand all blocks; subsequent tool calls
+    /// during the same streaming turn inherit this state.
+    #[serde(skip)]
+    pub expand_new_tool_results: bool,
 }
 
 impl Default for Session {
@@ -297,6 +303,7 @@ impl Default for Session {
             layout_version: 0,
             render_cache: std::sync::Mutex::new(None),
             last_rendered_total: None,
+            expand_new_tool_results: false,
         }
     }
 }
@@ -440,13 +447,7 @@ impl Session {
         if let Some(id) = self.streaming_id {
             if let Some(m) = self.messages.get_mut(id) {
                 let content_offset = m.content.len();
-                // Default to collapsed: the user expands with Ctrl+O.
-                // This applies to short and long tool content alike so
-                // the chat stays readable while the model streams
-                // large outputs; long / write_file content used to
-                // auto-expand, which buried the user-bg block at the
-                // bottom of the viewport.
-                let visible = false;
+                let visible = name == "plan" || self.expand_new_tool_results;
                 m.tool_results.push(ToolResultBlock {
                     name,
                     title,
@@ -468,15 +469,13 @@ impl Session {
         if let Some(id) = self.streaming_id {
             if let Some(m) = self.messages.get_mut(id) {
                 let content_offset = m.content.len();
+                let visible = name == "plan" || self.expand_new_tool_results;
                 m.tool_results.push(ToolResultBlock {
                     name,
                     title,
                     content: String::new(),
                     content_offset,
-                    // Collapsed by default; `running` is what paints
-                    // the pending background colour. The expanded
-                    // form is opt-in via Ctrl+O.
-                    visible: false,
+                    visible,
                     running: true,
                     cached_line_count_visible: None,
                     cached_line_count_collapsed: None,
@@ -509,9 +508,7 @@ impl Session {
     }
 
     pub fn push_tool_result_message(&mut self, name: String, title: String, content: String) {
-        // Default to collapsed for the same reason as
-        // `append_tool_to_last`; user can Ctrl+O to expand.
-        let visible = false;
+        let visible = name == "plan" || self.expand_new_tool_results;
         let msg = Message {
             role: Role::Assistant,
             content: String::new(),
@@ -545,11 +542,16 @@ impl Session {
             .messages
             .iter()
             .flat_map(|m| m.tool_results.iter())
-            .any(|tool| !tool.visible);
+            .any(|tool| !tool.visible && tool.name != "plan");
+
+        self.expand_new_tool_results = should_expand;
 
         for msg in &mut self.messages {
             let mut changed = false;
             for tool in &mut msg.tool_results {
+                if tool.name == "plan" {
+                    continue;
+                }
                 if tool.visible != should_expand {
                     tool.visible = should_expand;
                     changed = true;
@@ -683,13 +685,15 @@ impl Session {
                     m.thinking_visible = false;
                 }
                 // Auto-fold tool results when streaming finishes and mode
-                // is ShowWhileStreaming.
+                // is ShowWhileStreaming. Plan blocks are never folded.
                 if matches!(
                     self.tool_display,
                     crate::config::ToolResultDisplay::ShowWhileStreaming
                 ) {
                     for t in &mut m.tool_results {
-                        t.visible = false;
+                        if t.name != "plan" {
+                            t.visible = false;
+                        }
                     }
                 }
             }
@@ -879,13 +883,14 @@ impl Session {
                 for t in m.tool_results.iter_mut() {
                     // `t.running` no longer forces expansion — see
                     // the matching note in `build_lines_viewport`.
-                    let t_vis = match self.tool_display {
-                        crate::config::ToolResultDisplay::Show => t.visible,
-                        crate::config::ToolResultDisplay::ShowWhileStreaming => {
-                            m.streaming || t.visible
-                        }
-                        _ => false,
-                    };
+                    let t_vis = t.name == "plan"
+                        || match self.tool_display {
+                            crate::config::ToolResultDisplay::Show => t.visible,
+                            crate::config::ToolResultDisplay::ShowWhileStreaming => {
+                                m.streaming || t.visible
+                            }
+                            _ => false,
+                        };
                     if t_vis {
                         if t.cached_line_count_visible.is_none() {
                             t.cached_line_count_visible =
@@ -1041,13 +1046,14 @@ impl Session {
             let mut tool_blocks: u32 = 0;
             if self.tool_display != crate::config::ToolResultDisplay::Hide {
                 for t in &m.tool_results {
-                    let t_vis = match self.tool_display {
-                        crate::config::ToolResultDisplay::Show => t.visible,
-                        crate::config::ToolResultDisplay::ShowWhileStreaming => {
-                            m.streaming || t.visible
-                        }
-                        _ => false,
-                    };
+                    let t_vis = t.name == "plan"
+                        || match self.tool_display {
+                            crate::config::ToolResultDisplay::Show => t.visible,
+                            crate::config::ToolResultDisplay::ShowWhileStreaming => {
+                                m.streaming || t.visible
+                            }
+                            _ => false,
+                        };
                     let v = if t_vis {
                         t.cached_line_count_visible.unwrap_or(0)
                     } else {

@@ -190,19 +190,20 @@ pub fn render(f: &mut Frame, app: &mut App) {
                 // `t.running` no longer forces expansion — see the
                 // matching note in `build_lines_viewport`. The
                 // pending background colour alone signals "in flight".
-                let t_vis = match app.config.tool_display {
-                    crate::config::ToolResultDisplay::Show => t.visible,
-                    crate::config::ToolResultDisplay::ShowWhileStreaming => {
-                        m.streaming || t.visible
-                    }
-                    _ => false,
-                };
+                let t_vis = t.name == "plan"
+                    || match app.config.tool_display {
+                        crate::config::ToolResultDisplay::Show => t.visible,
+                        crate::config::ToolResultDisplay::ShowWhileStreaming => {
+                            m.streaming || t.visible
+                        }
+                        _ => false,
+                    };
                 let lines = if t_vis {
                     t.cached_line_count_visible.unwrap_or(0) as usize
                 } else {
                     t.cached_line_count_collapsed.unwrap_or(0) as usize
                 };
-                if lines > 0 && line_idx >= start && line_idx < end {
+                if lines > 0 && line_idx >= start && line_idx < end && t.name != "plan" {
                     let screen_y = area.y + (line_idx - start) as u16;
                     app.tool_toggle_rows.push((screen_y, msg_idx, tool_idx));
                 }

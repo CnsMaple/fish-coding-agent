@@ -589,13 +589,14 @@ fn build_lines_viewport(
         }
         if session.tool_display != crate::config::ToolResultDisplay::Hide {
             for t in &m.tool_results {
-                let t_vis = match session.tool_display {
-                    crate::config::ToolResultDisplay::Show => t.visible,
-                    crate::config::ToolResultDisplay::ShowWhileStreaming => {
-                        m.streaming || t.visible
-                    }
-                    _ => false,
-                };
+                let t_vis = t.name == "plan"
+                    || match session.tool_display {
+                        crate::config::ToolResultDisplay::Show => t.visible,
+                        crate::config::ToolResultDisplay::ShowWhileStreaming => {
+                            m.streaming || t.visible
+                        }
+                        _ => false,
+                    };
                 if t_vis {
                     msg_total += t.cached_line_count_visible.unwrap_or(0);
                 } else {
@@ -1138,6 +1139,8 @@ fn build_tool_block_rows(
 ) -> Vec<Line<'static>> {
     let (bg, fg) = block_colors_for_tool(tool);
 
+    let visible = if tool.name == "plan" { true } else { visible };
+
     let mut rows: Vec<Line<'static>> = if tool.name == "write_file" {
         if let Some(r) = build_write_file_diff_rows(tool, visible, preview_lines, width, bg) {
             r
@@ -1151,11 +1154,6 @@ fn build_tool_block_rows(
             return vec![];
         }
     } else if tool.name == "ask" {
-        // Individual ask tool calls do NOT render as independent
-        // blocks. The `App::flush_ask_snapshot` method collapses
-        // all ask calls from one assistant turn into a single
-        // `+--- Ask ---+` block in the session — that is the only
-        // ask block the user sees per turn.
         vec![]
     } else {
         let (output, footer) = tool_display_content(tool);
@@ -1307,12 +1305,12 @@ fn output_row_lines(output: &str, width: usize, bg: Color) -> Vec<Line<'static>>
     rows
 }
 
-/// Render the last ~`preview_lines` *visual* rows of `output` as a
-/// collapsed preview block.  Wrapped logical lines are counted as
-/// multiple visual rows so the collapsed preview doesn't explode when
-/// one logical line wraps to many rows.  Returns the rendered rows
-/// *plus* the number of hidden *visual* rows so callers can build
-/// their own Ctrl+O hint layout.
+/// Render the last `preview_lines` logical lines of `output` as a
+/// collapsed preview block. While the output is shorter than
+/// `preview_lines`, the preview grows naturally as content streams in.
+/// Once the output reaches `preview_lines` logical lines, the preview
+/// height is fixed so the block stops jittering. Returns the rendered
+/// rows plus the number of hidden logical lines.
 fn collapsed_output_lines(
     output: &str,
     preview_lines: usize,
@@ -1321,37 +1319,26 @@ fn collapsed_output_lines(
 ) -> (Vec<Line<'static>>, usize) {
     let lines: Vec<&str> = output.lines().collect();
     if lines.is_empty() {
-        return (box_row_lines("[no output]", width, bg), 0);
+        return (Vec::new(), 0);
     }
 
-    let inner_w = width.saturating_sub(4).max(1);
-    let visual_counts: Vec<usize> = lines
-        .iter()
-        .map(|line| wrap_line(line, inner_w).len())
-        .collect();
-    let total_visual: usize = visual_counts.iter().sum();
-
-    // Walk backwards through logical lines, accumulating their visual
-    // row counts, until we reach `preview_lines` visual rows.
-    // Always show at least one logical line so the preview is never empty.
-    let mut preview_visual = 0usize;
-    let mut shown_logical = 0usize;
-    for &count in visual_counts.iter().rev() {
-        if preview_visual + count > preview_lines && shown_logical > 0 {
-            break;
-        }
-        preview_visual += count;
-        shown_logical += 1;
-    }
-
-    let skipped_visual = total_visual.saturating_sub(preview_visual);
+    let shown_logical = preview_lines.min(lines.len());
+    let skipped = lines.len().saturating_sub(shown_logical);
     let skip_logical = lines.len().saturating_sub(shown_logical);
 
     let mut rows = Vec::new();
     for line in lines.iter().skip(skip_logical) {
         rows.extend(box_row_lines(line, width, bg));
     }
-    (rows, skipped_visual)
+    // Once the output has reached `preview_lines` logical lines,
+    // pin the preview height so the block does not jitter while
+    // content continues streaming.
+    if lines.len() >= preview_lines {
+        while rows.len() < preview_lines {
+            rows.push(box_row_line("", width, bg));
+        }
+    }
+    (rows, skipped)
 }
 
 /// Single full-width Ctrl+O hint line for collapsed blocks that

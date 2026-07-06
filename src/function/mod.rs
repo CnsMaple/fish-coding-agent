@@ -1839,6 +1839,7 @@ impl App {
                     layout_version: 0,
                     render_cache: Default::default(),
                     last_rendered_total: None,
+                    expand_new_tool_results: false,
                 };
                 self.image_blocks.clear();
                 self.session.invalidate_layout_cache();
@@ -1928,6 +1929,7 @@ impl App {
                     layout_version: 0,
                     render_cache: Default::default(),
                     last_rendered_total: None,
+                    expand_new_tool_results: false,
                 };
                 if let Some(ref p) = stored.provider {
                     self.status.set_provider_name(p);
