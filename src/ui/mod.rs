@@ -13,6 +13,8 @@ pub mod picker_widget;
 
 /// Height of the standalone cwd line that sits below the input block.
 const CWD_HEIGHT: u16 = 1;
+/// Height of the cancel-hint / progress-hint line above the input block.
+const CANCEL_HEIGHT: u16 = 1;
 
 pub fn render(f: &mut Frame, app: &mut App) {
     let area = f.area();
@@ -24,7 +26,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
         // For PastePreview the panel height is exactly the content height
         // (capped at 20%); for other tabs it grows with 20% but never below
         // the minimum renderable height.
-        let remaining = area.height.saturating_sub(input_height + CWD_HEIGHT);
+        let remaining = area.height.saturating_sub(input_height + CANCEL_HEIGHT + CWD_HEIGHT);
         let pct_height = (remaining as f64 * 0.20) as u16;
         let panel_height = app.function.tabs.get(app.function.active)
             .map_or(4, |t| t.panel_height(pct_height));
@@ -33,6 +35,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Min(0),
+                Constraint::Length(CANCEL_HEIGHT),
                 Constraint::Length(panel_height),
                 Constraint::Length(input_height),
                 Constraint::Length(CWD_HEIGHT),
@@ -43,6 +46,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Min(0),
+                Constraint::Length(CANCEL_HEIGHT),
                 Constraint::Length(input_height),
                 Constraint::Length(CWD_HEIGHT),
             ])
@@ -69,9 +73,10 @@ pub fn render(f: &mut Frame, app: &mut App) {
             &app.session,
             &mut app.tool_toggle_rows,
         );
-        function_panel::render(chunks[1], f.buffer_mut(), app);
-        crate::input::render(chunks[2], f.buffer_mut(), app);
-        render_cwd(chunks[3], f.buffer_mut(), &app.status.cwd);
+        crate::input::render_cancel_hint(chunks[1], f.buffer_mut(), app);
+        function_panel::render(chunks[2], f.buffer_mut(), app);
+        crate::input::render(chunks[3], f.buffer_mut(), app);
+        render_cwd(chunks[4], f.buffer_mut(), &app.status.cwd);
     } else {
         crate::session::render::render(
             area,
@@ -79,8 +84,9 @@ pub fn render(f: &mut Frame, app: &mut App) {
             &app.session,
             &mut app.tool_toggle_rows,
         );
-        crate::input::render(chunks[1], f.buffer_mut(), app);
-        render_cwd(chunks[2], f.buffer_mut(), &app.status.cwd);
+        crate::input::render_cancel_hint(chunks[1], f.buffer_mut(), app);
+        crate::input::render(chunks[2], f.buffer_mut(), app);
+        render_cwd(chunks[3], f.buffer_mut(), &app.status.cwd);
     }
 
     // Re-derive which line of the scroll window each screen row maps to

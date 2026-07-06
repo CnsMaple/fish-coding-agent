@@ -1,6 +1,7 @@
 pub mod status;
 
 use crate::function::notifications::ToastLevel;
+use crate::function::CancelState;
 use crate::function::SidebarTab;
 use crate::theme::Theme;
 use ratatui::buffer::Buffer;
@@ -445,11 +446,7 @@ pub fn render(area: Rect, buf: &mut Buffer, app: &mut crate::app::App) {
         return;
     }
 
-    let prompt = if app.inflight.is_some() {
-        spinner_prompt()
-    } else {
-        " > ".to_string()
-    };
+    let prompt = " > ".to_string();
     let prompt_width = UnicodeWidthStr::width(prompt.as_str());
     let buffer = &app.input.buffer;
     let cursor = app.input.cursor.min(buffer.len());
@@ -645,10 +642,22 @@ fn input_mode_preview<'a>(buffer: &'a str, fallback: &'a str) -> &'a str {
 
 static SPINNER_FRAME: AtomicUsize = AtomicUsize::new(0);
 
-fn spinner_prompt() -> String {
+pub(crate) fn spinner_prompt() -> String {
     const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
     let idx = SPINNER_FRAME.fetch_add(1, Ordering::Relaxed) % FRAMES.len();
     format!(" {} ", FRAMES[idx])
+}
+
+pub fn render_cancel_hint(area: Rect, buf: &mut Buffer, app: &crate::app::App) {
+    if app.inflight.is_none() {
+        return;
+    }
+    let text = match app.cancel_state {
+        CancelState::Idle => format!("{} esc to interrupt", spinner_prompt().trim()),
+        CancelState::Confirming(_) => format!("{} esc again", spinner_prompt().trim()),
+    };
+    let line = Line::from(Span::styled(text, Theme::status_warn()));
+    line.render(area, buf);
 }
 
 /// Heuristic for whether a "completion" sidebar should be visible based on input.

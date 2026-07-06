@@ -492,6 +492,7 @@ pub fn compact_now(app: &mut App, _arg: &str) {
         label: format!("compact:{active_id}:{model}"),
         seq: app.current_request_seq,
     });
+    app.cancel_state = crate::function::CancelState::Idle;
     tokio::spawn(run_compaction_stream(
         client, base, key, provider, model, history, cancel_rx, tx, start, end,
     ));
@@ -902,6 +903,7 @@ pub fn send_message(app: &mut App, user_msg: Message) {
         label: format!("chat:{active_id}:{model}"),
         seq,
     });
+    app.cancel_state = crate::function::CancelState::Idle;
 
     let req = ChatRequest {
         model,

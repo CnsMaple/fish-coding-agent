@@ -11,6 +11,7 @@ use tokio::time::interval;
 
 use crate::app::App;
 use crate::function::AppMode;
+use crate::function::CancelState;
 
 /// Position the hardware cursor for IME support.
 ///
@@ -277,6 +278,13 @@ Event::Resize(_, _) => {}
                 // even when no new data arrives between API chunks.
                 if app.inflight.is_some() {
                     needs_draw = true;
+                    // 2s timeout: revert "esc again" back to
+                    // "esc to interrupt" if user doesn't follow through.
+                    if let CancelState::Confirming(since) = app.cancel_state {
+                        if since.elapsed() >= Duration::from_secs(2) {
+                            app.cancel_state = CancelState::Idle;
+                        }
+                    }
                 }
                 // display_cursor is kept up-to-date in append_to_last,
                 // so content is immediately visible during streaming.
@@ -923,6 +931,7 @@ fn handle_msg(msg: AppMsg, app: &mut App) {
             app.session.finish_streaming();
             app.save_current_session();
             app.inflight = None;
+            app.cancel_state = CancelState::Idle;
             use crate::function::notifications::ToastLevel;
             app.notify(ToastLevel::Ok, "response complete");
             maybe_trigger_auto_compact(app);
@@ -938,6 +947,7 @@ fn handle_msg(msg: AppMsg, app: &mut App) {
             app.session.finish_streaming();
             app.save_current_session();
             app.inflight = None;
+            app.cancel_state = CancelState::Idle;
             use crate::function::notifications::ToastLevel;
             app.notify(ToastLevel::Fail, error.clone());
             app.session.push(crate::session::Message::new(
@@ -1139,6 +1149,7 @@ fn handle_msg(msg: AppMsg, app: &mut App) {
             // before this event arrives, so the cancel sender
             // inside it is still alive. Drop it explicitly.
             app.inflight = None;
+            app.cancel_state = CancelState::Idle;
             app.compacting = false;
             if let Some(idx) = app.session.apply_compaction(start, end, summary) {
                 app.notify(ToastLevel::Ok, "session compacted");
@@ -1163,6 +1174,7 @@ fn handle_msg(msg: AppMsg, app: &mut App) {
         AppMsg::CompactionFailed { error } => {
             use crate::function::notifications::ToastLevel;
             app.inflight = None;
+            app.cancel_state = CancelState::Idle;
             app.compacting = false;
             app.notify(ToastLevel::Fail, format!("compact failed: {error}"));
             if let Some(total) = app.status.token_total {
@@ -1366,25 +1378,27 @@ async fn handle_key(k: crossterm::event::KeyEvent, app: &mut App) {
                 app.session.streaming_id = None;
                 return;
             }
-            // If a request is in flight, cancel it. We do NOT send
-            // a manual `ChatDone` here: any `ChatDone` /
-            // `ChatError` still in the channel (or produced by the
-            // dying task) is now tagged with the OLD request seq and
-            // gets filtered out by `handle_msg`, while `run_chat_stream`
-            // itself exits silently on cancel. Also save the partial
-            // session so the user's interrupted assistant message
-            // is durable.
-            if let Some(inflight) = app.inflight.take() {
-                let _ = inflight.cancel.send(true);
-                // A compaction also parks its cancel sender in
-                // `inflight`. Drop the flag so a subsequent
-                // `CompactionSummaryReady` is treated as stale
-                // (it won't fire — the task bailed out on cancel —
-                // but the flag is what blocks a fresh `/compact`).
-                app.compacting = false;
-                app.save_current_session();
-                app.session.streaming_id = None;
-                return;
+            // Progressive cancellation: first Esc → "esc again" hint,
+            // second Esc → actually cancel. Falls back to Idle after
+            // 2s of no input (checked in the tick handler).
+            if app.inflight.is_some() {
+                match app.cancel_state {
+                    CancelState::Idle => {
+                        app.cancel_state = CancelState::Confirming(Instant::now());
+                        app.save_current_session();
+                        return;
+                    }
+                    CancelState::Confirming(_) => {
+                        app.cancel_state = CancelState::Idle;
+                        if let Some(inflight) = app.inflight.take() {
+                            let _ = inflight.cancel.send(true);
+                        }
+                        app.compacting = false;
+                        app.save_current_session();
+                        app.session.streaming_id = None;
+                        return;
+                    }
+                }
             }
             // If a selection is active, just clear it.
             if app.input.has_selection() {
@@ -2547,6 +2561,7 @@ fn submit_direct_tool_input(app: &mut App, raw: &str) -> bool {
             label: format!("tool:{n}"),
             seq,
         });
+        app.cancel_state = CancelState::Idle;
         app.pending_request = Some(crate::function::PendingRequest::Tool(
             crate::function::ToolPending {
                 name: n,
@@ -4637,6 +4652,8 @@ mod tests {
             response_output_tokens: None,
             reqwest: reqwest::Client::new(),
             inflight: None,
+            cancel_state: CancelState::Idle,
+            focus_target: crate::function::FocusTarget::Input,
             current_request_seq: 0,
             pending_request: None,
             cwd: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),

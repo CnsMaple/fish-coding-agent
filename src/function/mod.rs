@@ -1334,6 +1334,17 @@ pub struct ToolPending {
     pub seq: u64,
 }
 
+/// Progressive cancellation state for inflight requests.
+/// First Esc switches to Confirming, second Esc cancels.
+/// Falls back to Idle after 2 seconds of no input.
+#[derive(Clone, Debug, Default)]
+pub enum CancelState {
+    #[default]
+    Idle,
+    /// First Esc was pressed; waiting for second Esc or 2s timeout.
+    Confirming(Instant),
+}
+
 /// Top-level app state.
 pub struct App {
     pub config: Config,
@@ -1365,6 +1376,7 @@ pub struct App {
 
     pub reqwest: reqwest::Client,
     pub inflight: Option<InflightHandle>,
+    pub cancel_state: CancelState,
 
     /// Set when the MCP tool list has changed since the last
     /// `openai_tool_specs` / `anthropic_tool_specs` call. The
@@ -1590,6 +1602,7 @@ impl App {
                 .build()
                 .expect("reqwest client"),
             inflight: None,
+            cancel_state: CancelState::default(),
             current_request_seq: 0,
             pending_request: None,
             cwd,
@@ -2333,6 +2346,8 @@ mod tests {
             response_output_tokens: None,
             reqwest: reqwest::Client::new(),
             inflight: None,
+            cancel_state: CancelState::Idle,
+            focus_target: FocusTarget::Input,
             current_request_seq: 0,
             pending_request: None,
             cwd: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
