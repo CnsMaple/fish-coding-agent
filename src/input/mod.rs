@@ -422,7 +422,7 @@ pub fn render(area: Rect, buf: &mut Buffer, app: &mut crate::app::App) {
         title.spans.insert(
             0,
             Span::styled(
-                format!("(!{}) | ", app.pending_events),
+format!("[!{}] | ", app.pending_events),
                 Theme::status_warn(),
             ),
         );
