@@ -1685,15 +1685,13 @@ fn build_write_file_diff_rows(
             }
         }
     } else {
-        let body = diff
-            .iter()
-            .map(diff_line_to_plain_str)
-            .collect::<Vec<_>>()
-            .join("\n");
-        let (preview, skipped) = collapsed_output_lines(&body, preview_lines, width, bg);
-        rows.extend(preview);
-        if skipped > 0 {
-            rows.push(ctrl_o_hint_line(skipped, width, bg));
+        let shown = preview_lines.min(diff.len());
+        let skip = diff.len().saturating_sub(shown);
+        for line in diff.iter().skip(skip) {
+            rows.push(diff_box_row_line(line, width, bg, lang));
+        }
+        if skip > 0 {
+            rows.push(ctrl_o_hint_line(skip, width, bg));
         }
     }
     rows.push(border_line(width, bg));
@@ -1702,14 +1700,14 @@ fn build_write_file_diff_rows(
 
 fn diff_box_row_line(diff: &DiffLine, width: usize, bg: Color, lang: &str) -> Line<'static> {
     let (line_bg, sign) = match diff.kind {
-        DiffLineKind::Removed => (Color::Rgb(237, 218, 213), "-"),
-        DiffLineKind::Added => (Color::Rgb(212, 233, 218), "+"),
+        DiffLineKind::Removed => (Color::Rgb(239, 154, 154), "-"),
+        DiffLineKind::Added => (Color::Rgb(165, 214, 167), "+"),
         DiffLineKind::Context => (bg, " "),
     };
 
     let sign_color = match diff.kind {
-        DiffLineKind::Removed => Color::Rgb(237, 218, 213),
-        DiffLineKind::Added => Color::Rgb(212, 233, 218),
+        DiffLineKind::Removed => Color::Rgb(239, 154, 154),
+        DiffLineKind::Added => Color::Rgb(165, 214, 167),
         DiffLineKind::Context => Color::Reset,
     };
 
@@ -1729,7 +1727,7 @@ fn diff_box_row_line(diff: &DiffLine, width: usize, bg: Color, lang: &str) -> Li
     let pad = inner_w.saturating_sub(prefix_width).saturating_sub(content_width);
 
     let mut spans = vec![Span::styled("| ", dim_bg_style(bg))];
-    spans.push(Span::styled(prefix, Style::default().fg(sign_color).bg(line_bg)));
+    spans.push(Span::styled(prefix, Style::default().fg(sign_color).bg(bg)));
     spans.push(Span::styled("│ ", bg_style(line_bg)));
     spans.extend(content_spans);
     if pad > 0 {
@@ -1737,23 +1735,6 @@ fn diff_box_row_line(diff: &DiffLine, width: usize, bg: Color, lang: &str) -> Li
     }
     spans.push(Span::styled(" |", dim_bg_style(bg)));
     Line::from(spans)
-}
-
-fn diff_line_to_plain_str(dl: &DiffLine) -> String {
-    let nw = 3usize.max(dl.line_no.to_string().len());
-    match dl.kind {
-        DiffLineKind::Context => {
-            format!(" {:>width$}│{}", dl.line_no, dl.content, width = nw)
-        }
-        DiffLineKind::Removed => {
-            let text = mark_leading_spaces(&dl.content);
-            format!("-{:>width$}│{}", dl.line_no, text, width = nw)
-        }
-        DiffLineKind::Added => {
-            let text = mark_leading_spaces(&dl.content);
-            format!(" {:>width$}│{}", "+", text, width = nw)
-        }
-    }
 }
 
 fn parse_write_file_diff(content: &str) -> Option<(String, String, String)> {
@@ -1847,20 +1828,6 @@ fn unified_diff_rows(old: &str, new: &str) -> Vec<DiffLine> {
         });
     }
     rows
-}
-
-fn mark_leading_spaces(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut marking = true;
-    for ch in text.chars() {
-        if marking && ch == ' ' {
-            out.push('·');
-        } else {
-            marking = false;
-            out.push(ch);
-        }
-    }
-    out
 }
 
 fn command_display_content(content: &str) -> (String, String) {

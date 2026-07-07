@@ -487,7 +487,7 @@ fn highlight_code_lines(lines: &[&str], lang: Option<&str>) -> Vec<TableCell> {
     else {
         return plain_code_lines(lines);
     };
-    let Some(theme) = theme_set().themes.get("base16-ocean.dark") else {
+    let Some(theme) = theme_set().themes.get("InspiredGitHub") else {
         return plain_code_lines(lines);
     };
     let mut highlighter = HighlightLines::new(syntax, theme);
@@ -515,7 +515,7 @@ pub(crate) fn highlight_line(line: &str, lang: &str) -> Vec<Span<'static>> {
     else {
         return vec![Span::raw(line.to_string())];
     };
-    let Some(theme) = theme_set().themes.get("base16-ocean.dark") else {
+    let Some(theme) = theme_set().themes.get("InspiredGitHub") else {
         return vec![Span::raw(line.to_string())];
     };
     let mut highlighter = HighlightLines::new(syntax, theme);
@@ -569,12 +569,11 @@ fn find_syntax<'a>(ps: &'a SyntaxSet, lang: &str) -> Option<&'a syntect::parsing
 
 fn syntect_style(style: SyntectStyle) -> Style {
     let mut out = Style::default()
-        .fg(system_color(
+        .fg(Color::Rgb(
             style.foreground.r,
             style.foreground.g,
             style.foreground.b,
-        ))
-        .bg(Color::Reset);
+        ));
     if style.font_style.contains(FontStyle::BOLD) {
         out = out.add_modifier(Modifier::BOLD);
     }
@@ -587,43 +586,6 @@ fn syntect_style(style: SyntectStyle) -> Style {
     out
 }
 
-fn system_color(r: u8, g: u8, b: u8) -> Color {
-    const ANSI_COLORS: &[(Color, u8, u8, u8)] = &[
-        (Color::DarkGray, 85, 85, 85),
-        (Color::Red, 170, 0, 0),
-        (Color::Green, 0, 170, 0),
-        (Color::Yellow, 170, 170, 0),
-        (Color::Blue, 0, 0, 170),
-        (Color::Magenta, 170, 0, 170),
-        (Color::Cyan, 0, 170, 170),
-        (Color::Gray, 170, 170, 170),
-        (Color::LightRed, 255, 85, 85),
-        (Color::LightGreen, 85, 255, 85),
-        (Color::LightYellow, 255, 255, 85),
-        (Color::LightBlue, 85, 85, 255),
-        (Color::LightMagenta, 255, 85, 255),
-        (Color::LightCyan, 85, 255, 255),
-        (Color::White, 255, 255, 255),
-    ];
-
-    let mut best = Color::Gray;
-    let mut best_distance = u32::MAX;
-    for &(color, cr, cg, cb) in ANSI_COLORS {
-        let distance = color_distance(r, g, b, cr, cg, cb);
-        if distance < best_distance {
-            best = color;
-            best_distance = distance;
-        }
-    }
-    best
-}
-
-fn color_distance(r: u8, g: u8, b: u8, cr: u8, cg: u8, cb: u8) -> u32 {
-    let dr = r as i32 - cr as i32;
-    let dg = g as i32 - cg as i32;
-    let db = b as i32 - cb as i32;
-    (30 * dr * dr + 59 * dg * dg + 11 * db * db) as u32
-}
 fn table_border(left: char, sep: char, right: char, widths: &[usize]) -> String {
     let mut out = String::new();
     out.push(left);
