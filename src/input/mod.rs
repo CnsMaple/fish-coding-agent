@@ -407,29 +407,17 @@ fn byte_at_display_col(s: &str, col: usize) -> usize {
     s.len()
 }
 
-fn compute_total_visual_lines(all_lines: &[&str], inner_w: usize, prompt_width: usize) -> usize {
-    let mut total = 0usize;
-    for text in all_lines {
-        let text_width = UnicodeWidthStr::width(*text);
-        let seg_total = prompt_width + text_width;
-        let n = if seg_total <= inner_w { 1 } else { seg_total.div_ceil(inner_w) };
-        total += n;
-    }
-    total.max(1)
-}
-
-fn compute_visual_offset(all_lines: &[&str], raw_line_idx: usize, inner_w: usize, prompt_width: usize) -> usize {
-    let mut offset = 0usize;
-    for (i, text) in all_lines.iter().enumerate() {
-        if i >= raw_line_idx {
-            break;
+/// Find the segment index where the cumulative visual line count first reaches
+/// or exceeds `target_visual`. Returns the segment index.
+fn find_segment_at_visual(seg_vis: &[usize], target_visual: usize) -> usize {
+    let mut accumulated = 0usize;
+    for (i, &v) in seg_vis.iter().enumerate() {
+        accumulated += v;
+        if accumulated > target_visual {
+            return i;
         }
-        let text_width = UnicodeWidthStr::width(*text);
-        let seg_total = prompt_width + text_width;
-        let n = if seg_total <= inner_w { 1 } else { seg_total.div_ceil(inner_w) };
-        offset += n;
     }
-    offset
+    seg_vis.len().saturating_sub(1)
 }
 
 fn render_input_scrollbar(
@@ -510,17 +498,70 @@ format!("[!{}] | ", app.pending_events),
     let cursor = app.input.cursor.min(buffer.len());
     let cursor_line_idx = buffer[..cursor].chars().filter(|&c| c == '\n').count();
     let all_lines: Vec<&str> = buffer.split('\n').collect();
-    let visible_count = (all_lines.len() as u16).min(inner.height).max(1) as usize;
-    let start_line = if app.input_scroll_decoupled {
-        let scroll = app.input_scroll.current.round() as usize;
-        let max_scroll = all_lines.len().saturating_sub(visible_count);
-        scroll.min(max_scroll)
-    } else {
-        (cursor_line_idx + 1).saturating_sub(visible_count)
-    };
-    let end_line = (start_line + visible_count).min(all_lines.len().max(1));
-
     let inner_w = inner.width as usize;
+
+    // Pre-compute visual line count per segment (for wrapping)
+    let seg_vis: Vec<usize> = all_lines
+        .iter()
+        .map(|text| {
+            let text_width = UnicodeWidthStr::width(*text);
+            let seg_total_w = prompt_width + text_width;
+            if seg_total_w <= inner_w {
+                1
+            } else {
+                seg_total_w.div_ceil(inner_w)
+            }
+        })
+        .collect();
+    let total_visual: usize = seg_vis.iter().sum();
+
+    let visible_vis = (inner.height as usize).min(total_visual).max(1);
+    let start_line = if app.input_scroll_decoupled {
+        // Convert raw segment offset to visual offset, then find start segment
+        let scroll = app.input_scroll.current.round() as usize;
+        let max_scroll = all_lines.len().saturating_sub(1);
+        let scroll = scroll.min(max_scroll);
+        let mut vis_before = 0usize;
+        for (i, &v) in seg_vis.iter().enumerate() {
+            if i >= scroll {
+                break;
+            }
+            vis_before += v;
+        }
+        let max_vis_start = total_visual.saturating_sub(visible_vis);
+        let target_vis = vis_before.min(max_vis_start);
+        find_segment_at_visual(&seg_vis, target_vis)
+    } else {
+        // Place cursor at the bottom of the visible area
+        let mut vis_before_cursor = 0usize;
+        for (i, &v) in seg_vis.iter().enumerate() {
+            if i >= cursor_line_idx {
+                break;
+            }
+            vis_before_cursor += v;
+        }
+        // cursor visual line = vis_before_cursor + vi (where vi is the visual line within the segment)
+        // We want the cursor to be at the bottom, so we need enough visual lines above
+        let cursor_vis = vis_before_cursor + seg_vis.get(cursor_line_idx).copied().unwrap_or(1).saturating_sub(1);
+        let target_vis = cursor_vis.saturating_sub(visible_vis.saturating_sub(1));
+        find_segment_at_visual(&seg_vis, target_vis)
+    };
+
+    // Walk forward from start_line, accumulating visual lines until we fill visible_vis
+    let mut end_line = start_line;
+    let mut accumulated_vis = 0usize;
+    for (i, &v) in seg_vis.iter().enumerate() {
+        if i < start_line {
+            continue;
+        }
+        if accumulated_vis + v > visible_vis && accumulated_vis > 0 {
+            break;
+        }
+        accumulated_vis += v;
+        end_line = i + 1;
+    }
+    let end_line = end_line.min(all_lines.len().max(1));
+
     let mut visual_lines: Vec<Line<'static>> = Vec::new();
     // Map each (\n-segment, visual_line_within_segment) -> global visual line index
     let mut seg_visual_starts: Vec<usize> = Vec::new(); // per segment: first global visual line
@@ -529,13 +570,7 @@ format!("[!{}] | ", app.pending_events),
         let line_start = byte_pos;
         let line_end = line_start + text.len();
         byte_pos = line_end + 1;
-        let text_width = UnicodeWidthStr::width(*text);
-        let seg_total_w = prompt_width + text_width;
-        let n_vis = if seg_total_w <= inner_w {
-            1
-        } else {
-            seg_total_w.div_ceil(inner_w)
-        };
+        let n_vis = seg_vis[idx];
         if idx < start_line || idx >= end_line {
             continue;
         }
@@ -617,10 +652,9 @@ format!("[!{}] | ", app.pending_events),
 
     // Render input scrollbar when scrolled away from cursor.
     if app.input_scroll_decoupled {
-        let total_visual = compute_total_visual_lines(&all_lines, inner.width as usize, prompt_width);
         let visible = (inner.height as usize).max(1);
         if total_visual > visible {
-            let scroll_visual = compute_visual_offset(&all_lines, start_line, inner.width as usize, prompt_width);
+            let scroll_visual: usize = seg_vis.iter().take(start_line).sum();
             render_input_scrollbar(inner, buf, total_visual, visible, scroll_visual);
         }
     }
@@ -658,21 +692,8 @@ format!("[!{}] | ", app.pending_events),
             }
             // Count visual lines from all earlier visible segments
             let mut vis_before = 0usize;
-            for (j, t) in all_lines.iter().enumerate() {
-                if j >= idx {
-                    break;
-                }
-                if j < start_line || j >= end_line {
-                    continue;
-                }
-                let tw = UnicodeWidthStr::width(*t);
-                let stw = prompt_width + tw;
-                let nv = if stw <= inner_w {
-                    1
-                } else {
-                    stw.div_ceil(inner_w)
-                };
-                vis_before += nv;
+            for j in start_line..idx.min(end_line) {
+                vis_before += seg_vis[j];
             }
             cursor_vis = vis_before + vi;
             found = true;
