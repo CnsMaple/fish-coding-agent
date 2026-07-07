@@ -1030,19 +1030,37 @@ fn build_thinking_block_rows(
     let width = width.max(4);
     let mut rows = Vec::new();
     rows.push(border_with_label_line(width, " Thinking ", bg));
+    let inner_w = width.saturating_sub(4);
+    let content = content.trim_end();
     if visible {
-        let body_rows = output_row_lines(content.trim_end(), width, bg);
-        if body_rows.is_empty() {
+        let md_lines = crate::session::markdown::render_with_width(content, inner_w);
+        if md_lines.is_empty() {
             rows.extend(box_row_lines("[no thinking content]", width, bg));
         } else {
-            rows.extend(body_rows);
+            for line in md_lines {
+                let spans = spans_with_bg(&line.spans, bg);
+                rows.push(box_row_line_spans(spans, width, bg));
+            }
         }
     } else {
-        let (preview, skipped) =
-            collapsed_output_lines(content.trim_end(), preview_lines, width, bg);
-        rows.extend(preview);
-        if skipped > 0 {
-            rows.push(ctrl_o_hint_line(skipped, width, bg));
+        let md_lines = crate::session::markdown::render_with_width(content, inner_w);
+        if md_lines.is_empty() {
+            rows.extend(box_row_lines("[no thinking content]", width, bg));
+        } else {
+            let shown = preview_lines.min(md_lines.len());
+            let skip = md_lines.len().saturating_sub(shown);
+            for line in md_lines.iter().skip(skip) {
+                let spans = spans_with_bg(&line.spans, bg);
+                rows.push(box_row_line_spans(spans, width, bg));
+            }
+            if md_lines.len() >= preview_lines {
+                while rows.len() < preview_lines + 1 {
+                    rows.push(box_row_line("", width, bg));
+                }
+            }
+            if skip > 0 {
+                rows.push(ctrl_o_hint_line(skip, width, bg));
+            }
         }
     }
     rows.push(border_line(width, bg));

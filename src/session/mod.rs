@@ -578,11 +578,18 @@ impl Session {
     }
 
     pub fn toggle_all_tool_results(&mut self) {
-        let should_expand = self
+        let tool_should_expand = self
             .messages
             .iter()
             .flat_map(|m| m.tool_results.iter())
             .any(|tool| !tool.visible && tool.name != "plan");
+
+        let think_should_expand = self
+            .messages
+            .iter()
+            .any(|m| !m.thinking_visible && crate::session::render::message_has_thinking(m));
+
+        let should_expand = tool_should_expand || think_should_expand;
 
         self.expand_new_tool_results = should_expand;
 
@@ -596,6 +603,12 @@ impl Session {
                     tool.visible = should_expand;
                     changed = true;
                 }
+            }
+            if crate::session::render::message_has_thinking(msg)
+                && msg.thinking_visible != should_expand
+            {
+                msg.thinking_visible = should_expand;
+                changed = true;
             }
             if changed {
                 msg.bump_version();
