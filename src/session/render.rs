@@ -25,21 +25,6 @@ pub struct CachedMessageLines {
     pub lines: Vec<Line<'static>>,
 }
 
-/// Cache for the last rendered viewport. When neither session state
-/// (`layout_version`) nor viewport geometry (`width`, `height`,
-/// `scroll`) has changed, we skip the entire render pipeline and
-/// reuse the last buffer. This makes frames where nothing is
-/// happening truly zero-cost (no message iteration, no locking,
-/// no LRU lookups).
-#[derive(Debug)]
-pub struct RenderCache {
-    pub lines: Vec<Line<'static>>,
-    pub layout_version: u64,
-    pub width: u16,
-    pub height: u16,
-    pub scroll: u16,
-}
-
 pub fn render(
     area: Rect,
     buf: &mut Buffer,
@@ -50,34 +35,6 @@ pub fn render(
     let width = area.width as usize;
     if width == 0 || inner_h == 0 {
         return;
-    }
-
-    // Fast path: render cache hit. When nothing changed
-    // (layout_version, width, height, scroll all identical), skip
-    // the entire message iteration, LRU lookups, and markdown
-    // parsing — just blit the last buffer.
-    {
-        let cache = session.render_cache.lock().unwrap();
-        if let Some(cached) = &*cache {
-            if cached.layout_version == session.layout_version
-                && cached.width == area.width
-                && cached.height == area.height
-                && cached.scroll == session.scroll
-            {
-                // Cache still valid — reuse without touching messages.
-                tool_toggle_rows.clear();
-                for y in area.top()..area.bottom() {
-                    for x in area.left()..area.right() {
-                        if let Some(cell) = buf.cell_mut((x, y)) {
-                            cell.reset();
-                        }
-                    }
-                }
-                let p = Paragraph::new(cached.lines.clone()).style(Style::reset());
-                p.render(area, buf);
-                return;
-            }
-        }
     }
 
     // Compute total lines using the cached per-block line counts. This
@@ -124,17 +81,6 @@ pub fn render(
     }
     let p = Paragraph::new(visible.clone()).style(Style::reset());
     p.render(area, buf);
-
-    // Store in render cache for the next frame.
-    if let Ok(mut cache) = session.render_cache.lock() {
-        *cache = Some(RenderCache {
-            lines: visible,
-            layout_version: session.layout_version,
-            width: area.width,
-            height: area.height,
-            scroll: session.scroll,
-        });
-    }
 }
 
 /// Fallback total-line count used when no cache is available. Walks
@@ -724,7 +670,7 @@ fn render_content_segment(text: &str, width: usize, out: &mut Vec<Line<'static>>
     if text.trim().is_empty() {
         return;
     }
-    let inner_w = width.saturating_sub(3);
+    let inner_w = width.saturating_sub(4);
     let md_lines = crate::session::markdown::render_with_width(&text, inner_w);
     for line in md_lines {
         // Wrap each rendered line to inner_w so the user-block padding
@@ -740,11 +686,21 @@ fn render_content_segment(text: &str, width: usize, out: &mut Vec<Line<'static>>
             // back into multiple lines preserving the first span's style
             // and emitting the rest as plain.
             let combined: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-            for wrapped in wrap_line(&combined, inner_w) {
-                out.push(Line::from(vec![
-                    Span::raw("   ".to_string()),
-                    Span::raw(wrapped),
-                ]));
+            let wrapped_lines = wrap_line(&combined, inner_w);
+            for (i, wrapped) in wrapped_lines.into_iter().enumerate() {
+                if i == 0 {
+                    out.push(Line::from(vec![
+                        Span::raw("   ".to_string()),
+                        Span::raw(wrapped),
+                        Span::raw(" ".to_string()),
+                    ]));
+                } else {
+                    out.push(Line::from(vec![
+                        Span::raw(" ".to_string()),
+                        Span::raw(wrapped),
+                        Span::raw(" ".to_string()),
+                    ]));
+                }
             }
         }
     }
@@ -821,7 +777,7 @@ pub fn content_line_count(content: &str, width: usize) -> u32 {
     if text.trim().is_empty() {
         return 0;
     }
-    let inner_w = width.saturating_sub(3).max(1);
+    let inner_w = width.saturating_sub(4).max(1);
     count_md_lines(&text, inner_w)
 }
 
@@ -892,7 +848,7 @@ pub fn content_line_count_segmented(
     // same offset, matching `build_message_lines`.
     items.sort_by(|a, b| a.offset.cmp(&b.offset));
 
-    let inner_w = width.saturating_sub(3).max(1);
+    let inner_w = width.saturating_sub(4).max(1);
     let mut cursor = 0usize;
     let mut total: u32 = 0;
 

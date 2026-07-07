@@ -21,6 +21,18 @@ pub struct StoredSession {
     pub model: Option<String>,
     #[serde(default)]
     pub thinking: Option<String>,
+    #[serde(default)]
+    pub token_total: Option<u64>,
+    #[serde(default)]
+    pub context_window_tokens: u64,
+    #[serde(default)]
+    pub context_window_known: bool,
+    #[serde(default)]
+    pub max_output_tokens: u64,
+    #[serde(default)]
+    pub auto_compact: bool,
+    #[serde(default)]
+    pub mcp_summary: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -74,7 +86,21 @@ pub fn title_from_prompt(prompt: &str) -> String {
     title
 }
 
-pub fn save(id: &str, title: &str, cwd: &Path, session: &Session, provider: Option<String>, model: Option<String>, thinking: Option<String>) -> Result<()> {
+pub fn save(
+    id: &str,
+    title: &str,
+    cwd: &Path,
+    session: &Session,
+    provider: Option<String>,
+    model: Option<String>,
+    thinking: Option<String>,
+    token_total: Option<u64>,
+    context_window_tokens: u64,
+    context_window_known: bool,
+    max_output_tokens: u64,
+    auto_compact: bool,
+    mcp_summary: Option<String>,
+) -> Result<()> {
     let dir = sessions_dir()?;
     let session_dir = dir.join(sanitize_id(id));
     std::fs::create_dir_all(&session_dir).with_context(|| format!("create {}", session_dir.display()))?;
@@ -92,6 +118,12 @@ pub fn save(id: &str, title: &str, cwd: &Path, session: &Session, provider: Opti
         provider,
         model,
         thinking,
+        token_total,
+        context_window_tokens,
+        context_window_known,
+        max_output_tokens,
+        auto_compact,
+        mcp_summary,
     };
     let raw = serde_json::to_string_pretty(&stored)?;
     std::fs::write(&path, raw).with_context(|| format!("write {}", path.display()))?;
@@ -146,6 +178,12 @@ pub fn fork(source_id: &str, cwd: &Path, title: Option<&str>) -> Result<StoredSe
         provider: source.provider,
         model: source.model,
         thinking: source.thinking,
+        token_total: source.token_total,
+        context_window_tokens: source.context_window_tokens,
+        context_window_known: source.context_window_known,
+        max_output_tokens: source.max_output_tokens,
+        auto_compact: source.auto_compact,
+        mcp_summary: source.mcp_summary,
     };
     write_stored(&forked)?;
     Ok(forked)

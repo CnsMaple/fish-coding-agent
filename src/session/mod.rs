@@ -280,14 +280,6 @@ pub struct Session {
     /// compute on next read".
     #[serde(skip)]
     pub cached_total_lines: Option<(u16, u32)>,
-    /// Monotonically increasing version counter. Bumped on every write
-    /// so callers can detect stale cached values.
-    #[serde(skip)]
-    pub layout_version: u64,
-/// Cache of the last rendered viewport buffer. When nothing changed,
-    /// `render()` skips all work and just blit this buffer.
-    #[serde(skip)]
-    pub render_cache: std::sync::Mutex<Option<crate::session::render::RenderCache>>,
     /// Last `(width, total)` observed by the UI render. Used to
     /// pin the viewport start when the user is scrolled up: when
     /// `scroll > 0`, new content height is absorbed into `scroll` so
@@ -320,8 +312,6 @@ impl Default for Session {
             line_cache: std::sync::Mutex::new(Vec::new()),
             message_lines_cache: std::sync::Mutex::new(crate::session::lru::BoundedCache::default()),
             cached_total_lines: None,
-            layout_version: 0,
-            render_cache: std::sync::Mutex::new(None),
             last_rendered_total: None,
             expand_new_tool_results: false,
         }
@@ -336,12 +326,6 @@ impl Session {
     /// `clear`, resume/fork) MUST call this.
     pub fn invalidate_layout_cache(&mut self) {
         self.cached_total_lines = None;
-        self.layout_version = self.layout_version.wrapping_add(1);
-        // Clear the viewport render cache too so the next frame
-        // re-renders from scratch.
-        if let Ok(mut c) = self.render_cache.lock() {
-            *c = None;
-        }
     }
 
     /// Drop any per-message render-LRU entries whose index is

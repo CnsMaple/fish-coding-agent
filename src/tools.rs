@@ -146,7 +146,7 @@ fn tool_defs() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "write_file",
-            description: "Write a UTF-8 text file within the current workspace. Without a range, overwrites or creates the file. With a range, replaces that 1-based inclusive line range in an existing file.".to_string(),
+            description: "Write or edit a UTF-8 text file within the current workspace. Use this tool for all file modifications including creating new files and editing existing ones. To edit, provide the target line range with start_line and end_line (1-based, inclusive) together with the replacement content. To create or overwrite a file, omit start_line and end_line.".to_string(),
             schema: json!({
                 "type": "object",
                 "properties": {
@@ -755,6 +755,9 @@ async fn plan_review(args: &str) -> Result<String> {
         .get("content")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
+        .or_else(|| {
+            value.get("content").map(|v| serde_json::to_string_pretty(v).unwrap_or_default())
+        })
         .unwrap_or_else(|| {
             value
                 .get("steps")

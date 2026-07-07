@@ -1905,11 +1905,6 @@ fn handle_mouse(m: MouseEvent, app: &mut App) {
             app.session_scroll.target = max_scroll_f;
             app.session_scroll.current = max_scroll_f;
         }
-        // Drop the render cache so the new offset is visible on the
-        // very next frame.
-        if let Ok(mut c) = app.session.render_cache.lock() {
-            *c = None;
-        }
         // Write the integer anchor. The view jumps on the next draw.
         app.session.scroll = app.session_scroll.current.round() as u16;
         return;

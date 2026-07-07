@@ -1794,6 +1794,12 @@ impl App {
             provider,
             model,
             thinking,
+            self.status.token_total,
+            self.status.context_window_tokens,
+            self.status.context_window_known,
+            self.status.max_output_tokens,
+            self.status.auto_compact,
+            self.status.mcp_summary.clone(),
         ) {
             self.notify(
                 crate::function::notifications::ToastLevel::Fail,
@@ -1830,9 +1836,6 @@ impl App {
     pub fn set_scroll_anchored(&mut self, value: u16) {
         self.session_scroll.snap(value as f32);
         self.session.scroll = value;
-        if let Ok(mut c) = self.session.render_cache.lock() {
-            *c = None;
-        }
     }
 
     pub fn maybe_title_from_first_prompt(&mut self, prompt: &str) {
@@ -1872,8 +1875,6 @@ impl App {
                     line_cache: Default::default(),
                     message_lines_cache: Default::default(),
                     cached_total_lines: None,
-                    layout_version: 0,
-                    render_cache: Default::default(),
                     last_rendered_total: None,
                     expand_new_tool_results: false,
                 };
@@ -1893,6 +1894,17 @@ impl App {
                 if let Some(ref t) = stored.thinking {
                     self.status.set_thinking(crate::config::ReasoningMode::parse(t));
                 }
+                if let Some(total) = stored.token_total {
+                    self.status.update_token_usage(total);
+                }
+                if stored.context_window_known && stored.context_window_tokens > 0 {
+                    self.status.set_context_window_tokens(stored.context_window_tokens);
+                }
+                if stored.max_output_tokens > 0 {
+                    self.status.set_max_output_tokens(stored.max_output_tokens);
+                }
+                self.status.set_auto_compact(stored.auto_compact);
+                self.status.set_mcp_summary(stored.mcp_summary.clone());
                 self.focus_target = FocusTarget::Input;
                 self.function_panel_cursor = None;
                 self.notify(
@@ -1962,8 +1974,6 @@ impl App {
                     line_cache: Default::default(),
                     message_lines_cache: Default::default(),
                     cached_total_lines: None,
-                    layout_version: 0,
-                    render_cache: Default::default(),
                     last_rendered_total: None,
                     expand_new_tool_results: false,
                 };
@@ -1976,6 +1986,17 @@ impl App {
                 if let Some(ref t) = stored.thinking {
                     self.status.set_thinking(crate::config::ReasoningMode::parse(t));
                 }
+                if let Some(total) = stored.token_total {
+                    self.status.update_token_usage(total);
+                }
+                if stored.context_window_known && stored.context_window_tokens > 0 {
+                    self.status.set_context_window_tokens(stored.context_window_tokens);
+                }
+                if stored.max_output_tokens > 0 {
+                    self.status.set_max_output_tokens(stored.max_output_tokens);
+                }
+                self.status.set_auto_compact(stored.auto_compact);
+                self.status.set_mcp_summary(stored.mcp_summary.clone());
                 self.session.invalidate_layout_cache();
                 if !stored.todo_items.is_empty() {
                     self.open_todo_tab();
