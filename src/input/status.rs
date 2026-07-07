@@ -181,6 +181,19 @@ impl StatusBar {
         }
     }
 
+    /// Reset token usage, hit rate, and token rate stats to defaults.
+    /// Called when starting a new session (e.g., `/new`).
+    pub fn reset_usage_stats(&mut self) {
+        self.token_total = None;
+        self.token_pct = None;
+        self.compact_pct = None;
+        self.hit_cur = None;
+        self.hit_avg = None;
+        self.tok_cur = None;
+        self.tok_avg = None;
+        self.compact_triggered = false;
+    }
+
     pub fn update_hit(&mut self, h: &HitRate) {
         self.hit_cur = h.current();
         self.hit_avg = h.average();
