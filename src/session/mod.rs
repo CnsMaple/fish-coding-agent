@@ -406,6 +406,11 @@ impl Session {
         if let Some(id) = self.streaming_id {
             let needs_invalidate = if let Some(m) = self.messages.get_mut(id) {
                 m.content.push_str(chunk);
+                if let Some(last) = m.thinking_segments.last_mut() {
+                    if !last.closed {
+                        last.closed = true;
+                    }
+                }
                 m.line_count = m.content.split('\n').count().max(1) as u32;
                 m.cached_content_line_count = None;
                 m.bump_version();
@@ -441,6 +446,11 @@ impl Session {
     pub fn update_last_tool_content(&mut self, name: String, title: String, content: String) {
         if let Some(id) = self.streaming_id {
             if let Some(m) = self.messages.get_mut(id) {
+                if let Some(last) = m.thinking_segments.last_mut() {
+                    if !last.closed {
+                        last.closed = true;
+                    }
+                }
                 if let Some(tool) = m.tool_results.last_mut() {
                     tool.content = content;
                     tool.running = false;
@@ -466,6 +476,11 @@ impl Session {
     pub fn append_tool_to_last(&mut self, name: String, title: String, content: String) {
         if let Some(id) = self.streaming_id {
             if let Some(m) = self.messages.get_mut(id) {
+                if let Some(last) = m.thinking_segments.last_mut() {
+                    if !last.closed {
+                        last.closed = true;
+                    }
+                }
                 let content_offset = m.content.len();
                 let visible = name == "plan" || self.expand_new_tool_results;
                 m.tool_results.push(ToolResultBlock {
@@ -488,6 +503,11 @@ impl Session {
     pub fn start_tool_in_last(&mut self, name: String, title: String) {
         if let Some(id) = self.streaming_id {
             if let Some(m) = self.messages.get_mut(id) {
+                if let Some(last) = m.thinking_segments.last_mut() {
+                    if !last.closed {
+                        last.closed = true;
+                    }
+                }
                 let content_offset = m.content.len();
                 let visible = name == "plan" || self.expand_new_tool_results;
                 m.tool_results.push(ToolResultBlock {

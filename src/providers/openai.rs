@@ -172,6 +172,10 @@ impl Provider for OpenAiProvider {
                 .pointer("/choices/0/delta/tool_calls")
                 .and_then(|v| v.as_array())
             {
+                if last_block_kind.as_deref() == Some("thinking") {
+                    let _ = tx.send(ChatEvent::ContentBlockStart("tool_use".to_string()));
+                }
+                last_block_kind = Some("tool_use");
                 merge_tool_call_deltas(&mut tool_calls, calls);
             }
             if let Some(u) = v.get("usage") {
