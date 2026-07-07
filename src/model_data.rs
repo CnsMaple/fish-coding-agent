@@ -91,7 +91,7 @@ impl ModelData {
             // Prefix match: model_id starts with the models.dev model name
             if model_id_lower.starts_with(model_name) {
                 let match_len = model_name.len();
-                if best_match.map_or(true, |(len, _)| match_len > len) {
+                if best_match.is_none_or(|(len, _)| match_len > len) {
                     best_match = Some((match_len, ctx));
                 }
             }

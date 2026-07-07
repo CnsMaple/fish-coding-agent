@@ -115,7 +115,7 @@ fn count_lines_estimate(session: &Session) -> u32 {
         let first_offset = m.thinking_segments.iter().map(|s| s.offset)
             .chain(m.tool_results.iter().map(|t| t.content_offset))
             .min();
-        if first_offset.map_or(false, |off| off > 0) && (thinking_blocks > 0 || tool_blocks > 0) {
+        if first_offset.is_some_and(|off| off > 0) && (thinking_blocks > 0 || tool_blocks > 0) {
             n += 1; // leading gap
         }
         if m.role == super::Role::User {
@@ -922,27 +922,10 @@ fn dim_bg_style(bg: Color) -> Style {
 }
 
 fn command_failed(content: &str) -> bool {
-    let content = unwrap_tool_result_content(content);
+    let content = super::unwrap_tool_result_content(content);
     value_after_prefix(&content, "exit_code: ")
         .map(|code| code != "0")
         .unwrap_or(false)
-}
-
-fn unwrap_tool_result_content(content: &str) -> String {
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(content) else {
-        return content.to_string();
-    };
-    if value.get("ok").and_then(|v| v.as_bool()) == Some(true) {
-        if let Some(result) = value.get("result").and_then(|v| v.as_str()) {
-            return result.to_string();
-        }
-    }
-    if value.get("ok").and_then(|v| v.as_bool()) == Some(false) {
-        if let Some(error) = value.get("error").and_then(|v| v.as_str()) {
-            return format!("[Tool Error] {error}");
-        }
-    }
-    content.to_string()
 }
 
 fn python_command_failed(content: &str) -> bool {
@@ -1578,7 +1561,7 @@ fn plan_tool_display(content: &str) -> Option<(String, String)> {
     // Tool results come back wrapped in `{"ok":true,"result":"…"}`;
     // unwrap first so we can read the inner JSON the tool itself
     // emitted ({"kind":"plan",…}).
-    let inner = unwrap_tool_result_content(content);
+    let inner = super::unwrap_tool_result_content(content);
     let value: serde_json::Value = serde_json::from_str(&inner).ok()?;
     if value.get("kind").and_then(|v| v.as_str()) != Some("plan") {
         return None;
@@ -1805,7 +1788,7 @@ fn unified_diff_rows(old: &str, new: &str) -> Vec<DiffLine> {
 }
 
 fn command_display_content(content: &str) -> (String, String) {
-    let content = unwrap_tool_result_content(content);
+    let content = super::unwrap_tool_result_content(content);
     let content = content.as_str();
     let has_structured_output = content.contains("exit_code: ")
         && content.contains("wall_secs: ")

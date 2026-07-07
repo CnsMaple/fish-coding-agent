@@ -100,11 +100,7 @@ impl McpService {
                     state.config.insert(name.clone(), cfg.clone());
                     state.status.insert(
                         name.clone(),
-                        if cfg.enabled() {
-                            McpStatus::Disabled
-                        } else {
-                            McpStatus::Disabled
-                        },
+McpStatus::Disabled,
                     );
                 }
             }

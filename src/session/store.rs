@@ -86,20 +86,25 @@ pub fn title_from_prompt(prompt: &str) -> String {
     title
 }
 
+#[derive(Debug, Clone)]
+pub struct SaveMeta {
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub thinking: Option<String>,
+    pub token_total: Option<u64>,
+    pub context_window_tokens: u64,
+    pub context_window_known: bool,
+    pub max_output_tokens: u64,
+    pub auto_compact: bool,
+    pub mcp_summary: Option<String>,
+}
+
 pub fn save(
     id: &str,
     title: &str,
     cwd: &Path,
     session: &Session,
-    provider: Option<String>,
-    model: Option<String>,
-    thinking: Option<String>,
-    token_total: Option<u64>,
-    context_window_tokens: u64,
-    context_window_known: bool,
-    max_output_tokens: u64,
-    auto_compact: bool,
-    mcp_summary: Option<String>,
+    meta: SaveMeta,
 ) -> Result<()> {
     let dir = sessions_dir()?;
     let session_dir = dir.join(sanitize_id(id));
@@ -115,15 +120,15 @@ pub fn save(
         updated_at: now,
         messages: session.messages.clone(),
         todo_items: session.todo_items.clone(),
-        provider,
-        model,
-        thinking,
-        token_total,
-        context_window_tokens,
-        context_window_known,
-        max_output_tokens,
-        auto_compact,
-        mcp_summary,
+        provider: meta.provider,
+        model: meta.model,
+        thinking: meta.thinking,
+        token_total: meta.token_total,
+        context_window_tokens: meta.context_window_tokens,
+        context_window_known: meta.context_window_known,
+        max_output_tokens: meta.max_output_tokens,
+        auto_compact: meta.auto_compact,
+        mcp_summary: meta.mcp_summary,
     };
     let raw = serde_json::to_string_pretty(&stored)?;
     std::fs::write(&path, raw).with_context(|| format!("write {}", path.display()))?;

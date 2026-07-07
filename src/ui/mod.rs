@@ -215,7 +215,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
         let first_offset = m.thinking_segments.iter().map(|s| s.offset)
             .chain(m.tool_results.iter().map(|t| t.content_offset))
             .min();
-        if first_offset.map_or(false, |off| off > 0) && (thinking_blocks > 0 || tool_blocks > 0) {
+        if first_offset.is_some_and(|off| off > 0) && (thinking_blocks > 0 || tool_blocks > 0) {
             line_idx += 1;
         }
 

@@ -89,14 +89,13 @@ pub async fn wait_for_callback(expected_state: &str) -> Result<String, String> {
         }
 
         // Unknown path — show help page
+let callback_url = format!("http://127.0.0.1:{port}{OAUTH_CALLBACK_PATH}");
         let body = format!(
             r#"<html><body><h1>MCP OAuth Callback</h1>
             <p>Waiting for authorization redirect from the MCP server.</p>
-            <p>If you see this page, the callback URL is: <code>{}</code></p>
-            <p>Expected state token is: <code>{}</code></p>
+            <p>If you see this page, the callback URL is: <code>{callback_url}</code></p>
+            <p>Expected state token is: <code>{expected}</code></p>
             </body></html>"#,
-            format!("http://127.0.0.1:{port}{OAUTH_CALLBACK_PATH}"),
-            expected
         );
         let _ = send_html_response_raw(&mut stream, 200, &body).await;
     }

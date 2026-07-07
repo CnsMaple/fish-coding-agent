@@ -1362,7 +1362,7 @@ fn render_todo(area: Rect, buf: &mut Buffer, todos: &[crate::session::TodoItem],
             let y = list_area.y + (row - s.scroll) as u16;
             let selected = row == s.cursor;
             let editing = s.editing == Some(row);
-            let prefix = if editing { ">" } else if selected { ">" } else { " " };
+let prefix = if editing || selected { ">" } else { " " };
             let status_style = match item.status.as_str() {
                 "pending" => Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
                 "in_progress" => Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),

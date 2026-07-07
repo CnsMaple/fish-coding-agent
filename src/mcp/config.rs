@@ -159,6 +159,24 @@ impl McpEntry {
     }
 }
 
+impl McpEntry {
+    /// Borrow the inner config if this is a `Config` variant.
+    pub fn as_config(&self) -> Option<&McpServerConfig> {
+        match self {
+            McpEntry::Config(cfg) => Some(cfg),
+            McpEntry::Toggle { .. } => None,
+        }
+    }
+
+    /// Owned inner config if this is a `Config` variant.
+    pub fn into_config(self) -> Option<McpServerConfig> {
+        match self {
+            McpEntry::Config(cfg) => Some(cfg),
+            McpEntry::Toggle { .. } => None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -221,23 +239,5 @@ mod tests {
         let raw = r#"{"enabled": true}"#;
         let entry: McpEntry = serde_json::from_str(raw).unwrap();
         assert!(matches!(entry, McpEntry::Toggle { enabled: true }));
-    }
-}
-
-impl McpEntry {
-    /// Borrow the inner config if this is a `Config` variant.
-    pub fn as_config(&self) -> Option<&McpServerConfig> {
-        match self {
-            McpEntry::Config(cfg) => Some(cfg),
-            McpEntry::Toggle { .. } => None,
-        }
-    }
-
-    /// Owned inner config if this is a `Config` variant.
-    pub fn into_config(self) -> Option<McpServerConfig> {
-        match self {
-            McpEntry::Config(cfg) => Some(cfg),
-            McpEntry::Toggle { .. } => None,
-        }
     }
 }

@@ -231,6 +231,22 @@ impl Message {
         let end = self.content.floor_char_boundary(end);
         &self.content[..end]
     }
+
+    /// Invalidate all cached render state for this message.
+    /// Call this whenever the message's content, thinking, or tool
+    /// blocks change.
+    pub fn invalidate_caches(&mut self) {
+        self.cached_content_line_count = None;
+        self.bump_version();
+        for seg in &mut self.thinking_segments {
+            seg.cached_line_count_expanded = None;
+            seg.cached_line_count_collapsed = None;
+        }
+        for t in &mut self.tool_results {
+            t.cached_line_count_visible = None;
+            t.cached_line_count_collapsed = None;
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -388,7 +404,7 @@ impl Session {
 
     pub fn append_to_last(&mut self, chunk: &str) {
         if let Some(id) = self.streaming_id {
-            let needs_invalidate = if let Some(m) = self.messages.get_mut(id) {
+            if let Some(m) = self.messages.get_mut(id) {
                 m.content.push_str(chunk);
                 if let Some(last) = m.thinking_segments.last_mut() {
                     if !last.closed {
@@ -396,32 +412,16 @@ impl Session {
                     }
                 }
                 m.line_count = m.content.split('\n').count().max(1) as u32;
-                m.cached_content_line_count = None;
-                m.bump_version();
+                m.invalidate_caches();
                 if let Ok(mut c) = self.line_cache.lock() {
                     if id < c.len() {
                         c[id] = None;
                     }
                 }
-                // Streaming: invalidate any pre-computed block counts
-                // for this message so count_all_lines_* stays accurate.
-                for seg in m.thinking_segments.iter_mut() {
-                    seg.cached_line_count_expanded = None;
-                    seg.cached_line_count_collapsed = None;
-                }
-                for t in m.tool_results.iter_mut() {
-                    t.cached_line_count_visible = None;
-                    t.cached_line_count_collapsed = None;
-                }
                 // Keep cursor up-to-date so all content is immediately visible.
                 m.display_cursor = m.content.len();
-                true
-            } else {
-                false
-            };
-            if needs_invalidate {
-                self.invalidate_layout_cache();
             }
+            self.invalidate_layout_cache();
         }
     }
 
@@ -441,8 +441,7 @@ impl Session {
                     tool.title = title;
                     tool.cached_line_count_visible = None;
                     tool.cached_line_count_collapsed = None;
-                    m.cached_content_line_count = None;
-                    m.bump_version();
+                    m.invalidate_caches();
                     if let Ok(mut c) = self.line_cache.lock() {
                         if id < c.len() {
                             c[id] = None;
@@ -477,8 +476,7 @@ impl Session {
                     cached_line_count_visible: None,
                     cached_line_count_collapsed: None,
                 });
-                m.cached_content_line_count = None;
-                m.bump_version();
+                m.invalidate_caches();
                 self.invalidate_layout_cache();
             }
         }
@@ -504,8 +502,7 @@ impl Session {
                     cached_line_count_visible: None,
                     cached_line_count_collapsed: None,
                 });
-                m.cached_content_line_count = None;
-                m.bump_version();
+                m.invalidate_caches();
                 self.invalidate_layout_cache();
             }
         }
@@ -518,8 +515,7 @@ impl Session {
                     tool.content.push_str(delta);
                     tool.cached_line_count_visible = None;
                     tool.cached_line_count_collapsed = None;
-                    m.cached_content_line_count = None;
-                    m.bump_version();
+                    m.invalidate_caches();
                     if let Ok(mut c) = self.line_cache.lock() {
                         if id < c.len() {
                             c[id] = None;
@@ -647,8 +643,7 @@ impl Session {
                         cached_line_count_collapsed: None,
                     });
                 }
-                m.cached_content_line_count = None;
-                m.bump_version();
+                m.invalidate_caches();
                 self.invalidate_layout_cache();
             }
         }
@@ -695,8 +690,7 @@ impl Session {
                 // content so they don't appear in the rendered chat.
                 m.content = strip_text_tool_calls(&m.content);
                 m.line_count = m.content.split('\n').count().max(1) as u32;
-                m.cached_content_line_count = None;
-                m.bump_version();
+                m.invalidate_caches();
                 if let Ok(mut c) = self.line_cache.lock() {
                     if id < c.len() {
                         c[id] = None;
@@ -1096,7 +1090,7 @@ impl Session {
             let first_offset = m.thinking_segments.iter().map(|s| s.offset)
                 .chain(m.tool_results.iter().map(|t| t.content_offset))
                 .min();
-            if first_offset.map_or(false, |off| off > 0) && (thinking_blocks > 0 || tool_blocks > 0) {
+            if first_offset.is_some_and(|off| off > 0) && (thinking_blocks > 0 || tool_blocks > 0) {
                 n += 1; // leading gap
             }
             if m.role == Role::User {
@@ -1228,6 +1222,26 @@ fn is_text_tool_call_normalized(line: &str) -> bool {
         && inner.contains("\"arguments\"")
 }
 
+/// Unwrap tool result JSON envelope `{"ok":true,"result":"..."}`.
+/// Falls back to the original content string if parsing fails or
+/// the envelope is absent.
+pub fn unwrap_tool_result_content(content: &str) -> String {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(content) else {
+        return content.to_string();
+    };
+    if value.get("ok").and_then(|v| v.as_bool()) == Some(true) {
+        if let Some(result) = value.get("result").and_then(|v| v.as_str()) {
+            return result.to_string();
+        }
+    }
+    if value.get("ok").and_then(|v| v.as_bool()) == Some(false) {
+        if let Some(error) = value.get("error").and_then(|v| v.as_str()) {
+            return format!("[Tool Error] {error}");
+        }
+    }
+    content.to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1236,9 +1250,10 @@ mod tests {
     /// scroll) must stay constant as content grows.
     #[test]
     fn pin_scroll_freezes_view_during_stream() {
-        let mut s = Session::default();
-        // Pretend the user has scrolled up 5 lines from the tail.
-        s.scroll = 5;
+        let mut s = Session {
+            scroll: 5,
+            ..Default::default()
+        };
         // Render frame N: total = 100 at width 80.
         s.pin_scroll_for_total(80, 100);
         assert_eq!(s.last_rendered_total, Some((80, 100)));
@@ -1256,8 +1271,10 @@ mod tests {
     /// wants to follow the latest output.
     #[test]
     fn pin_scroll_does_not_pin_at_tail() {
-        let mut s = Session::default();
-        s.scroll = 0;
+        let mut s = Session {
+            scroll: 0,
+            ..Default::default()
+        };
         s.pin_scroll_for_total(80, 100);
         s.pin_scroll_for_total(80, 120);
         assert_eq!(s.scroll, 0, "scroll must remain 0 at the tail");
@@ -1269,8 +1286,10 @@ mod tests {
     /// the view across unrelated widths.
     #[test]
     fn pin_scroll_resets_on_width_change() {
-        let mut s = Session::default();
-        s.scroll = 5;
+        let mut s = Session {
+            scroll: 5,
+            ..Default::default()
+        };
         s.pin_scroll_for_total(80, 100);
         // Width change — treat the new total as the baseline, no
         // delta applied.
@@ -1285,8 +1304,10 @@ mod tests {
     /// Overflow: scroll saturates at u16::MAX instead of wrapping.
     #[test]
     fn pin_scroll_saturates_at_u16_max() {
-        let mut s = Session::default();
-        s.scroll = u16::MAX - 2;
+        let mut s = Session {
+            scroll: u16::MAX - 2,
+            ..Default::default()
+        };
         s.pin_scroll_for_total(80, 100);
         s.pin_scroll_for_total(80, 200);
         assert_eq!(
@@ -1300,8 +1321,10 @@ mod tests {
     /// not influence the new comparison.
     #[test]
     fn pin_scroll_does_not_cross_widths() {
-        let mut s = Session::default();
-        s.scroll = 5;
+        let mut s = Session {
+            scroll: 5,
+            ..Default::default()
+        };
         s.pin_scroll_for_total(80, 50);
         // Big jump but at a different width: must be treated as the
         // first observation at that width.

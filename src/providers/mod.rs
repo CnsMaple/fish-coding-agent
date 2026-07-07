@@ -139,17 +139,19 @@ pub enum ProviderError {
     Other(String),
 }
 
-pub async fn list_models(
-    client: &reqwest::Client,
-    kind: ProviderKind,
-    base_url: &str,
-    api_key: &str,
-    access_key: &str,
-    secret_key: &str,
-    cache_path: &Path,
-    provider_name: &str,
-) -> Result<Vec<ModelInfo>> {
-    let p: Box<dyn Provider> = match kind {
+pub struct ListModelsArgs<'a> {
+    pub client: &'a reqwest::Client,
+    pub kind: ProviderKind,
+    pub base_url: &'a str,
+    pub api_key: &'a str,
+    pub access_key: &'a str,
+    pub secret_key: &'a str,
+    pub cache_path: &'a Path,
+    pub provider_name: &'a str,
+}
+
+pub async fn list_models(args: ListModelsArgs<'_>) -> Result<Vec<ModelInfo>> {
+    let p: Box<dyn Provider> = match args.kind {
         ProviderKind::Openai => Box::new(openai::OpenAiProvider),
         ProviderKind::Anthropic => Box::new(anthropic::AnthropicProvider),
         ProviderKind::Cursor => Box::new(cursor::CursorProvider),
@@ -158,9 +160,9 @@ pub async fn list_models(
         ProviderKind::Volcengine => Box::new(volcengine::VolcengineProvider),
     };
     let mut models = p
-        .list_models(client, base_url, api_key, access_key, secret_key)
+        .list_models(args.client, args.base_url, args.api_key, args.access_key, args.secret_key)
         .await?;
-    fill_context_windows(client, provider_name, &mut models, cache_path).await;
+    fill_context_windows(args.client, args.provider_name, &mut models, args.cache_path).await;
     Ok(models)
 }
 

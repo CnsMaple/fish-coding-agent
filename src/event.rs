@@ -326,7 +326,7 @@ fn open_paste_preview(app: &mut App) {
     };
 
     let Ok(mut cb) = arboard::Clipboard::new() else {
-        let _ = app.notify(ToastLevel::Warn, "clipboard unavailable");
+app.notify(ToastLevel::Warn, "clipboard unavailable");
         return;
     };
 
@@ -365,7 +365,7 @@ fn open_paste_preview(app: &mut App) {
     }
 
     if state.text.is_none() && state.image.is_none() {
-        let _ = app.notify(ToastLevel::Warn, "clipboard is empty");
+app.notify(ToastLevel::Warn, "clipboard is empty");
         return;
     }
 
@@ -526,7 +526,7 @@ fn try_insert_image_from_path(text: &str, app: &mut App) -> bool {
     };
     if let Err(e) = std::fs::create_dir_all(&assets_dir) {
         use crate::function::notifications::ToastLevel;
-        let _ = app.notify(ToastLevel::Warn, format!("image: create assets dir: {e}"));
+app.notify(ToastLevel::Warn, format!("image: create assets dir: {e}"));
         return false;
     }
     let extension = media_type.split('/').nth(1).unwrap_or("png");
@@ -535,7 +535,7 @@ fn try_insert_image_from_path(text: &str, app: &mut App) -> bool {
     if !asset_path.exists() {
         if let Err(e) = std::fs::write(&asset_path, &bytes) {
             use crate::function::notifications::ToastLevel;
-            let _ = app.notify(ToastLevel::Warn, format!("image: write {filename}: {e}"));
+app.notify(ToastLevel::Warn, format!("image: write {filename}: {e}"));
             return false;
         }
     }
@@ -555,7 +555,7 @@ fn try_insert_image_from_path(text: &str, app: &mut App) -> bool {
     app.input.insert_str(&marker);
     app.sync_completion();
     use crate::function::notifications::ToastLevel;
-    let _ = app.notify(ToastLevel::Ok, format!("image #{idx} attached ({media_type})"));
+app.notify(ToastLevel::Ok, format!("image #{idx} attached ({media_type})"));
     true
 }
 
@@ -820,7 +820,7 @@ fn refresh_mcp_summary(app: &mut App) {
     let mut failed = 0u32;
     let mut other = 0u32;
 
-    for (_, status) in &snap.status {
+    for status in snap.status.values() {
         match status {
             crate::mcp::McpStatus::Connected => connected += 1,
             crate::mcp::McpStatus::Failed { .. } => failed += 1,
@@ -1104,7 +1104,7 @@ fn handle_msg(msg: AppMsg, app: &mut App) {
             // already consume the live snapshot.
             tracing::debug!(server = %server, "mcp tools changed");
             app.invalidate_tool_specs();
-            let _ = app.notify(
+            app.notify(
                 crate::function::notifications::ToastLevel::Info,
                 format!("mcp `{server}` tools updated"),
             );
@@ -1115,12 +1115,12 @@ fn handle_msg(msg: AppMsg, app: &mut App) {
         }
         AppMsg::McpAuthRequired { server, url, error } => {
             if !url.is_empty() {
-                let _ = app.notify(
+                app.notify(
                     crate::function::notifications::ToastLevel::Warn,
                     format!("mcp `{server}` needs auth: {url}"),
                 );
             } else {
-                let _ = app.notify(
+                app.notify(
                     crate::function::notifications::ToastLevel::Warn,
                     format!("mcp `{server}` needs auth: {error}"),
                 );
@@ -1130,7 +1130,7 @@ fn handle_msg(msg: AppMsg, app: &mut App) {
             // The toast already surfaced the URL; nothing else to do.
         }
         AppMsg::McpClientClosed { server } => {
-            let _ = app.notify(
+            app.notify(
                 crate::function::notifications::ToastLevel::Fail,
                 format!("mcp `{server}` connection closed"),
             );
@@ -2000,7 +2000,7 @@ match m.kind {
         }
         MouseEventKind::Moved => {
             if app.tui_drag_start.is_some()
-                || app.tui_selection.map_or(false, |s| s.active)
+                || app.tui_selection.is_some_and(|s| s.active)
             {
                 app.tui_selection = None;
                 app.selected_text = None;
@@ -2200,7 +2200,7 @@ fn try_extract_image_path_from_input(
     };
     if let Err(e) = std::fs::create_dir_all(&assets_dir) {
         use crate::function::notifications::ToastLevel;
-        let _ = app.notify(ToastLevel::Warn, format!("image: create assets dir: {e}"));
+        app.notify(ToastLevel::Warn, format!("image: create assets dir: {e}"));
         return false;
     }
     let extension = media_type.split('/').nth(1).unwrap_or("png");
@@ -2209,7 +2209,7 @@ fn try_extract_image_path_from_input(
     if !asset_path.exists() {
         if let Err(e) = std::fs::write(&asset_path, &bytes) {
             use crate::function::notifications::ToastLevel;
-            let _ = app.notify(ToastLevel::Warn, format!("image: write {filename}: {e}"));
+            app.notify(ToastLevel::Warn, format!("image: write {filename}: {e}"));
             return false;
         }
     }
@@ -2223,7 +2223,7 @@ fn try_extract_image_path_from_input(
     app.image_blocks.push_back(attachment.clone());
     image_parts.push(crate::session::ContentPart::Image(attachment));
     let idx = app.image_blocks.len();
-    let _ = app.notify(crate::function::notifications::ToastLevel::Ok,
+    app.notify(crate::function::notifications::ToastLevel::Ok,
         format!("image #{idx} loaded from path ({media_type})"));
     true
 }
@@ -2264,12 +2264,11 @@ fn submit_input(app: &mut App) {
     if raw.is_empty() && image_parts.is_empty() {
         return;
     }
-    if image_parts.is_empty() {
-        if submit_direct_tool_input(app, &raw) {
+    if image_parts.is_empty()
+        && submit_direct_tool_input(app, &raw) {
             app.sync_completion();
             return;
         }
-    }
     if let Some(rest) = raw.strip_prefix('/') {
         let mut parts = rest.splitn(2, char::is_whitespace);
         let cmd: String = parts.next().unwrap_or("").to_lowercase();
@@ -2973,14 +2972,13 @@ async fn handle_todo_key(
             }
             KeyCode::Esc => {
                 // Remove the item if content is still empty
-                if edit_idx < app.session.todo_items.len() {
-                    if app.session.todo_items[edit_idx].content.trim().is_empty() {
+                if edit_idx < app.session.todo_items.len()
+                    && app.session.todo_items[edit_idx].content.trim().is_empty() {
                         app.session.todo_items.remove(edit_idx);
                         if state.cursor > 0 && state.cursor >= app.session.todo_items.len() {
                             state.cursor = state.cursor.saturating_sub(1);
                         }
                     }
-                }
                 state.editing = None;
                 app.session.invalidate_layout_cache();
                 return true;
@@ -3788,7 +3786,16 @@ fn trigger_picker_fetch(app: &mut App, state: &mut crate::function::ModelPickerS
             .unwrap_or_default();
         let cache_path = app.model_cache_path.parent().unwrap_or(&app.model_cache_path).to_path_buf();
         tokio::spawn(async move {
-            match crate::providers::list_models(&client, p, &base, &key, &access_key, &secret_key, &cache_path, &provider_name)
+            match crate::providers::list_models(crate::providers::ListModelsArgs {
+                    client: &client,
+                    kind: p,
+                    base_url: &base,
+                    api_key: &key,
+                    access_key: &access_key,
+                    secret_key: &secret_key,
+                    cache_path: &cache_path,
+                    provider_name: &provider_name,
+                })
                 .await
             {
                 Ok(models) => {
@@ -4168,10 +4175,7 @@ fn handle_settings_enter(app: &mut App, state: &mut crate::function::SettingsSta
             // 0 = on, 1 = off. `auto_compact` defaults to `true` in
             // `Config`, so picking the first row turns it on, the
             // second row turns it off.
-            let enabled = match cursor {
-                0 => true,
-                _ => false,
-            };
+let enabled = matches!(cursor, 0);
             if app.config.auto_compact != enabled {
                 app.config.auto_compact = enabled;
                 app.status.set_auto_compact(enabled);
@@ -4362,16 +4366,16 @@ fn settings_save_form(app: &mut App, form: crate::function::ConfigFormState) {
             let cache_path = app.model_cache_path.parent().unwrap_or(&app.model_cache_path).to_path_buf();
             if let Some(tx) = app.msg_tx.clone() {
                 tokio::spawn(async move {
-                    match crate::providers::list_models(
-                        &client,
-                        k,
-                        &base,
-                        &key,
-                        &access_key,
-                        &secret_key,
-                        &cache_path,
-                        &provider_name,
-                    )
+                    match crate::providers::list_models(crate::providers::ListModelsArgs {
+                            client: &client,
+                            kind: k,
+                            base_url: &base,
+                            api_key: &key,
+                            access_key: &access_key,
+                            secret_key: &secret_key,
+                            cache_path: &cache_path,
+                            provider_name: &provider_name,
+                        })
                     .await
                     {
                         Ok(models) => {

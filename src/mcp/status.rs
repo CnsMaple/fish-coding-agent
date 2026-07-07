@@ -4,7 +4,6 @@
 //! needs_client_registration.
 
 use serde::{Deserialize, Serialize};
-use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
@@ -54,23 +53,4 @@ pub enum AuthStatus {
     Expired,
     /// No tokens are stored for this server.
     NotAuthenticated,
-}
-
-/// Error type returned by [`crate::mcp::service::McpService`].
-#[derive(Debug, Error)]
-pub enum ServiceError {
-    #[error("mcp server `{0}` is not configured")]
-    NotFound(String),
-    #[error("mcp server `{0}` is currently `{1:?}`; cannot perform this action")]
-    BadState(String, McpStatus),
-    #[error("mcp server `{0}` is not a remote server")]
-    NotRemote(String),
-    #[error("mcp transport error: {0}")]
-    Transport(String),
-    #[error("mcp protocol error: {0}")]
-    Protocol(String),
-    #[error("mcp auth error: {0}")]
-    Auth(String),
-    #[error("mcp config error: {0}")]
-    Config(String),
 }

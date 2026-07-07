@@ -13,7 +13,7 @@
 //! drive lifecycle.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -211,7 +211,7 @@ fn short_type(v: &JsonValue) -> &'static str {
 pub async fn connect_local(
     name: &str,
     command: &[String],
-    cwd: &PathBuf,
+    cwd: &Path,
     environment: &HashMap<String, String>,
     timeout: Duration,
 ) -> Result<McpClientHandle, ClientError> {
@@ -332,7 +332,7 @@ pub async fn connect_remote(
 pub async fn connect(
     name: &str,
     cfg: &McpServerConfig,
-    workspace_root: &PathBuf,
+    workspace_root: &Path,
     auth_store: &crate::mcp::auth::McpAuthStore,
 ) -> Result<McpClientHandle, ClientError> {
     let timeout = Duration::from_millis(cfg.timeout_ms());
@@ -345,7 +345,7 @@ pub async fn connect(
         } => {
             let effective_cwd = match cwd {
                 Some(rel) if !rel.is_empty() => workspace_root.join(rel),
-                _ => workspace_root.clone(),
+                _ => workspace_root.to_path_buf(),
             };
             connect_local(name, command, &effective_cwd, environment, timeout).await
         }

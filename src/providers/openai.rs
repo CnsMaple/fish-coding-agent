@@ -150,7 +150,7 @@ impl Provider for OpenAiProvider {
                         // the in-flight thinking segment so the
                         // session starts a fresh one on the next
                         // reasoning delta.
-                        if last_block_kind.as_deref() == Some("thinking") {
+                        if last_block_kind == Some("thinking") {
                             let _ = tx.send(ChatEvent::ContentBlockStart("text".to_string()));
                         }
                         last_block_kind = Some("text");
@@ -161,7 +161,7 @@ impl Provider for OpenAiProvider {
             if let Some(reasoning) = v.pointer("/choices/0/delta/reasoning_content") {
                 if let Some(s) = reasoning.as_str() {
                     if !s.is_empty() {
-                        if last_block_kind.as_deref() == Some("text") {
+                        if last_block_kind == Some("text") {
                             let _ = tx.send(ChatEvent::ContentBlockStart("thinking".to_string()));
                         }
                         last_block_kind = Some("thinking");
@@ -173,7 +173,7 @@ impl Provider for OpenAiProvider {
                 .pointer("/choices/0/delta/tool_calls")
                 .and_then(|v| v.as_array())
             {
-                if last_block_kind.as_deref() == Some("thinking") {
+                if last_block_kind == Some("thinking") {
                     let _ = tx.send(ChatEvent::ContentBlockStart("tool_use".to_string()));
                 }
                 last_block_kind = Some("tool_use");

@@ -691,9 +691,9 @@ format!("[!{}] | ", app.pending_events),
                 cursor_col = prompt_width as u16;
             }
             // Count visual lines from all earlier visible segments
-            let mut vis_before = 0usize;
-            for j in start_line..idx.min(end_line) {
-                vis_before += seg_vis[j];
+let mut vis_before = 0usize;
+            for visible in seg_vis.iter().take(idx.min(end_line)).skip(start_line) {
+                vis_before += *visible;
             }
             cursor_vis = vis_before + vi;
             found = true;

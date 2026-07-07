@@ -1068,7 +1068,7 @@ async fn handle_shell_exec(
     };
     let tool_args = serde_json::json!({ "command": command }).to_string();
     let content = crate::tools::execute_tool("shell_command", &tool_args, &cwd).await;
-    let shell_content = unwrap_tool_result_content(&content);
+    let shell_content = crate::session::unwrap_tool_result_content(&content);
     let _ = tx.send(ChatEvent::ToolResult {
         name: "shell_command".to_string(),
         title: format!("$ {}", command),
@@ -1223,24 +1223,6 @@ async fn send_cursor_client_message(
         .send(frame_connect_message(&msg.encode_to_vec(), 0))
         .await
         .map_err(|_| ProviderError::Other("Cursor request stream closed".to_string()).into())
-}
-
-fn unwrap_tool_result_content(content: &str) -> String {
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(content) else {
-        return content.to_string();
-    };
-    if value.get("ok").and_then(|v| v.as_bool()) == Some(true) {
-        if let Some(result) = value.get("result").and_then(|v| v.as_str()) {
-            return result.to_string();
-        }
-    }
-    if let Some(error) = value.get("error").and_then(|v| v.as_str()) {
-        return format!(
-            "[Tool Error]
-{error}"
-        );
-    }
-    content.to_string()
 }
 
 struct ParsedShellOutput {
