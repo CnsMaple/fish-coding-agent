@@ -1071,7 +1071,7 @@ pub async fn run_chat_stream(
                     send_msg(crate::event::AppMsg::ChatDebug(s));
                 }
                 crate::providers::ChatEvent::Usage(u) => {
-                    send_msg(crate::event::AppMsg::ChatUsage(u));
+                    send_msg(crate::event::AppMsg::ChatUsage { seq, usage: u });
                 }
                 crate::providers::ChatEvent::ToolResult {
                     name,

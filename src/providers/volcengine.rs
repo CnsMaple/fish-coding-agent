@@ -130,6 +130,7 @@ impl VolcengineProvider {
                     display: id.to_string(),
                     request_id: None,
                     context_window_tokens: None,
+                    context_needs_pick: false,
                 });
             }
         }
@@ -219,6 +220,7 @@ impl VolcengineProvider {
                 display: display.to_string(),
                 request_id: None,
                 context_window_tokens: None,
+                context_needs_pick: false,
             });
         }
 
@@ -391,6 +393,7 @@ impl VolcengineProvider {
                         display: model_id,
                         request_id: None,
                         context_window_tokens: context_window,
+                        context_needs_pick: false,
                     });
                 }
             }
@@ -462,6 +465,7 @@ impl VolcengineProvider {
                     display: id.to_string(),
                     request_id: None,
                     context_window_tokens: None,
+                    context_needs_pick: false,
                 })
             })
             .collect();

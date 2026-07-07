@@ -52,6 +52,7 @@ impl Provider for OpenAiProvider {
                 display: m.id,
                 request_id: None,
                 context_window_tokens: None,
+                context_needs_pick: false,
             })
             .collect())
     }

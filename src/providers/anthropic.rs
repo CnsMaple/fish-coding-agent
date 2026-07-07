@@ -55,6 +55,7 @@ impl Provider for AnthropicProvider {
                 display: m.display_name.unwrap_or_else(|| "?".to_string()),
                 request_id: None,
                 context_window_tokens: None,
+                context_needs_pick: false,
             })
             .collect())
     }

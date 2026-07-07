@@ -265,6 +265,9 @@ pub struct ModelInfo {
     pub request_id: Option<String>,
     #[serde(default)]
     pub context_window_tokens: Option<u64>,
+    /// When true, the user needs to manually pick a context window size.
+    #[serde(default)]
+    pub context_needs_pick: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

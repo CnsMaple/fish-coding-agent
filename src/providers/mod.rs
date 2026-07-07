@@ -5,8 +5,10 @@ pub mod volcengine;
 
 use crate::config::ProviderKind;
 use crate::function::notifications::ModelInfo;
+use crate::model_data;
 use anyhow::Result;
 use async_trait::async_trait;
+use std::path::Path;
 use thiserror::Error;
 use tokio::sync::mpsc;
 
@@ -65,7 +67,7 @@ impl ChatEvent {
                 content,
             },
             ChatEvent::ToolCalls(_) => crate::event::AppMsg::ChatDone { seq },
-            ChatEvent::Usage(u) => crate::event::AppMsg::ChatUsage(u),
+            ChatEvent::Usage(u) => crate::event::AppMsg::ChatUsage { seq, usage: u },
             ChatEvent::Done => crate::event::AppMsg::ChatDone { seq },
             ChatEvent::Error(e) => crate::event::AppMsg::ChatError { seq, error: e },
         }
@@ -144,6 +146,8 @@ pub async fn list_models(
     api_key: &str,
     access_key: &str,
     secret_key: &str,
+    cache_path: &Path,
+    provider_name: &str,
 ) -> Result<Vec<ModelInfo>> {
     let p: Box<dyn Provider> = match kind {
         ProviderKind::Openai => Box::new(openai::OpenAiProvider),
@@ -153,8 +157,56 @@ pub async fn list_models(
         ProviderKind::MiniMax => Box::new(openai::OpenAiProvider),
         ProviderKind::Volcengine => Box::new(volcengine::VolcengineProvider),
     };
-    p.list_models(client, base_url, api_key, access_key, secret_key)
-        .await
+    let mut models = p
+        .list_models(client, base_url, api_key, access_key, secret_key)
+        .await?;
+    fill_context_windows(client, provider_name, &mut models, cache_path).await;
+    Ok(models)
+}
+
+/// Fill context_window_tokens in models using models.dev data.
+/// If `cache_path` is None, uses a default path in the config directory.
+/// Models that are not found in models.dev keep their existing
+/// context_window_tokens (which may be None).
+pub async fn fill_context_windows(
+    client: &reqwest::Client,
+    provider_name: &str,
+    models: &mut [ModelInfo],
+    cache_path: &Path,
+) {
+    let clean_name = provider_name.to_lowercase();
+
+    let model_data_path = cache_path.join("model-data.json");
+    let custom_cache_path = cache_path.join("context-cache.json");
+
+    let model_data = match model_data::fetch_models_dev(client, &model_data_path).await {
+        Ok(data) => data,
+        Err(e) => {
+            tracing::warn!("models.dev fetch failed: {e}");
+            // Fall back to stale cache.
+            model_data::ModelData::load(&model_data_path).unwrap_or_else(|| model_data::ModelData {
+                models: std::collections::HashMap::new(),
+                fetched_at: chrono::Utc::now(),
+            })
+        }
+    };
+
+    let custom_cache = model_data::CustomContextCache::load(&custom_cache_path);
+
+    for model in models.iter_mut() {
+        if model.context_window_tokens.is_some() {
+            continue;
+        }
+        // Try custom cache first
+        if let Some(ctx) = custom_cache.get(&model.id) {
+            model.context_window_tokens = Some(ctx);
+            continue;
+        }
+        // Try models.dev
+        if let Some(ctx) = model_data.lookup(&clean_name, &model.id) {
+            model.context_window_tokens = Some(ctx);
+        }
+    }
 }
 
 pub fn provider(kind: ProviderKind) -> Box<dyn Provider> {

@@ -75,7 +75,7 @@ pub enum AppMsg {
         context: Option<String>,
     },
     /// Final usage arrived for a completed stream.
-    ChatUsage(crate::providers::Usage),
+    ChatUsage { seq: u64, usage: crate::providers::Usage },
     /// Stream finished successfully. `seq` matches
     /// `App::current_request_seq` at the time the request started;
     /// the handler drops stale events from previous requests so a
@@ -901,7 +901,10 @@ fn handle_msg(msg: AppMsg, app: &mut App) {
             }
             app.save_current_session();
         }
-        AppMsg::ChatUsage(u) => {
+        AppMsg::ChatUsage { seq, usage: u } => {
+            if seq != app.current_request_seq {
+                return;
+            }
             let denom = u.input_tokens + u.cache_read_tokens;
             let rate = if denom == 0 {
                 0.0
@@ -1005,11 +1008,16 @@ fn handle_msg(msg: AppMsg, app: &mut App) {
                 }
             }
             app.model_cache.save(&app.model_cache_path);
+            let ctx_count = models.iter().filter(|m| m.context_window_tokens.is_some()).count();
+            let missing_count = models.iter().filter(|m| m.context_window_tokens.is_none()).count();
             use crate::function::notifications::ToastLevel;
-            app.notify(
-                ToastLevel::Ok,
-                format!("fetched {} models for {}", models.len(), provider.as_str()),
-            );
+            let mut msg = format!("fetched {} models for {}", models.len(), provider.as_str());
+            if ctx_count > 0 {
+                msg.push_str(&format!(" ({} with context)", ctx_count));
+            } else if missing_count > 0 {
+                msg.push_str(" (no context data)");
+            }
+            app.notify(ToastLevel::Ok, msg);
         }
         AppMsg::ModelsFetchFailed {
             provider,
@@ -3425,6 +3433,10 @@ fn handle_picker_key(
     _app: &mut App,
     state: &mut crate::function::ModelPickerState,
 ) -> bool {
+    // If context picker is active, handle its keys first.
+    if state.context_pick.is_some() {
+        return handle_context_picker_key(k, _app, state);
+    }
     use crossterm::event::{KeyCode, KeyModifiers};
     let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
 
@@ -3481,8 +3493,13 @@ fn handle_picker_key(
             }
             KeyCode::Enter => {
                 if let Some(&idx) = state.filtered.get(state.cursor) {
-                    let id = state.models[idx].id.clone();
-                    commit_model(_app, state.provider, id, false);
+                    let model = &state.models[idx];
+                    if model.context_needs_pick && model.context_window_tokens.is_none() {
+                        open_context_picker(_app, state, idx);
+                    } else {
+                        let id = model.id.clone();
+                        commit_model(_app, state.provider, id, false);
+                    }
                 } else {
                     let id = state.query.trim();
                     if !id.is_empty() {
@@ -3510,8 +3527,13 @@ fn handle_picker_key(
             }
             KeyCode::Enter => {
                 if let Some(&idx) = state.filtered.get(state.cursor) {
-                    let id = state.models[idx].id.clone();
-                    commit_model(_app, state.provider, id, false);
+                    let model = &state.models[idx];
+                    if model.context_needs_pick && model.context_window_tokens.is_none() {
+                        open_context_picker(_app, state, idx);
+                    } else {
+                        let id = model.id.clone();
+                        commit_model(_app, state.provider, id, false);
+                    }
                 }
                 true
             }
@@ -3764,8 +3786,14 @@ fn trigger_picker_fetch(app: &mut App, state: &mut crate::function::ModelPickerS
             .map(|c| c.secret_key.clone())
             .unwrap_or_default();
         let client = app.reqwest.clone();
+        let provider_name = app
+            .config
+            .entry(&active_id)
+            .map(|c| c.name.clone())
+            .unwrap_or_default();
+        let cache_path = app.model_cache_path.parent().unwrap_or(&app.model_cache_path).to_path_buf();
         tokio::spawn(async move {
-            match crate::providers::list_models(&client, p, &base, &key, &access_key, &secret_key)
+            match crate::providers::list_models(&client, p, &base, &key, &access_key, &secret_key, &cache_path, &provider_name)
                 .await
             {
                 Ok(models) => {
@@ -4331,6 +4359,12 @@ fn settings_save_form(app: &mut App, form: crate::function::ConfigFormState) {
                 .map(|c| c.secret_key.clone())
                 .unwrap_or_default();
             let client = app.reqwest.clone();
+            let provider_name = app
+                .config
+                .entry(&active_id)
+                .map(|c| c.name.clone())
+                .unwrap_or_default();
+            let cache_path = app.model_cache_path.parent().unwrap_or(&app.model_cache_path).to_path_buf();
             if let Some(tx) = app.msg_tx.clone() {
                 tokio::spawn(async move {
                     match crate::providers::list_models(
@@ -4340,6 +4374,8 @@ fn settings_save_form(app: &mut App, form: crate::function::ConfigFormState) {
                         &key,
                         &access_key,
                         &secret_key,
+                        &cache_path,
+                        &provider_name,
                     )
                     .await
                     {
@@ -4534,7 +4570,7 @@ fn handle_form_text(
             }
             _ => false,
         },
-        ConfigField::SecretKey => match k.code {
+ConfigField::SecretKey => match k.code {
             crossterm::event::KeyCode::Char(c) => {
                 form.secret_key.push(c);
                 true
@@ -4546,6 +4582,147 @@ fn handle_form_text(
             _ => false,
         },
         _ => false,
+    }
+}
+
+fn open_context_picker(
+    app: &mut App,
+    state: &mut crate::function::ModelPickerState,
+    model_idx: usize,
+) {
+    let provider_name = app
+        .config
+        .active
+        .as_ref()
+        .and_then(|id| app.config.entry(id))
+        .map(|c| c.name.clone())
+        .unwrap_or_default()
+        .to_lowercase();
+
+    let cache_path = app.model_cache_path.parent().unwrap_or(&app.model_cache_path);
+    let model_data_path = cache_path.join("model-data.json");
+    let model_data = crate::model_data::ModelData::load(&model_data_path)
+        .unwrap_or_else(|| crate::model_data::ModelData {
+            models: std::collections::HashMap::new(),
+            fetched_at: chrono::Utc::now(),
+        });
+
+    let options = model_data.context_options_for_provider(&provider_name);
+
+    state.context_pick = Some(crate::function::ContextPickerState {
+        model_idx,
+        options,
+        cursor: 0,
+        custom_input: String::new(),
+        focus: crate::function::ContextPickerFocus::Options,
+    });
+}
+
+fn handle_context_picker_key(
+    k: crossterm::event::KeyEvent,
+    app: &mut App,
+    state: &mut crate::function::ModelPickerState,
+) -> bool {
+    use crossterm::event::KeyCode;
+    let Some(cp) = &mut state.context_pick else {
+        return false;
+    };
+
+    match k.code {
+        KeyCode::Esc => {
+            state.context_pick = None;
+            true
+        }
+        KeyCode::Tab => {
+            cp.focus = match cp.focus {
+                crate::function::ContextPickerFocus::Options => {
+                    crate::function::ContextPickerFocus::CustomInput
+                }
+                crate::function::ContextPickerFocus::CustomInput => {
+                    crate::function::ContextPickerFocus::Options
+                }
+            };
+            true
+        }
+        KeyCode::Up => {
+            if cp.focus == crate::function::ContextPickerFocus::Options && cp.cursor > 0 {
+                cp.cursor -= 1;
+            }
+            true
+        }
+        KeyCode::Down => {
+            if cp.focus == crate::function::ContextPickerFocus::Options
+                && cp.cursor + 1 < cp.options.len()
+            {
+                cp.cursor += 1;
+            }
+            true
+        }
+        KeyCode::Enter => {
+            match cp.focus {
+                crate::function::ContextPickerFocus::Options => {
+                    if let Some(opt) = cp.options.get(cp.cursor) {
+                        let ctx = opt.context;
+                        let model_idx = cp.model_idx;
+                        state.models[model_idx].context_window_tokens = Some(ctx);
+                        state.models[model_idx].context_needs_pick = false;
+                        // Save to custom cache
+                        let cache_path = app.model_cache_path.parent().unwrap_or(&app.model_cache_path);
+                        let custom_cache_path = cache_path.join("context-cache.json");
+                        let mut custom_cache =
+                            crate::model_data::CustomContextCache::load(&custom_cache_path);
+                        custom_cache.set(
+                            state.models[model_idx].id.clone(),
+                            ctx,
+                            &custom_cache_path,
+                        );
+                        let id = state.models[model_idx].id.clone();
+                        let provider = state.provider;
+                        state.context_pick = None;
+                        commit_model(app, provider, id, false);
+                    }
+                }
+                crate::function::ContextPickerFocus::CustomInput => {
+                    let input = cp.custom_input.trim().to_string();
+                    if let Ok(ctx) = input.parse::<u64>() {
+                        let ctx = ctx * 1000; // user enters k, store as tokens
+                        let model_idx = cp.model_idx;
+                        state.models[model_idx].context_window_tokens = Some(ctx);
+                        state.models[model_idx].context_needs_pick = false;
+                        // Save to custom cache
+                        let cache_path = app.model_cache_path.parent().unwrap_or(&app.model_cache_path);
+                        let custom_cache_path = cache_path.join("context-cache.json");
+                        let mut custom_cache =
+                            crate::model_data::CustomContextCache::load(&custom_cache_path);
+                        custom_cache.set(
+                            state.models[model_idx].id.clone(),
+                            ctx,
+                            &custom_cache_path,
+                        );
+                        let id = state.models[model_idx].id.clone();
+                        let provider = state.provider;
+                        state.context_pick = None;
+                        commit_model(app, provider, id, false);
+                    }
+                }
+            }
+            true
+        }
+        KeyCode::Backspace => {
+            if cp.focus == crate::function::ContextPickerFocus::CustomInput {
+                cp.custom_input.pop();
+            }
+            true
+        }
+        KeyCode::Char(c) => {
+            if cp.focus == crate::function::ContextPickerFocus::CustomInput
+                && c.is_ascii_digit()
+            {
+                cp.custom_input.push(c);
+            }
+            true
+        }
+_ => false,
     }
 }
 
@@ -5145,6 +5322,7 @@ mod tests {
                 display: format!("model {i}"),
                 request_id: None,
                 context_window_tokens: None,
+                context_needs_pick: false,
             });
         }
         s.rebuild_filter();
@@ -5183,6 +5361,7 @@ mod tests {
                 display: "gpt-4o".to_string(),
                 request_id: None,
                 context_window_tokens: None,
+                context_needs_pick: false,
             });
         picker
             .models
@@ -5191,6 +5370,7 @@ mod tests {
                 display: "gpt-4o-mini".to_string(),
                 request_id: None,
                 context_window_tokens: None,
+                context_needs_pick: false,
             });
         picker.rebuild_filter();
         picker.cursor = 1;

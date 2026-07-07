@@ -647,16 +647,93 @@ fn render_picker(
             let model = &s.models[model_idx];
             let is_cursor = row == s.cursor;
             let y = list_area.y + (row - s.scroll) as u16;
-            let line = if is_cursor {
-                Line::from(vec![
-                    Span::styled("> ", Theme::bold()),
-                    Span::raw(model.id.clone()),
-                ])
+            let mut spans: Vec<Span<'static>> = Vec::new();
+            if is_cursor {
+                spans.push(Span::styled("> ", Theme::bold()));
             } else {
-                Line::from(Span::raw(format!("  {}", model.id)))
-            };
+                spans.push(Span::raw("  "));
+            }
+            spans.push(Span::raw(model.display.clone()));
+            if model.display != model.id {
+                spans.push(Span::styled("  ", Theme::dim()));
+                spans.push(Span::styled(model.id.clone(), Theme::dim()));
+            }
+            if let Some(ctx) = model.context_window_tokens {
+                spans.push(Span::raw("  "));
+                spans.push(Span::styled(
+                    format!("ctx:{}k", ctx / 1000),
+                    Theme::dim(),
+                ));
+            } else if model.context_needs_pick {
+                spans.push(Span::raw("  "));
+                spans.push(Span::styled("[set context]", Theme::status_warn()));
+            }
+            let line = Line::from(spans);
             buf.set_line(list_area.x, y, &line, list_area.width);
         }
+    }
+
+    // --- context picker (overlays list when active) ---------------------
+    if let Some(ref cp) = s.context_pick {
+        let model = &s.models[cp.model_idx];
+
+        let mut picker_lines: Vec<Line<'static>> = Vec::new();
+        picker_lines.push(Line::from(Span::styled(
+            format!(" Context window for: {}", model.id),
+            Theme::bold(),
+        )));
+        picker_lines.push(Line::from(""));
+
+        let picker_cursor = if cp.focus == crate::function::ContextPickerFocus::Options {
+            cp.cursor
+        } else {
+            usize::MAX
+        };
+
+        for (i, opt) in cp.options.iter().enumerate() {
+            let prefix = if i == picker_cursor { "> " } else { "  " };
+            let mods_str = if opt.modalities.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", opt.modalities.join("+"))
+            };
+            let label = format!("{}{}k{}", prefix, opt.context / 1000, mods_str);
+            let style = if i == picker_cursor {
+                Theme::bold()
+            } else {
+                Theme::base()
+            };
+            picker_lines.push(Line::from(Span::styled(label, style)));
+        }
+
+        picker_lines.push(Line::from(""));
+        let custom_prefix = if cp.focus == crate::function::ContextPickerFocus::CustomInput {
+            "> "
+        } else {
+            "  "
+        };
+        let custom_label = if cp.custom_input.is_empty() {
+            format!("{}Custom: [____]", custom_prefix)
+        } else {
+            format!("{}Custom: [{}]", custom_prefix, cp.custom_input)
+        };
+        let custom_style = if cp.focus == crate::function::ContextPickerFocus::CustomInput {
+            Theme::bold()
+        } else {
+            Theme::base()
+        };
+        picker_lines.push(Line::from(Span::styled(custom_label, custom_style)));
+
+        let p = Paragraph::new(picker_lines).wrap(Wrap { trim: false });
+        p.render(list_area, buf);
+
+        // Override hint
+        let hint = Line::from(Span::styled(
+            " Enter: select | Esc: cancel | Tab: toggle custom input ",
+            Theme::dim(),
+        ));
+        Paragraph::new(hint).render(rows[2], buf);
+        return search_cursor;
     }
 
     // --- hint row -------------------------------------------------------

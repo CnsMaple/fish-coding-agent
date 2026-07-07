@@ -7,6 +7,7 @@ pub mod function;
 pub mod fuzzy;
 pub mod input;
 pub mod mcp;
+pub mod model_data;
 pub mod net;
 pub mod permission;
 pub mod providers;

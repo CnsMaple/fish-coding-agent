@@ -553,6 +553,30 @@ pub struct ModelPickerState {
     /// Scroll offset (top visible row in the list) so the focused row is
     /// always in view.
     pub scroll: usize,
+    /// Context window picker — when set, the model at this index needs
+    /// the user to pick a context window. The picker shows options from
+    /// models.dev plus a custom input.
+    pub context_pick: Option<ContextPickerState>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ContextPickerState {
+    /// Index of the model in `models` that needs a context window.
+    pub model_idx: usize,
+    /// Unique context window + modality combinations for this provider.
+    pub options: Vec<crate::model_data::ContextOption>,
+    /// Cursor position in the options list.
+    pub cursor: usize,
+    /// Custom input value (empty if not editing custom).
+    pub custom_input: String,
+    /// Focus: Options or CustomInput.
+    pub focus: ContextPickerFocus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextPickerFocus {
+    Options,
+    CustomInput,
 }
 
 use crate::function::notifications::ModelInfo;
@@ -570,6 +594,7 @@ impl ModelPickerState {
             fetch_error: None,
             no_endpoint: false,
             scroll: 0,
+            context_pick: None,
         }
     }
 
