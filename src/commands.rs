@@ -728,12 +728,14 @@ Do NOT claim a tool was used unless you actually see its result.
 - Only elaborate when the user explicitly asks for detail.
 
 ## Language
-- Respond in the same language as the user's first prompt. If the user explicitly requests a different language in a later message, switch to that language.",
+- Respond in the same language as the user's first prompt. If the user explicitly requests a different language in a later message, switch to that language.
+{skills}",
             date = date,
             workspace = cwd,
             os = os,
             shell = shell,
-            shell_details = crate::tools::shell_guidance()
+            shell_details = crate::tools::shell_guidance(),
+            skills = crate::skill::skills_for_system_prompt(),
         ),
         crate::permission::Agent::Plan => format!(
             "\
@@ -799,11 +801,13 @@ its result.
 6. **Handle interruptions directly.** If the user interrupts you and asks a \
     follow-up question (e.g. translation, clarification, summary), answer \
     using the information you already have. Do not re-explore the codebase \
-    or call `plan` again.",
+    or call `plan` again.
+{skills}",
             date = date,
             workspace = cwd,
             os = os,
             shell = shell,
+            skills = crate::skill::skills_for_system_prompt(),
         ),
     }
 }

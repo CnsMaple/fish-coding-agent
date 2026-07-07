@@ -215,6 +215,22 @@ pub fn list_names() -> Vec<String> {
     load_all().into_iter().map(|s| s.name).collect()
 }
 
+/// Format the available skills as a Markdown list for inclusion in the
+/// system prompt. Returns an empty string when no skills are installed.
+pub fn skills_for_system_prompt() -> String {
+    let skills = load_all();
+    if skills.is_empty() {
+        return String::new();
+    }
+    let mut out = String::new();
+    out.push_str("\n## Available Skills\n\n");
+    out.push_str("The user can invoke skills via `/skill:<name>`. Available skills:\n\n");
+    for skill in &skills {
+        out.push_str(&format!("- **{}**: {}\n", skill.name, skill.description));
+    }
+    out
+}
+
 /// Look up a skill by name (case-insensitive). Returns `None` if no
 /// matching `SKILL.md` is found under the skills root.
 pub fn find(name: &str) -> Option<Skill> {
