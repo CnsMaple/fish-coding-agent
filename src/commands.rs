@@ -687,42 +687,153 @@ fn system_prompt(agent: crate::permission::Agent) -> String {
     match agent {
         crate::permission::Agent::Build => format!(
             "\
-You are a coding assistant with access to the following tools. All file paths are relative to the current workspace directory; use `list` and `grep` to discover files within it. Never invent or guess file paths from outside the current workspace:
+You are an AI coding assistant with access to the tools listed below. Your job is to \
+complete software engineering tasks efficiently and correctly.
 
-Current date: {date}
-Current workspace: {workspace}
-Current OS: {os}, shell: {shell}
+You operate in the following environment:
+- Current date: {date}
+- OS: {os}
+- Shell: {shell} ({shell_details})
+- Workspace: {workspace}
 
-  - read(path, start_line?, end_line?)
-  - edit(path, content, oldString?, replaceAll?, start_line?, end_line?)
-  - write(filePath, content) - create or overwrite a file
-  - shell_command(command) - runs in {shell}
-    Current shell details: {shell_details}
-  - python_command(code) - runs Python source code directly
-  - grep(pattern, path?) - search text in files
-  - glob(pattern, path?) - find files by name pattern
-  - list(path?) - list files under a directory
-  - plan(title?, content, steps?) - present a plan for user confirmation
-  - skill(name) - load a skill's instructions
-  - webfetch(url, format?) - fetch web page content (text/markdown/html)
-  - websearch(query, numResults?) - search the web for information
+All file paths are relative to the workspace unless noted otherwise. Use `list`, `grep`, \
+and `glob` to discover files — never invent or guess paths.
 
-When a task requires one of these actions you MUST invoke the appropriate tool via the API's structured tool_calls mechanism. Never describe using a tool without actually calling it.
+{skills}
 
-If your API does not support structured tool_calls, describe each tool call as a single-line JSON object on its own line in the following format:
+## Tool usage
+
+You communicate with the workspace through these tools. When a task requires one, you \
+MUST invoke it via the API's structured `tool_calls` mechanism. Never describe a tool \
+call in prose — actually call it. If your API does not support structured tool_calls, \
+emit each call as a single-line JSON object on its own line:
+
   >>> {{\"name\": \"tool_name\", \"arguments\": {{...}}}} <<<
 
-Do NOT claim a tool was used unless you actually see its result.
+Do NOT claim a tool was used unless you actually see its result. Do NOT invent tool \
+output — always wait for the real result.
+
+### read(path, start_line?, end_line?)
+
+Read a file from the workspace. When reading a file you've never seen before, start \
+without line limits to understand the full context. For large files you already \
+understand, use `start_line` and `end_line` to focus on the relevant section.
+
+### edit(path, content, oldString?, replaceAll?, start_line?, end_line?)
+
+Perform exact string replacements in a file. `oldString` must match the file content \
+exactly (including indentation). If `replaceAll` is true, every occurrence is replaced. \
+Use `start_line`/`end_line` to scope the search. ALWAYS prefer editing existing files \
+over creating new ones.
+
+### write(filePath, content)
+
+Create or overwrite a file at the given absolute path. Avoid this tool when `edit` \
+would suffice — prefer surgical edits over full rewrites.
+
+### shell_command(command)
+
+Execute a command in {shell}. Shell guidance: {shell_details}
+
+Important rules:
+- Use `&&` to chain commands that must succeed sequentially.
+- Use `;` only when you don't care if earlier commands fail.
+- Quote paths containing spaces with double quotes.
+- Do NOT use `cd` — use the `workdir` parameter or pass the full path directly.
+- Avoid aliases (e.g. use `Get-ChildItem` not `ls` on Windows).
+- Commands time out after 300 seconds.
+
+### python_command(code)
+
+Run Python source code directly. Use for computations, file inspection, data \
+processing, or anything better done in Python than shell. Timeout is 300 seconds.
+
+### grep(pattern, path?)
+
+Search file contents with a regular expression. Use this to find function definitions, \
+usage sites, error messages, or configuration keys. `pattern` supports full regex \
+syntax. `path` can be a directory or file pattern (e.g. `\"src/**/*.rs\"`).
+
+### glob(pattern, path?)
+
+Find files by name pattern. Supports glob patterns like `\"**/*.ts\"` or `\"src/**/*.rs\"`. \
+Results are sorted by modification time (newest first).
+
+### list(path?)
+
+List files and directories under a path. Useful for exploring project structure.
+
+### plan(title?, content, steps?)
+
+Present a plan for user confirmation. The plan is shown in the session; the user can \
+approve, reject, or close it. Use this when the task is complex or destructive and \
+you want confirmation before executing.
+
+### ask(question, options?)
+
+Ask the user a clarifying question. Use when the task is ambiguous, a tradeoff needs \
+a decision, or you're blocked on missing information. Batch independent questions into \
+one call. The user's answer appears as the next chat message.
+
+### skill(name)
+
+Load a skill's instructions. Skills provide specialized workflows and domain knowledge.
+
+### webfetch(url, format?)
+
+Fetch a web page and return its content as text, markdown, or HTML. Use for reading \
+documentation, API references, or any public web resource relevant to the task.
+
+### websearch(query, numResults?)
+
+Search the web for information. Use when you need up-to-date knowledge beyond your \
+training data, or when the task references technologies or APIs you're unsure about.
+
+### sub_agent(description, prompt, subagent_type, task_id?)
+
+Delegate a complex, multi-step subtask to a sub-agent. The sub-agent runs independently \
+and returns a single result. Use `\"general\"` for broad tasks and `\"explore\"` for \
+codebase search/analysis. The sub-agent cannot spawn further sub-agents.
+
+## Workflow
+
+When you receive a task, follow this general pattern:
+
+1. **Understand** — If the task references code, use `read` and `grep` to ground \
+your understanding in the actual codebase. Do NOT guess file paths, function names, \
+or behaviour.
+
+2. **Plan** — For complex tasks, call `plan` to present your approach before writing \
+code. For simple, well-understood fixes, you may skip this.
+
+3. **Execute** — Make surgical changes with `edit`. Only create new files when \
+necessary. Run verification commands (`shell_command` for builds/tests) after changes.
+
+4. **Verify** — Run relevant tests, linters, or type-checkers to confirm your changes \
+are correct. If the task mentioned specific verification commands, run them.
+
+## Code conventions
+
+- BEFORE writing code, inspect the surrounding files to understand the project's \
+conventions: naming, formatting, library choices, and patterns.
+- NEVER assume a library is available unless you've confirmed it in the project's \
+dependency manifest (Cargo.toml, package.json, etc.).
+- Use the same libraries, frameworks, and patterns already present in the codebase.
+- Follow existing code style: indentation, quoting, error handling, import ordering.
 
 ## Tone and style
+
 - Keep responses short and direct. Aim for 1-3 sentences when possible.
 - Skip preamble, greetings, and explanations — get straight to the point.
 - Do not summarize what you already did or what you are about to do.
 - Only elaborate when the user explicitly asks for detail.
+- Do NOT add comments to code unless the user explicitly asks or the codebase \
+convention demands it.
 
 ## Language
-- Respond in the same language as the user's first prompt. If the user explicitly requests a different language in a later message, switch to that language.
-{skills}",
+
+- Respond in the same language as the user's first prompt. If the user explicitly \
+requests a different language in a later message, switch to that language.",
             date = date,
             workspace = cwd,
             os = os,
@@ -884,6 +995,7 @@ pub fn send_message(app: &mut App, user_msg: Message) {
     let model = app.config.active_model().to_string();
     let thinking = app.config.thinking;
 
+    let user_text = user_msg.content.clone();
     app.maybe_title_from_first_prompt(&user_msg.content);
     app.session.push(user_msg);
     let assistant = Message {
@@ -930,6 +1042,13 @@ pub fn send_message(app: &mut App, user_msg: Message) {
         };
         if crate::compaction::compact_if_needed(&msg_texts, &sp, inp) {
             app.notify(ToastLevel::Info, "compacting session before sending...");
+            app.pending_post_compaction_prompt = Some(user_text);
+            // Remove the user message and assistant placeholder from the
+            // session — they will be re-sent by drain_post_compaction_prompt.
+            app.session.messages.pop();
+            app.session.messages.pop();
+            app.session.streaming_id = None;
+            app.session.invalidate_layout_cache();
             compact_now(app, "");
             return;
         }
@@ -1316,65 +1435,121 @@ async fn run_sub_agent(
     };
 
     const MAX_STEPS: usize = 15;
+    let retry_delays: [u64; 3] = [3, 12, 60];
     for step in 0..MAX_STEPS {
         if *cancel_rx.borrow() {
             return json!({"ok": false, "error": "sub-agent cancelled"}).to_string();
         }
 
-        let (chat_tx, mut chat_rx) =
-            tokio::sync::mpsc::unbounded_channel::<crate::providers::ChatEvent>();
-        let p = crate::providers::provider(provider);
-        let client_c = client.clone();
-        let base_c = base.to_string();
-        let key_c = key.to_string();
-        let req_c = crate::providers::ChatRequest {
-            model: req.model.clone(),
-            messages: req.messages.clone(),
-            thinking: req.thinking,
-            system: req.system.clone(),
-            tools: req.tools.clone(),
-        };
-        let call = tokio::spawn(async move {
-            p.chat_stream(&client_c, &base_c, &key_c, req_c, chat_tx).await
-        });
-
         let mut text = String::new();
         let mut tool_calls: Vec<crate::providers::ToolCall> = Vec::new();
-        let mut stream_done = false;
+        let mut stream_retries = 0u32;
 
-        while let Some(ev) = chat_rx.recv().await {
+        loop {
             if *cancel_rx.borrow() {
                 return json!({"ok": false, "error": "sub-agent cancelled"}).to_string();
             }
-            match ev {
-                crate::providers::ChatEvent::Delta(s) => text.push_str(&s),
-                crate::providers::ChatEvent::ToolCalls(calls) => tool_calls = calls,
-                crate::providers::ChatEvent::Done => {
-                    stream_done = true;
-                    break;
-                }
-                crate::providers::ChatEvent::Error(e) => {
-                    return json!({"ok": false, "error": format!("sub-agent stream error: {e}")})
-                        .to_string();
-                }
-                _ => {}
-            }
-        }
 
-        if !stream_done {
-            match call.await {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => {
-                    return json!({"ok": false, "error": format!("sub-agent stream failed: {e:#}")})
-                        .to_string();
+            let (chat_tx, mut chat_rx) =
+                tokio::sync::mpsc::unbounded_channel::<crate::providers::ChatEvent>();
+            let p = crate::providers::provider(provider);
+            let client_c = client.clone();
+            let base_c = base.to_string();
+            let key_c = key.to_string();
+            let req_c = crate::providers::ChatRequest {
+                model: req.model.clone(),
+                messages: req.messages.clone(),
+                thinking: req.thinking,
+                system: req.system.clone(),
+                tools: req.tools.clone(),
+            };
+            let call = tokio::spawn(async move {
+                p.chat_stream(&client_c, &base_c, &key_c, req_c, chat_tx).await
+            });
+
+            text.clear();
+            tool_calls.clear();
+            let mut stream_done = false;
+            let mut stream_err: Option<String> = None;
+
+            while let Some(ev) = chat_rx.recv().await {
+                if *cancel_rx.borrow() {
+                    return json!({"ok": false, "error": "sub-agent cancelled"}).to_string();
                 }
-                Err(e) => {
-                    return json!({"ok": false, "error": format!("sub-agent task failed: {e:#}")})
-                        .to_string();
+                match ev {
+                    crate::providers::ChatEvent::Delta(s) => text.push_str(&s),
+                    crate::providers::ChatEvent::ToolCalls(calls) => tool_calls = calls,
+                    crate::providers::ChatEvent::Done => {
+                        stream_done = true;
+                        break;
+                    }
+                    crate::providers::ChatEvent::Error(e) => {
+                        stream_err = Some(e);
+                        break;
+                    }
+                    _ => {}
                 }
             }
-            continue;
-        }
+
+            if let Some(e) = stream_err {
+                stream_retries += 1;
+                if stream_retries >= 3 {
+                    return json!({"ok": false, "error": format!("sub-agent stream error after {stream_retries} retries: {e}")})
+                        .to_string();
+                }
+                let delay = retry_delays[(stream_retries - 1) as usize];
+                let _ = tx.send(crate::event::AppMsg::ToolDelta {
+                    content: format!(
+                        "[sub_agent:{}] stream retry {stream_retries}/3 ({delay}s): {e:#}\n",
+                        sub.as_str()
+                    ),
+                });
+                tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
+                continue;
+            }
+
+            if !stream_done {
+                match call.await {
+                    Ok(Ok(())) => {
+                        break;
+                    }
+                    Ok(Err(e)) => {
+                        stream_retries += 1;
+                        if stream_retries >= 3 {
+                            return json!({"ok": false, "error": format!("sub-agent stream failed after {stream_retries} retries: {e:#}")})
+                                .to_string();
+                        }
+                        let delay = retry_delays[(stream_retries - 1) as usize];
+                        let _ = tx.send(crate::event::AppMsg::ToolDelta {
+                            content: format!(
+                                "[sub_agent:{}] stream retry {stream_retries}/3 ({delay}s): {e:#}\n",
+                                sub.as_str()
+                            ),
+                        });
+                        tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
+                        continue;
+                    }
+                    Err(e) => {
+                        stream_retries += 1;
+                        if stream_retries >= 3 {
+                            return json!({"ok": false, "error": format!("sub-agent task failed after {stream_retries} retries: {e:#}")})
+                                .to_string();
+                        }
+                        let delay = retry_delays[(stream_retries - 1) as usize];
+                        let _ = tx.send(crate::event::AppMsg::ToolDelta {
+                            content: format!(
+                                "[sub_agent:{}] stream retry {stream_retries}/3 ({delay}s): {e:#}\n",
+                                sub.as_str()
+                            ),
+                        });
+                        tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
+                        continue;
+                    }
+                }
+            }
+
+            break;
+            }
 
         if tool_calls.is_empty() {
             let _ = tx.send(crate::event::AppMsg::ToolDelta {
@@ -1432,28 +1607,60 @@ async fn run_sub_agent(
 }
 
 fn sub_agent_system_prompt(sub: crate::permission::SubAgent) -> String {
+    let now = chrono::Local::now();
+    let date = now.format("%Y-%m-%d %A").to_string();
+    let cwd = std::env::current_dir()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| ".".to_string());
+    let os = crate::tools::os_name();
+    let shell = crate::tools::shell_description();
+    let shell_details = crate::tools::shell_guidance();
+
+    let base_ctx = format!(
+        "Current date: {date}\nOS: {os}\nShell: {shell} ({shell_details})\nWorkspace: {workspace}\nAll file paths are relative to the workspace.",
+        date = date,
+        os = os,
+        shell = shell,
+        shell_details = shell_details,
+        workspace = cwd,
+    );
+
     match sub {
-        crate::permission::SubAgent::General => "\
-You are a sub-agent handling a delegated task. Work autonomously and return a single concise result.\n\
-Do not ask questions or present plans — just complete the task and report back.\n\
-\n\
-Guidelines:\n\
-- Use the tools available to you to gather information and complete the task.\n\
-- Be thorough but efficient. Do not repeat work you have already done.\n\
-- Return your findings clearly and concisely.\n\
-- Do not call the sub_agent tool — you cannot spawn further sub-agents."
-            .to_string(),
-        crate::permission::SubAgent::Explore => "\
-You are a fast codebase exploration sub-agent. Your job is to search, read, and analyze code.\n\
-Use grep, glob, read, list, webfetch, and websearch to find information.\n\
-\n\
-Guidelines:\n\
-- Do not modify files or run commands — you are read-only.\n\
-- Be thorough but concise. Return clear, structured findings.\n\
-- When searching, try multiple patterns and approaches to be comprehensive.\n\
-- Include file paths and line numbers in your findings.\n\
-- Do not call the sub_agent tool — you cannot spawn further sub-agents."
-            .to_string(),
+        crate::permission::SubAgent::General => format!(
+            "\
+You are a sub-agent handling a delegated task. Work autonomously and return a single \
+concise result. Do not ask questions or present plans — just complete the task and \
+report back.
+
+{base_ctx}
+
+## Guidelines
+- Use the tools available to you to gather information and complete the task.
+- Be thorough but efficient. Do not repeat work you have already done.
+- When you need to read files, use `read` to get the full content first.
+- For large codebases, use `grep` and `glob` to narrow your search before reading.
+- Return your findings clearly and concisely. Include file paths and line numbers.
+- Do not call the sub_agent tool — you cannot spawn further sub-agents.
+- If a tool call fails, try an alternative approach before giving up.",
+            base_ctx = base_ctx,
+        ),
+        crate::permission::SubAgent::Explore => format!(
+            "\
+You are a fast codebase exploration sub-agent. Your job is to search, read, and \
+analyze code. Use grep, glob, read, list, webfetch, and websearch to find information.
+
+{base_ctx}
+
+## Guidelines
+- Do not modify files or run commands — you are read-only.
+- Start broad with `grep` and `glob`, then narrow down with `read`.
+- Be thorough but concise. Return clear, structured findings.
+- When searching, try multiple patterns and approaches to be comprehensive.
+- Include file paths and line numbers in your findings.
+- Do not call the sub_agent tool — you cannot spawn further sub-agents.
+- If a search returns no results, try alternative patterns before giving up.",
+            base_ctx = base_ctx,
+        ),
     }
 }
 

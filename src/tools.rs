@@ -180,7 +180,7 @@ fn tool_defs() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "edit",
-            description: "Write or edit a UTF-8 text file within the current workspace. Use this tool for all file modifications including creating new files and editing existing ones. To edit, provide oldString (the exact text to find and replace) with the replacement content. When oldString matches multiple locations, use start_line/end_line to narrow the search scope, or use replaceAll: true. To create or overwrite a file, omit oldString.".to_string(),
+            description: "Write or edit a UTF-8 text file within the current workspace. Use this tool for all file modifications including creating new files and editing existing ones. To edit, provide oldString (the exact text to find and replace) with the replacement content. CRLF line endings are automatically normalized so you can use plain \n for oldString even on Windows files. When oldString matches multiple locations, use start_line/end_line to narrow the search scope, or use replaceAll: true. To create or overwrite a file, omit oldString.".to_string(),
             schema: json!({
                 "type": "object",
                 "properties": {
@@ -197,14 +197,19 @@ fn tool_defs() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "shell_command",
-            description: format!(
-                "Run a shell command in the current workspace using {} and return stdout/stderr. Timeout is 300 seconds.",
-                shell_description()
-            ),
+            description: {
+                let shell = shell_description();
+                let guidance = shell_guidance();
+                format!(
+                    "Execute a shell command in the current workspace using {shell} and return stdout/stderr. Timeout is 300 seconds.\n\n{guidance}",
+                    shell = shell,
+                    guidance = guidance,
+                )
+            },
             schema: json!({
                 "type": "object",
                 "properties": {
-                    "command": { "type": "string", "description": "Command line to execute." }
+                    "command": { "type": "string", "description": "Command line to execute. Use && to chain commands that must all succeed, ; to chain commands where failures are acceptable. Quote paths with spaces." }
                 },
                 "required": ["command"],
                 "additionalProperties": false
@@ -1343,14 +1348,14 @@ pub fn shell_guidance() -> String {
     #[cfg(windows)]
     {
         format!(
-            "OS is Windows; shell is {} (PowerShell syntax). `ls` is Get-ChildItem; do not use Unix flags like `ls -la`. Use `Get-ChildItem -Force` or `dir` for hidden/all files.",
+            "OS is Windows; shell is {} (PowerShell syntax). Use PowerShell cmdlets: `Get-ChildItem` (not `ls`), `Get-Content` (not `cat`), `Select-String` (not `grep`). Use `Get-ChildItem -Force` or `dir` for hidden/all files. Use double quotes for paths with spaces. Avoid Unix flags like `-la`, `-rf`.",
             windows_shell_program()
         )
     }
     #[cfg(not(windows))]
     {
         format!(
-            "OS is Unix-like; shell is {}.",
+            "OS is Unix-like; shell is {}. Use standard Unix commands. Quote paths with spaces using single or double quotes. Use `&&` to chain commands that must succeed, `;` when failures are acceptable.",
             std::env::var("SHELL").unwrap_or_else(|_| "sh".to_string())
         )
     }
@@ -1480,11 +1485,26 @@ fn replace_string(
     start_line: Option<usize>,
     end_line: Option<usize>,
 ) -> Result<String> {
+    // Normalize CRLF -> LF so that the caller can write old_string with
+    // plain \n even when the file uses Windows \r\n line endings.
+    let had_crlf = text.contains("\r\n");
+    let normalized_text: String;
+    let normalized_old: String;
+    let normalized_new: String;
+    let (text_ref, old_ref, new_ref) = if had_crlf {
+        normalized_text = text.replace("\r\n", "\n");
+        normalized_old = old_string.replace("\r\n", "\n");
+        normalized_new = new_string.replace("\r\n", "\n");
+        (normalized_text.as_str(), normalized_old.as_str(), normalized_new.as_str())
+    } else {
+        (text, old_string, new_string)
+    };
+
     let (search_text, search_offset) = if let (Some(start), Some(end)) = (start_line, end_line) {
         if start == 0 || end == 0 || start > end {
             return Err(anyhow!("start_line must be <= end_line and >= 1"));
         }
-        let lines: Vec<&str> = text.lines().collect();
+        let lines: Vec<&str> = text_ref.lines().collect();
         if end > lines.len() {
             return Err(anyhow!(
                 "line range [{}, {}] exceeds file length ({})",
@@ -1497,11 +1517,11 @@ fn replace_string(
         let range_text = lines[start - 1..end].join("\n");
         (range_text, offset)
     } else {
-        (text.to_string(), 0)
+        (text_ref.to_string(), 0)
     };
 
     let matches: Vec<usize> = search_text
-        .match_indices(old_string)
+        .match_indices(old_ref)
         .map(|(idx, _)| idx)
         .collect();
     if matches.is_empty() {
@@ -1520,22 +1540,55 @@ fn replace_string(
         } else {
             "use replaceAll=true to replace all, or provide start_line/end_line to narrow the scope"
         };
+        let mut ctx = String::new();
+        let lines: Vec<&str> = text_ref.lines().collect();
+        for (i, &offset) in matches.iter().take(5).enumerate() {
+            let mut char_pos = 0;
+            let mut line_no: usize = 1;
+            for (idx, line) in lines.iter().enumerate() {
+                char_pos += line.len() + 1;
+                if char_pos > offset {
+                    line_no = idx + 1;
+                    break;
+                }
+            }
+            let start = line_no.saturating_sub(1);
+            let end = (line_no + 1).min(lines.len());
+            let snippet = lines[start..end].join("\n");
+            ctx.push_str(&format!(
+                "  match {} at line {}: ...{}\n",
+                i + 1,
+                line_no,
+                snippet
+            ));
+        }
+        if matches.len() > 5 {
+            ctx.push_str(&format!("  ... and {} more matches\n", matches.len() - 5));
+        }
         return Err(anyhow!(
-            "oldString found {} times; {}",
+            "oldString found {} times; {}\n{}",
             matches.len(),
-            hint
+            hint,
+            ctx,
         ));
     }
 
-    if start_line.is_some() {
-        let mut result = text.to_string();
+    let result = if start_line.is_some() {
+        let mut result = text_ref.to_string();
         result.replace_range(
             search_offset..search_offset + search_text.len(),
-            &search_text.replace(old_string, new_string),
+            &search_text.replace(old_ref, new_ref),
         );
-        Ok(result)
+        result
     } else {
-        Ok(text.replace(old_string, new_string))
+        text_ref.replace(old_ref, new_ref)
+    };
+
+    // Restore CRLF if the original file used it.
+    if had_crlf {
+        Ok(result.replace("\n", "\r\n"))
+    } else {
+        Ok(result)
     }
 }
 
@@ -1775,5 +1828,41 @@ mod tests {
     #[test]
     fn replace_string_line_range_exceeds_length() {
         assert!(replace_string("a\nb\n", "a", "X", false, Some(1), Some(10)).is_err());
+    }
+
+    #[test]
+    fn replace_string_crlf_file_with_lf_old_string() {
+        // Simulates the most common edit-tool issue: user writes oldString
+        // with \n but the file on disk uses \r\n line endings.
+        let input = "pub consumed: bool,\r\npub other: bool,\r\n";
+        let result = replace_string(input, "pub consumed: bool,\n", "pub consumed: bool,\npub extra: bool,\n", false, None, None).unwrap();
+        assert_eq!(result, "pub consumed: bool,\r\npub extra: bool,\r\npub other: bool,\r\n");
+    }
+
+    #[test]
+    fn replace_string_crlf_file_with_lf_old_string_start_line() {
+        let input = "// header\r\nline1\r\nline2\r\nline3\r\n";
+        let result = replace_string(input, "line2\n", "new\n", false, Some(2), Some(4)).unwrap();
+        assert_eq!(result, "// header\r\nline1\r\nnew\r\nline3\r\n");
+    }
+
+    #[test]
+    fn replace_string_multi_match_shows_context() {
+        let input = "a\nb\nc\na\nd\ne\n";
+        let err = replace_string(input, "a", "X", false, None, None).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(msg.contains("found 2 times"));
+        assert!(msg.contains("match 1 at line 1"));
+        assert!(msg.contains("match 2 at line 4"));
+    }
+
+    #[test]
+    fn replace_string_multi_match_shows_context_crlf() {
+        let input = "a\r\nb\r\nc\r\na\r\nd\r\n";
+        let err = replace_string(input, "a", "X", false, None, None).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(msg.contains("found 2 times"));
+        assert!(msg.contains("match 1 at line 1"));
+        assert!(msg.contains("match 2 at line 4"));
     }
 }

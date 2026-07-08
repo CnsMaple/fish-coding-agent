@@ -1180,20 +1180,15 @@ fn handle_msg(msg: AppMsg, app: &mut App) {
         }
         AppMsg::CompactionSummaryReady { start, end, summary } => {
             use crate::function::notifications::ToastLevel;
-            // The cancel-Esc path takes `inflight` out of `app`
-            // before this event arrives, so the cancel sender
-            // inside it is still alive. Drop it explicitly.
             app.inflight = None;
             app.cancel_state = CancelState::Idle;
             app.compacting = false;
             if let Some(idx) = app.session.apply_compaction(start, end, summary) {
                 app.notify(ToastLevel::Ok, "session compacted");
                 app.save_current_session();
-                // Stage the continue prompt; the main loop drains
-                // it on the next idle frame.
-                app.pending_post_compaction_prompt = Some(continue_prompt_text().to_string());
-                // Pin the cursor to the inserted summary so the
-                // user sees the new context first.
+                if app.pending_post_compaction_prompt.is_none() {
+                    app.pending_post_compaction_prompt = Some(continue_prompt_text().to_string());
+                }
                 let _ = idx;
             } else {
                 app.notify(ToastLevel::Warn, "compaction range was empty");
