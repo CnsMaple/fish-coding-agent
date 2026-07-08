@@ -14,7 +14,6 @@ pub mod picker_widget;
 
 /// Height of the standalone cwd line that sits below the input block.
 const CWD_HEIGHT: u16 = 1;
-
 pub fn render(f: &mut Frame, app: &mut App) {
     let area = f.area();
     // Layout: [session, (function panel)?, input, cwd]. The cwd is shown
@@ -22,9 +21,6 @@ pub fn render(f: &mut Frame, app: &mut App) {
     // project path on the input block's title.
     let input_height = input_height(app, area.height, area.width);
     let chunks = if app.function_visible {
-        // For PastePreview the panel height is exactly the content height
-        // (capped at 20%); for other tabs it grows with 20% but never below
-        // the minimum renderable height.
         let remaining = area.height.saturating_sub(input_height + CWD_HEIGHT);
         let pct_height = (remaining as f64 * 0.20) as u16;
         let panel_height = app.function.tabs.get(app.function.active)
@@ -55,11 +51,8 @@ pub fn render(f: &mut Frame, app: &mut App) {
     app.session.tool_preview_lines = app.config.tool_preview_lines;
     let session_frame_area = chunks[0];
     let area = session_content_area(session_frame_area);
-    app.session_area = Some(session_frame_area);
+    app.session_area = Some(area);
 
-    // Pre-warm the layout cache before any render call, so that
-    // `session::render::render` can read `cached_total_lines_for` cheaply
-    // and `build_lines_viewport` knows which messages intersect the viewport.
     let width_u16 = area.width;
     app.session.count_all_lines_with_width(width_u16 as usize);
 
@@ -84,39 +77,18 @@ pub fn render(f: &mut Frame, app: &mut App) {
         render_cwd(chunks[2], f.buffer_mut(), app);
     }
 
-    // Re-derive which line of the scroll window each screen row maps to
-    // and record the screen y of each thinking toggle for mouse hit-testing.
-    //
-    // This is now a SINGLE pass that:
-    //   1. Computes `total_lines` (delegating to the cached
-    //      `Session::count_all_lines_with_width`, which populates
-    //      per-block line counts on first miss and is O(N) thereafter).
-    //   2. Walks the session in lockstep with the cached counts to
-    //      derive `start`, `thinking_toggle_rows`, and `tool_toggle_rows`.
-    //   3. Renders the scrollbar.
-    //
-    // Before this refactor we did three full passes per frame and called
-    // `thinking_block_line_count` / `tool_block_line_count` (which
-    // invoke the full block renderer just to count lines). The caches
-    // turn those into O(1) reads.
     app.thinking_toggle_rows.clear();
     app.tool_toggle_rows.clear();
     let area = session_content_area(session_frame_area);
     let inner_h = area.height as usize;
-    let width_u16 = area.width;
 
-    // Compute total lines. This populates the per-block caches inside
-    // `Session` on the first call per invalidation.
-    let total_lines: usize = app.session.count_all_lines_with_width(width_u16 as usize) as usize;
+    let total_lines: usize = app
+        .session
+        .line_offsets
+        .last()
+        .copied()
+        .unwrap_or(0) as usize;
 
-    // Pin the viewport when the user has scrolled up. New streamed
-    // content height is absorbed into `scroll` so the rendered `start`
-    // (total - inner_h - scroll) stays constant — the user keeps
-    // reading the same lines instead of being gradually pulled back
-    // to the tail. Skipped at tail (`scroll == 0`) so we keep
-    // following the latest output. `last_rendered_total` is keyed by
-    // viewport width so a resize resets the comparison instead of
-    // spuriously subtracting across widths.
     app.session.pin_scroll_for_total(width_u16, total_lines as u32);
 
     let scroll = app
@@ -133,20 +105,36 @@ pub fn render(f: &mut Frame, app: &mut App) {
     let start = total_lines.saturating_sub(inner_h + scroll as usize);
     let end = start + inner_h;
 
-    // Walk the session in lockstep with the cached counts to record
-    // toggle rows for messages whose first visible row is on-screen.
-    // Re-uses the per-block cache populated above.
-    //
-    // `line_idx` mirrors `Session::compute_total_lines` /
-// `build_lines_viewport` so toggle rows land on the exact screen
-    // row of the corresponding block's first line. That means:
-    //   - no phantom role prefix line
-    //   - +1 for each thinking/tool block (the trailing blank)
-    //   - +1 leading gap if content precedes the first block
-    //   - +1 gap after each message (inter-message or bottom gap)
-    let mut line_idx: usize = 0;
-    for (msg_idx, m) in app.session.messages.iter().enumerate() {
-        // Thinking segments.
+    let first_visible = if app.session.messages.is_empty() || app.session.line_offsets.len() <= 1 {
+        0
+    } else {
+        match app.session.line_offsets[..app.session.messages.len()]
+            .binary_search(&(start as u32))
+        {
+            Ok(i) => i,
+            Err(i) => i.saturating_sub(1),
+        }
+    };
+
+    let mut line_idx: usize = app
+        .session
+        .line_offsets
+        .get(first_visible)
+        .copied()
+        .unwrap_or(0) as usize;
+
+    for (msg_idx, m) in app
+        .session
+        .messages
+        .iter()
+        .enumerate()
+        .skip(first_visible)
+    {
+        let msg_start = app.session.line_offsets[msg_idx] as usize;
+        if msg_start >= end {
+            break;
+        }
+
         let think_show = m.role == crate::session::Role::Assistant
             && crate::session::render::message_has_thinking(m)
             && app.config.thinking_display != crate::config::ThinkingDisplay::Hide;
@@ -168,23 +156,18 @@ pub fn render(f: &mut Frame, app: &mut App) {
                     seg.cached_line_count_collapsed.unwrap_or(0) as usize
                 };
                 line_idx += lines;
-                line_idx += 1; // trailing blank after the thinking block
+                line_idx += 1;
                 thinking_blocks += 1;
             }
         }
 
-        // Content (post-markdown rendered count, cached by width).
         let content_lines =
             crate::session::render::read_cached_content_count_at(m, width_u16) as usize;
         line_idx += content_lines;
 
-        // Tool result blocks.
         let mut tool_blocks: usize = 0;
         if app.config.tool_display != crate::config::ToolResultDisplay::Hide {
             for (tool_idx, t) in m.tool_results.iter().enumerate() {
-                // `t.running` no longer forces expansion — see the
-                // matching note in `build_lines_viewport`. The
-                // pending background colour alone signals "in flight".
                 let t_vis = t.name == "plan"
                     || match app.config.tool_display {
                         crate::config::ToolResultDisplay::Show => t.visible,
@@ -203,15 +186,11 @@ pub fn render(f: &mut Frame, app: &mut App) {
                     app.tool_toggle_rows.push((screen_y, msg_idx, tool_idx));
                 }
                 line_idx += lines;
-                line_idx += 1; // trailing blank after the tool block
+                line_idx += 1;
                 tool_blocks += 1;
             }
         }
 
-        // Leading gap: added before the first thinking/tool block
-        // only when content precedes it (offset > 0). When the
-        // message starts with a block, the message-level gap
-        // provides spacing.
         let first_offset = m.thinking_segments.iter().map(|s| s.offset)
             .chain(m.tool_results.iter().map(|t| t.content_offset))
             .min();
@@ -219,15 +198,6 @@ pub fn render(f: &mut Frame, app: &mut App) {
             line_idx += 1;
         }
 
-        // User messages get a background-filled padding line above
-        // and below the content (`build_message_lines` inserts one
-        // and pushes another). Assistant/system messages do not.
-        // When the message carries a `skill_ref`, also add the rows
-        // for the `[skill]` marker block (5-6 rows + 1 trailing
-        // blank) so the toggle hit-boxes line up with the rendered
-        // block — without this the screen y of the next block is
-        // shifted up by the undercounted rows and clicks land on
-        // the wrong message.
         if m.role == crate::session::Role::User {
             if let Some(skill_ref) = &m.skill_ref {
                 line_idx += crate::session::render::skill_block_line_count(
@@ -238,12 +208,9 @@ pub fn render(f: &mut Frame, app: &mut App) {
             line_idx += 2;
         }
 
-        // Gap after this message (inter-message or bottom gap).
         line_idx += 1;
     }
 
-    // Post-render: highlight the mouse-driven TUI selection and refresh
-    // the cached text that Ctrl+C will copy.
     if let Some(sel) = app.tui_selection {
         let buf = f.buffer_mut();
         apply_selection_style(buf, &sel);
@@ -252,9 +219,6 @@ pub fn render(f: &mut Frame, app: &mut App) {
         app.selected_text = None;
     }
 
-    // Move the terminal cursor so IME composition windows appear at the
-    // correct location. The function panel cursor (e.g. picker search input)
-    // takes priority over the main input cursor.
     if let Some((cx, cy)) = app.function_panel_cursor.or(app.input_cursor_screen) {
         f.set_cursor_position((cx, cy));
     }

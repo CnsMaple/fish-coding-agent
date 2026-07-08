@@ -2,6 +2,8 @@ use crate::theme::Theme;
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, Options, Tag};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
+use std::collections::HashMap;
+use std::sync::Mutex;
 use syntect::easy::HighlightLines;
 use syntect::highlighting::{FontStyle, Style as SyntectStyle, ThemeSet};
 use syntect::parsing::SyntaxSet;
@@ -481,10 +483,7 @@ fn highlight_code_lines(lines: &[&str], lang: Option<&str>) -> Vec<TableCell> {
     };
 
     let ps = syntax_set();
-    let Some(syntax) = ps
-        .find_syntax_by_token(lang)
-        .or_else(|| find_syntax(ps, lang))
-    else {
+    let Some(syntax) = find_syntax_cached(lang) else {
         return plain_code_lines(lines);
     };
     let Some(theme) = theme_set().themes.get("InspiredGitHub") else {
@@ -509,10 +508,7 @@ fn highlight_code_lines(lines: &[&str], lang: Option<&str>) -> Vec<TableCell> {
 /// Falls back to a plain span if the language is unknown.
 pub(crate) fn highlight_line(line: &str, lang: &str) -> Vec<Span<'static>> {
     let ps = syntax_set();
-    let Some(syntax) = ps
-        .find_syntax_by_token(lang)
-        .or_else(|| find_syntax(ps, lang))
-    else {
+    let Some(syntax) = find_syntax_cached(lang) else {
         return vec![Span::raw(line.to_string())];
     };
     let Some(theme) = theme_set().themes.get("InspiredGitHub") else {
@@ -565,6 +561,29 @@ fn find_syntax<'a>(ps: &'a SyntaxSet, lang: &str) -> Option<&'a syntect::parsing
         let scope = syntax.scope.to_string().to_ascii_lowercase();
         scope.rsplit('.').next() == Some(lang.as_str())
     })
+}
+
+/// Cached syntax lookup. `find_syntax` does a linear scan over all
+/// loaded syntaxes (~hundreds). Cache the result per language so
+/// repeated `highlight_line` calls (e.g. per line in a diff block)
+/// only pay the lookup cost once.
+fn find_syntax_cached(lang: &str) -> Option<&'static syntect::parsing::SyntaxReference> {
+    static CACHE: std::sync::OnceLock<Mutex<HashMap<String, Option<&'static syntect::parsing::SyntaxReference>>>> =
+        std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    {
+        let cache = cache.lock().unwrap();
+        if let Some(entry) = cache.get(lang) {
+            return *entry;
+        }
+    }
+    let ps = syntax_set();
+    let result = ps.find_syntax_by_token(lang).or_else(|| find_syntax(ps, lang));
+    {
+        let mut cache = cache.lock().unwrap();
+        cache.insert(lang.to_string(), result);
+    }
+    result
 }
 
 fn syntect_style(style: SyntectStyle) -> Style {

@@ -7,6 +7,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::widgets::Widget;
+use std::sync::Arc;
 use unicode_width::UnicodeWidthStr;
 
 /// LRU cache entry for a fully rendered message. Validity is checked
@@ -22,7 +23,10 @@ pub struct CachedMessageLines {
     /// that survived a missed invalidation: a length mismatch proves
     /// the slot now belongs to a different message.
     pub content_len: usize,
-    pub lines: Vec<Line<'static>>,
+    /// Fully rendered lines, shared via Arc to avoid cloning on
+    /// cache hit. The viewport renderer slices the Arc instead of
+    /// copying the underlying Vec.
+    pub lines: Arc<Vec<Line<'static>>>,
 }
 
 pub fn render(
@@ -190,30 +194,42 @@ pub const THINKING_END: &str = "[end thinking]";
 /// cached via `session.message_lines_cache` (keyed by `msg_idx`).
 /// When the cached entry matches `m.content_version` and `width`, it
 /// is reused without re-rendering.
-pub fn build_message_lines(session: &Session, msg_idx: usize, width: usize) -> Vec<Line<'static>> {
+pub fn build_message_lines(
+    session: &Session,
+    msg_idx: usize,
+    width: usize,
+) -> Arc<Vec<Line<'static>>> {
     if msg_idx >= session.messages.len() {
-        return vec![];
+        return Arc::new(vec![]);
     }
     let m = &session.messages[msg_idx];
 
-    // Quick path: LRU cache hit. Both streaming and non-streaming
-    // messages use the same cache. Streaming messages are keyed by
-    // content_version + display_cursor so that the progressive reveal
-    // (tick handler) correctly invalidates the cache.
-    //
-    // `content_len` is a cheap extra guard: if a stale entry survived
-    // a `truncate` / `remove` / `clear` (e.g. because the caller
-    // forgot to invalidate), a length mismatch will force a rebuild
-    // instead of returning the wrong render.
     {
         let lru = session.message_lines_cache.lock().unwrap();
         if let Some(cached) = lru.get(&msg_idx) {
-            if cached.content_version == m.content_version
-                && cached.width == width as u16
-                && cached.display_cursor == m.display_cursor
-                && cached.content_len == m.content.len()
-            {
-                return cached.lines.clone();
+            // Streaming messages: key by content_len instead of
+            // content_version (which changes on every write).
+            // display_cursor is always content.len() during streaming
+            // (see append_to_last), so the render only changes when
+            // content actually grows. This avoids re-rendering the
+            // entire message on every frame when no new data arrived.
+            let valid = if m.streaming {
+                // For streaming messages, key by content_len + display_cursor
+                // instead of content_version (which changes on every write).
+                // display_cursor is always content.len() during streaming
+                // (see append_to_last), so the cache only invalidates when
+                // content actually grows, avoiding re-render on every frame.
+                cached.content_len == m.content.len()
+                    && cached.display_cursor == m.display_cursor
+                    && cached.width == width as u16
+            } else {
+                cached.content_version == m.content_version
+                    && cached.width == width as u16
+                    && cached.display_cursor == m.display_cursor
+                    && cached.content_len == m.content.len()
+            };
+            if valid {
+                return Arc::clone(&cached.lines);
             }
         }
     }
@@ -226,7 +242,7 @@ pub fn build_message_lines(session: &Session, msg_idx: usize, width: usize) -> V
     // tool-result pipeline.
     if m.content.trim_start().starts_with("---ask---") {
         let rendered = render_ask_snapshot_message(&m.content, width, m.streaming, m.display_cursor);
-        return rendered;
+        return Arc::new(rendered);
     }
 
     let mut msg_lines: Vec<Line<'static>> = Vec::new();
@@ -461,6 +477,7 @@ pub fn build_message_lines(session: &Session, msg_idx: usize, width: usize) -> V
 
     {
         let mut lru = session.message_lines_cache.lock().unwrap();
+        let lines = Arc::new(msg_lines);
         lru.put(
             msg_idx,
             CachedMessageLines {
@@ -468,12 +485,11 @@ pub fn build_message_lines(session: &Session, msg_idx: usize, width: usize) -> V
                 width: width as u16,
                 display_cursor: m.display_cursor,
                 content_len: m.content.len(),
-                lines: msg_lines.clone(),
+                lines: Arc::clone(&lines),
             },
         );
+        lines
     }
-
-    msg_lines
 }
 
 /// Count the number of blank-line gaps that `ensure_gap_before_block`
@@ -525,99 +541,46 @@ fn build_lines_viewport(
     end_line: u32,
 ) -> Vec<Line<'static>> {
     let mut out: Vec<Line<'static>> = Vec::new();
-    let mut global_line: u32 = 0;
+    if session.messages.is_empty() || session.line_offsets.len() <= 1 {
+        return out;
+    }
 
     let msg_end_line = end_line;
 
-    for msg_idx in 0..session.messages.len() {
-        let m = &session.messages[msg_idx];
+    // Binary search: find the first message that intersects [start_line, end_line).
+    // line_offsets[i] = start line of message i; line_offsets[N] = total lines.
+    let first_visible = match session.line_offsets[..session.messages.len()]
+        .binary_search(&start_line)
+    {
+        Ok(i) => i,
+        Err(i) => i.saturating_sub(1),
+    };
 
-        // Compute total rendered line count for this message, using the
-        // per-block caches populated by `Session::count_all_lines_with_width`.
-        // Must match the structure produced by `build_message_lines` exactly:
-        //   content (post-markdown) + (thinking rows + 1 trailing blank per
-        //   segment) + (tool rows + 1 trailing blank per block) + 1 leading
-        //   gap if a block precedes empty content
-        // (No final spacer — inter-message/bottom gaps are managed here.)
-        let content_lines = read_cached_content_count_at(m, width as u16);
-        let mut msg_total: u32 = content_lines;
-
-        // Attachment blocks.
-        if !m.attachments.is_empty() {
-            msg_total += attachment_block_line_count(&m.attachments);
+    for msg_idx in first_visible..session.messages.len() {
+        let msg_start = session.line_offsets[msg_idx];
+        if msg_start >= msg_end_line {
+            break;
         }
 
-        let segments = get_thinking_segments(m);
-        if m.role == super::Role::Assistant
-            && message_has_thinking(m)
-            && session.display != crate::config::ThinkingDisplay::Hide
-        {
-            let expanded = (session.display == crate::config::ThinkingDisplay::Show
-                && m.thinking_visible)
-                || (session.display == crate::config::ThinkingDisplay::ShowWhileStreaming
-                    && (m.streaming || m.thinking_visible));
-            for seg in &segments {
-                let lines = seg.cached_line_count(expanded).unwrap_or_else(|| {
-                    thinking_block_line_count(
-                        &seg.content,
-                        expanded,
-                        session.tool_preview_lines,
-                        width,
-                    ) as u32
-                });
-                msg_total += lines;
-                msg_total += 1; // trailing blank
-            }
-        }
-        if session.tool_display != crate::config::ToolResultDisplay::Hide {
-            for t in &m.tool_results {
-                let t_vis = t.name == "plan"
-                    || match session.tool_display {
-                        crate::config::ToolResultDisplay::Show => t.visible,
-                        crate::config::ToolResultDisplay::ShowWhileStreaming => {
-                            m.streaming || t.visible
-                        }
-                        _ => false,
-                    };
-                let lines = t.cached_line_count(t_vis).unwrap_or_else(|| {
-                    tool_block_line_count(t, t_vis, session.tool_preview_lines, width) as u32
-                });
-                msg_total += lines;
-                msg_total += 1; // trailing blank
-            }
-        }
-        let gap_count = count_block_gaps(&segments, &m.tool_results);
-        msg_total += gap_count;
-        if m.role == super::Role::User {
-            if let Some(skill_ref) = &m.skill_ref {
-                msg_total += skill_block_line_count(skill_ref, width);
-            }
-            msg_total += 2; // user-bg padding above and below
-        }
+        let msg_end = session.line_offsets[msg_idx + 1]; // includes gap
 
-        let msg_end = global_line + msg_total;
-
-        // Does this message intersect the viewport?
-        if msg_end > start_line && global_line < msg_end_line {
+        // Content spans [msg_start, msg_end - 1), gap is at msg_end - 1.
+        if msg_end - 1 > start_line && msg_start < msg_end_line {
             let rendered = build_message_lines(session, msg_idx, width);
-            let local_start = start_line.saturating_sub(global_line) as usize;
+            let local_start = start_line.saturating_sub(msg_start) as usize;
             let local_end = msg_end_line
-                .saturating_sub(global_line)
-                .min(rendered.len() as u32) as usize;
+                .saturating_sub(msg_start)
+                .min((msg_end - 1 - msg_start) as u32) as usize;
+            let local_end = local_end.min(rendered.len());
             if local_start < local_end {
                 out.extend(rendered[local_start..local_end].iter().cloned());
             }
         }
 
-        // Gap after this message (inter-message or bottom gap).
-        global_line = msg_end;
-        if global_line >= start_line && global_line < msg_end_line {
+        // Gap line.
+        let gap_line = msg_end - 1;
+        if gap_line >= start_line && gap_line < msg_end_line {
             out.push(Line::from(""));
-        }
-        global_line += 1;
-
-        if global_line >= msg_end_line {
-            break;
         }
     }
 
@@ -637,7 +600,7 @@ pub fn build_lines(
             out.push(Line::from("")); // inter-message gap
         }
         let rendered = build_message_lines(session, msg_idx, width);
-        out.extend(rendered);
+        out.extend(rendered.iter().cloned());
     }
     if !out.is_empty() {
         out.push(Line::from("")); // bottom gap
@@ -2192,7 +2155,7 @@ mod tool_block_count_tests {
     }
 
     fn lines_for_msg(s: &Session, msg_idx: usize, width: usize) -> Vec<Line<'static>> {
-        build_message_lines(s, msg_idx, width)
+        build_message_lines(s, msg_idx, width).as_ref().clone()
     }
 
     /// The exact total returned by `compute_total_lines` must equal

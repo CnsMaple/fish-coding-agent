@@ -1879,6 +1879,7 @@ impl App {
                     cached_total_lines: None,
                     last_rendered_total: None,
                     expand_new_tool_results: false,
+                    line_offsets: Vec::new(),
                 };
                 self.image_blocks.clear();
                 self.session.invalidate_layout_cache();
@@ -1981,6 +1982,7 @@ impl App {
                     cached_total_lines: None,
                     last_rendered_total: None,
                     expand_new_tool_results: false,
+                    line_offsets: Vec::new(),
                 };
                 if let Some(ref p) = stored.provider {
                     self.status.set_provider_name(p);

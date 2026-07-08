@@ -309,6 +309,14 @@ pub struct Session {
     /// during the same streaming turn inherit this state.
     #[serde(skip)]
     pub expand_new_tool_results: bool,
+    /// Prefix-sum of message line counts. `line_offsets[i]` is the
+    /// global line index where message `i` starts. `line_offsets[N]`
+    /// (where N = messages.len()) is the total rendered line count.
+    /// Populated by `compute_total_lines` and consumed by
+    /// `build_lines_viewport` and the toggle-row walk for O(log N)
+    /// viewport lookups.
+    #[serde(skip)]
+    pub line_offsets: Vec<u32>,
 }
 
 impl Default for Session {
@@ -330,6 +338,7 @@ impl Default for Session {
             cached_total_lines: None,
             last_rendered_total: None,
             expand_new_tool_results: false,
+            line_offsets: Vec::new(),
         }
     }
 }
@@ -342,6 +351,7 @@ impl Session {
     /// `clear`, resume/fork) MUST call this.
     pub fn invalidate_layout_cache(&mut self) {
         self.cached_total_lines = None;
+        self.line_offsets.clear();
     }
 
     /// Drop any per-message render-LRU entries whose index is
@@ -851,24 +861,19 @@ impl Session {
     /// write_file diff was the most common casualty).
     fn compute_total_lines(&mut self, width: u16) -> u32 {
         let mut n: u32 = 0;
+        let mut offsets = Vec::with_capacity(self.messages.len() + 1);
+        offsets.push(0); // line_offsets[0] = 0
         for m in &mut self.messages {
             // Content lines (post-markdown rendered count, cached by width).
-            // `m.line_count` is the raw newline count and would undercount
-            // anything that expands during markdown rendering (tables, fenced
-            // code blocks, long lines that wrap), which made the viewport
-            // scroll position land above the true bottom of such messages.
             let content_lines = render_cached_content_lines(m, width);
             n += content_lines;
 
-            // Attachment blocks: each contributes its rendered dim rows
-            // plus the trailing blank that `build_message_lines` pushes.
+            // Attachment blocks.
             if !m.attachments.is_empty() {
                 n += crate::session::render::attachment_block_line_count(&m.attachments);
             }
 
-            // Thinking blocks: each contributes its rendered line count
-            // plus the trailing blank that `build_message_lines` pushes
-            // immediately after it.
+            // Thinking blocks.
             let show_thinking = m.role == Role::Assistant
                 && crate::session::render::message_has_thinking(m)
                 && self.display != crate::config::ThinkingDisplay::Hide;
@@ -905,12 +910,9 @@ impl Session {
                 }
             }
 
-            // Tool result blocks: each contributes its rendered line
-            // count plus the trailing blank.
+            // Tool result blocks.
             if self.tool_display != crate::config::ToolResultDisplay::Hide {
                 for t in m.tool_results.iter_mut() {
-                    // `t.running` no longer forces expansion — see
-                    // the matching note in `build_lines_viewport`.
                     let t_vis = t.name == "plan"
                         || match self.tool_display {
                             crate::config::ToolResultDisplay::Show => t.visible,
@@ -946,25 +948,13 @@ impl Session {
                 }
             }
 
-            // Gaps before thinking/tool blocks: `ensure_gap_before_block`
-            // inserts a blank line before the first block when content
-            // precedes it, and before each subsequent block whose offset
-            // differs from the previous block's offset.
+            // Gaps before thinking/tool blocks.
             let segments = crate::session::render::get_thinking_segments(m);
             let gap_count = crate::session::render::count_block_gaps(&segments, &m.tool_results);
             n += gap_count;
 
-            // User messages get a background-filled padding line
-            // above and below the content so the user-bg block
-            // visually wraps the message (`build_message_lines`
-            // inserts one and pushes another after the content
-            // section). Assistant/system messages do not.
+            // User messages: background padding + skill block.
             if m.role == Role::User {
-                // Count the `[skill]` marker block rows when present
-                // (5 rows + 1 trailing blank, or 6 + 1 with non-empty
-                // args) so the viewport math matches the actual
-                // rendered output. Without this, the bottom of long
-                // skill bodies was hidden behind the input area.
                 if let Some(skill_ref) = &m.skill_ref {
                     n += crate::session::render::skill_block_line_count(
                         skill_ref,
@@ -974,13 +964,15 @@ impl Session {
                 n += 2;
             }
 
-            }
-        // Inter-message gaps + bottom gap (one per message).
-        // Each message gets a gap after it; the last message's gap
-        // serves as the bottom gap between session and input panel.
-        if !self.messages.is_empty() {
-            n += self.messages.len() as u32;
+            // Inter-message gap (also serves as bottom gap for last message).
+            n += 1;
+            offsets.push(n);
         }
+        // If no messages, n == 0 and offsets == [0].
+        if self.messages.is_empty() {
+            offsets.push(0);
+        }
+        self.line_offsets = offsets;
         n
     }
 
