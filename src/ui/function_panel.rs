@@ -1392,7 +1392,7 @@ let prefix = if editing || selected { ">" } else { " " };
         ))
     } else {
         Line::from(Span::styled(
-            " j/k:nav | Alt+I:add | Alt+Shift+I:add above | Del:delete | Enter:toggle | Alt+E:edit | Esc:close ",
+            " ↑/↓:nav | Alt+I:add | Alt+Shift+I:add above | Del:delete | Enter:toggle | Alt+E:edit | Alt+C:clear | Esc:close ",
             Theme::dim(),
         ))
     };

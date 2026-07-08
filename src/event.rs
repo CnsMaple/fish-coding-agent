@@ -3158,6 +3158,12 @@ async fn handle_todo_key(
                         app.session.invalidate_layout_cache();
                         true
                     }
+                    KeyCode::Char('c') | KeyCode::Char('C') => {
+                        app.session.todo_items.clear();
+                        state.cursor = 0;
+                        app.session.invalidate_layout_cache();
+                        true
+                    }
                     _ => false,
                 }
             } else {
