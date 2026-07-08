@@ -3,6 +3,8 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
+use chrono::Datelike;
+use glob::Pattern;
 use regex::Regex;
 use serde::Deserialize;
 use serde_json::json;
@@ -56,6 +58,38 @@ pub fn anthropic_tool_specs() -> Vec<serde_json::Value> {
         .collect();
     out.extend(mcp_specs_for_anthropic());
     out
+}
+
+/// Return tool specs filtered for a sub-agent type. Sub-agents may
+/// not have access to all tools (e.g. `explore` is read-only).
+pub fn openai_tool_specs_for_sub_agent(
+    sub_agent: crate::permission::SubAgent,
+) -> Vec<serde_json::Value> {
+    openai_tool_specs()
+        .into_iter()
+        .filter(|spec| {
+            let name = spec["function"]["name"].as_str().unwrap_or("");
+            matches!(
+                crate::permission::check_sub_agent(sub_agent, name),
+                crate::permission::Action::Allow
+            )
+        })
+        .collect()
+}
+
+pub fn anthropic_tool_specs_for_sub_agent(
+    sub_agent: crate::permission::SubAgent,
+) -> Vec<serde_json::Value> {
+    anthropic_tool_specs()
+        .into_iter()
+        .filter(|spec| {
+            let name = spec["name"].as_str().unwrap_or("");
+            matches!(
+                crate::permission::check_sub_agent(sub_agent, name),
+                crate::permission::Action::Allow
+            )
+        })
+        .collect()
 }
 
 /// Read the current MCP tool list and convert it to the OpenAI
@@ -263,6 +297,85 @@ fn tool_defs() -> Vec<ToolDef> {
                 "additionalProperties": false
             }),
         },
+        ToolDef {
+            name: "glob",
+            description: "Fast file pattern matching tool. Supports glob patterns like \"**/*.rs\" or \"src/**/*.ts\". Returns matching file paths sorted by modification time. Use this tool when you need to find files by name patterns. It is always better to speculatively perform multiple searches as a batch that are potentially useful.".to_string(),
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "pattern": { "type": "string", "description": "The glob pattern to match files against." },
+                    "path": { "type": "string", "description": "Optional workspace-relative directory to search in. Defaults to current workspace." }
+                },
+                "required": ["pattern"],
+                "additionalProperties": false
+            }),
+        },
+        ToolDef {
+            name: "write",
+            description: "Writes a file to the local filesystem.\n\nUsage:\n- This tool will overwrite the existing file if there is one at the provided path.\n- If this is an existing file, you MUST use the Read tool first to read the file's contents.\n- ALWAYS prefer editing existing files in the codebase. NEVER write new files unless explicitly required.\n- NEVER proactively create documentation files (*.md) or README files. Only create documentation files if explicitly requested by the User.\n- Only use emojis if the user explicitly requests it. Avoid writing emojis to files unless asked.".to_string(),
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "filePath": { "type": "string", "description": "The absolute path to the file to write (must be absolute, not relative)." },
+                    "content": { "type": "string", "description": "The content to write to the file." }
+                },
+                "required": ["filePath", "content"],
+                "additionalProperties": false
+            }),
+        },
+        ToolDef {
+            name: "skill",
+            description: "Load a specialized skill when the task at hand matches one of the skills listed in the system prompt.\n\nUse this tool to inject the skill's instructions and resources into current conversation. The output may contain detailed workflow guidance as well as references to scripts, files, etc in the same directory as the skill.\n\nThe skill name must match one of the skills listed in your system prompt.".to_string(),
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "The name of the skill from available_skills" }
+                },
+                "required": ["name"],
+                "additionalProperties": false
+            }),
+        },
+        ToolDef {
+            name: "webfetch",
+            description: "Fetches content from a specified URL and returns it in the requested format.\n\nUsage notes:\n- The URL must be a fully-formed valid URL\n- HTTP URLs will be automatically upgraded to HTTPS\n- Format options: \"markdown\" (default), \"text\", or \"html\"\n- This tool is read-only and does not modify any files\n- Results may be summarized if the content is very large".to_string(),
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "url": { "type": "string", "description": "The URL to fetch content from" },
+                    "format": { "type": "string", "enum": ["text", "markdown", "html"], "description": "The format to return the content in (text, markdown, or html). Defaults to markdown." }
+                },
+                "required": ["url"],
+                "additionalProperties": false
+            }),
+        },
+        ToolDef {
+            name: "websearch",
+            description: "Search the web for information. Provides up-to-date information for current events and recent data. Use this tool for accessing information beyond knowledge cutoff.\n\nUsage notes:\n- Supports configurable result counts\n- Returns the content from the most relevant websites\n- Searches are performed automatically within a single API call".to_string(),
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "The search query" },
+                    "numResults": { "type": "integer", "minimum": 1, "maximum": 20, "description": "Number of search results to return (default 8)" }
+                },
+                "required": ["query"],
+                "additionalProperties": false
+            }),
+        },
+        ToolDef {
+            name: "sub_agent",
+            description: "Launch a new agent to handle complex, multistep tasks autonomously.\n\nWhen using the sub_agent tool, you must specify a subagent_type parameter to select which agent type to use.\n\nWhen NOT to use the sub_agent tool:\n- If you want to read a specific file path, use the Read or Glob tool instead\n- If you are searching for a specific class definition, use the Grep tool instead\n- If you are searching for code within a specific file or set of 2-3 files, use the Read tool instead\n- If no available agent is a good fit for the task, use other tools directly\n\nUsage notes:\n1. Launch multiple agents concurrently whenever possible\n2. Once you have delegated work to an agent, do not duplicate that work yourself\n3. When the agent is done, it will return a single message back to you\n4. Each agent invocation starts with a fresh context\n5. The agent's outputs should generally be trusted\n6. Clearly tell the agent whether you expect it to write code or just to do research\n7. If the agent description mentions that it should be used proactively, use your best judgement\n\nAvailable agent types:\n- general: General-purpose agent for complex questions and multi-step tasks. Has full tool access.\n- explore: Fast agent specialized for exploring codebases. Use this when you need to quickly find files by patterns, search code for keywords, or answer questions about the codebase. When calling this agent, specify the desired thoroughness level: \"quick\" for basic searches, \"medium\" for moderate exploration, or \"very thorough\" for comprehensive analysis.".to_string(),
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "description": { "type": "string", "description": "A short (3-5 words) description of the task" },
+                    "prompt": { "type": "string", "description": "The task for the agent to perform" },
+                    "subagent_type": { "type": "string", "enum": ["general", "explore"], "description": "The type of specialized agent to use for this task" },
+                    "task_id": { "type": "string", "description": "Optional: resume a previous sub-agent session" }
+                },
+                "required": ["description", "prompt", "subagent_type"],
+                "additionalProperties": false
+            }),
+        },
     ]
 }
 
@@ -294,6 +407,12 @@ t::WRITE_FILE => write_file(args, cwd).await,
         t::PLAN => plan_review(args).await,
         t::ASK => ask_question(args).await,
         t::TODO_WRITE => todowrite(args).await,
+        t::GLOB => glob_search(args, cwd).await,
+        t::WRITE => write_new_file(args, cwd).await,
+        t::SKILL => skill_load(args).await,
+        t::WEB_FETCH => webfetch(args).await,
+        t::WEB_SEARCH => websearch(args).await,
+        t::SUB_AGENT => Err(anyhow!("sub_agent must be executed from within the chat stream loop")),
         _ => Err(anyhow!("unknown tool: {name}")),
     };
 
@@ -626,6 +745,48 @@ struct ListArgs {
     path: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct GlobArgs {
+    pattern: String,
+    path: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct WriteNewArgs {
+    #[serde(rename = "filePath")]
+    file_path: String,
+    content: String,
+}
+
+#[derive(Deserialize)]
+struct SkillArgs {
+    name: String,
+}
+
+#[derive(Deserialize)]
+struct WebFetchArgs {
+    url: String,
+    format: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct WebSearchArgs {
+    query: String,
+    #[serde(rename = "numResults")]
+    num_results: Option<usize>,
+}
+
+#[allow(dead_code)]
+#[derive(Deserialize, Debug)]
+struct SubAgentArgs {
+    description: String,
+    prompt: String,
+    #[serde(rename = "subagent_type")]
+    subagent_type: String,
+    #[serde(rename = "task_id")]
+    task_id: Option<String>,
+}
+
 async fn read_file(args: &str, cwd: &Path) -> Result<String> {
     let args: ReadArgs = serde_json::from_str(args)?;
     let path = resolve_workspace_path(cwd, &args.path)?;
@@ -874,6 +1035,231 @@ async fn todowrite(args: &str) -> Result<String> {
         "summary": format!("{} pending, {} in progress, {} completed", pending, in_progress, completed),
     })
     .to_string())
+}
+
+async fn glob_search(args: &str, cwd: &Path) -> Result<String> {
+    let args: GlobArgs = serde_json::from_str(args)?;
+    if args.pattern.trim().is_empty() {
+        return Err(anyhow!("pattern is empty"));
+    }
+    let rel = args.path.unwrap_or_else(|| ".".to_string());
+    let root = resolve_workspace_path(cwd, &rel)?;
+    if !root.is_dir() {
+        return Err(anyhow!("glob path must be a directory: {}", rel));
+    }
+    let pattern = Pattern::new(&args.pattern).map_err(|e| anyhow!("invalid glob pattern: {e}"))?;
+    let mut matches: Vec<(String, std::time::SystemTime)> = Vec::new();
+    collect_glob_matches(&root, &root, &pattern, &mut matches, 100)?;
+    matches.sort_by(|a, b| b.1.cmp(&a.1));
+    let mut out = matches.into_iter().map(|(p, _)| p).collect::<Vec<_>>();
+    if out.is_empty() {
+        return Ok("No files found".to_string());
+    }
+    if out.len() >= 100 {
+        out.push("[results truncated at 100 — narrow your search]".to_string());
+    }
+    Ok(out.join("\n"))
+}
+
+fn collect_glob_matches(
+    search_root: &Path,
+    current: &Path,
+    pattern: &Pattern,
+    out: &mut Vec<(String, std::time::SystemTime)>,
+    limit: usize,
+) -> Result<()> {
+    if out.len() >= limit {
+        return Ok(());
+    }
+    if current.is_dir() {
+        let dir = std::fs::read_dir(current)?;
+        for entry in dir {
+            let entry = entry?;
+            let p = entry.path();
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name == ".git" || name == "target" || name == "node_modules" {
+                continue;
+            }
+            let rel = p.strip_prefix(search_root).unwrap_or(&p).display().to_string();
+            let rel_path = Path::new(&rel);
+            if p.is_dir() {
+                collect_glob_matches(search_root, &p, pattern, out, limit)?;
+            } else if pattern.matches_path(rel_path) {
+                if let Ok(meta) = p.metadata() {
+                    out.push((rel, meta.modified().unwrap_or(std::time::UNIX_EPOCH)));
+                } else {
+                    out.push((rel, std::time::UNIX_EPOCH));
+                }
+                if out.len() >= limit {
+                    return Ok(());
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn write_new_file(args: &str, cwd: &Path) -> Result<String> {
+    let args: WriteNewArgs = serde_json::from_str(args)?;
+    if args.file_path.trim().is_empty() {
+        return Err(anyhow!("filePath is empty"));
+    }
+    let path = resolve_workspace_path(cwd, &args.file_path)?;
+    let original = match tokio::fs::read_to_string(&path).await {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(err) => return Err(err.into()),
+    };
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    tokio::fs::write(&path, &args.content).await?;
+    Ok(write_diff_result(&args.file_path, &original, &args.content))
+}
+
+async fn skill_load(args: &str) -> Result<String> {
+    let args: SkillArgs = serde_json::from_str(args)?;
+    let name = args.name.trim();
+    if name.is_empty() {
+        return Err(anyhow!("skill name is empty"));
+    }
+    let Some(skill) = crate::skill::find(name) else {
+        return Err(anyhow!(
+            "skill not found: `{name}`. Available skills: {}",
+            crate::skill::list_names().join(", ")
+        ));
+    };
+    let skill_dir = crate::skill::skill_path(name)
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+    let mut file_list = Vec::new();
+    if let Some(ref dir) = skill_dir {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            let mut files: Vec<String> = entries
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
+                .filter(|e| e.file_name().to_string_lossy() != "SKILL.md")
+                .map(|e| e.path().display().to_string())
+                .take(10)
+                .collect();
+            files.sort();
+            file_list = files;
+        }
+    }
+    let base_dir = skill_dir
+        .as_ref()
+        .map(|d| d.display().to_string())
+        .unwrap_or_else(|| "(unknown)".to_string());
+    let mut out = format!(
+        "<skill_content name=\"{name}\">\n# Skill: {name}\n\n{content}\n\nBase directory for this skill: {base}\nRelative paths in this skill are relative to this base directory.\nNote: file list is sampled.\n",
+        name = skill.name,
+        content = skill.template,
+        base = base_dir,
+    );
+    if !file_list.is_empty() {
+        out.push_str("<skill_files>\n");
+        for f in &file_list {
+            out.push_str(&format!("<file>{f}</file>\n"));
+        }
+        out.push_str("</skill_files>\n");
+    }
+    out.push_str("</skill_content>");
+    Ok(out)
+}
+
+async fn webfetch(args: &str) -> Result<String> {
+    let args: WebFetchArgs = serde_json::from_str(args)?;
+    let url = args.url.trim();
+    if url.is_empty() {
+        return Err(anyhow!("url is empty"));
+    }
+    let url = if url.starts_with("http://") {
+        url.replace("http://", "https://")
+    } else if !url.starts_with("https://") {
+        return Err(anyhow!("URL must start with http:// or https://"));
+    } else {
+        url.to_string()
+    };
+    let format = args.format.as_deref().unwrap_or("markdown");
+    if !["text", "markdown", "html"].contains(&format) {
+        return Err(anyhow!("format must be text, markdown, or html"));
+    }
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36")
+        .build()?;
+    let resp = client.get(&url).send().await?;
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(anyhow!("HTTP {status}"));
+    }
+    let body = resp.text().await?;
+    if body.len() > 5 * 1024 * 1024 {
+        return Err(anyhow!("Response too large (exceeds 5MB limit)"));
+    }
+    match format {
+        "html" => Ok(body),
+        "text" => Ok(html_to_text(&body)),
+        _ => Ok(html_to_markdown(&body)),
+    }
+}
+
+fn html_to_text(html: &str) -> String {
+    html2text::from_read(html.as_bytes(), 80)
+}
+
+fn html_to_markdown(html: &str) -> String {
+    let text = html2text::from_read(html.as_bytes(), 0);
+    if text == html || text.trim().is_empty() {
+        return html.to_string();
+    }
+    text
+}
+
+async fn websearch(args: &str) -> Result<String> {
+    let args: WebSearchArgs = serde_json::from_str(args)?;
+    let query = args.query.trim();
+    if query.is_empty() {
+        return Err(anyhow!("query is empty"));
+    }
+    let num_results = args.num_results.unwrap_or(8).clamp(1, 20);
+    let year = chrono::Utc::now().year();
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(25))
+        .build()?;
+    let body = serde_json::json!({
+        "method": "web_search_exa",
+        "params": {
+            "query": query,
+            "numResults": num_results,
+            "type": "auto",
+            "contextMaxCharacters": 10000
+        }
+    });
+    let resp = client
+        .post("https://mcp.exa.ai/api")
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .await?;
+    let status = resp.status();
+    let body = resp.text().await?;
+    if !status.is_success() {
+        return Err(anyhow!("search failed (HTTP {status}): {body}"));
+    }
+    let v: serde_json::Value = serde_json::from_str(&body)?;
+    let text = v
+        .get("result")
+        .and_then(|r| r.get("content"))
+        .and_then(|c| c.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|c| c.get("text"))
+        .and_then(|t| t.as_str())
+        .unwrap_or(&body);
+    if text.trim().is_empty() {
+        return Ok("No search results found. Please try a different query.".to_string());
+    }
+    Ok(format!("Search results for \"{query}\" ({year}):\n\n{text}"))
 }
 
 async fn run_command(args: &str, cwd: &Path) -> Result<String> {
@@ -1164,7 +1550,14 @@ pub fn is_valid_tool(name: &str) -> bool {
             | "list"
             | "plan"
             | "ask"
+            | "todowrite"
             | "command"
+            | "glob"
+            | "write"
+            | "skill"
+            | "webfetch"
+            | "websearch"
+            | "sub_agent"
     )
 }
 

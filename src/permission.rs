@@ -21,10 +21,50 @@ pub mod tool {
     pub const PLAN: &str = "plan";
     pub const ASK: &str = "ask";
     pub const TODO_WRITE: &str = "todowrite";
+    pub const GLOB: &str = "glob";
+    pub const WRITE: &str = "write";
+    pub const SKILL: &str = "skill";
+    pub const WEB_FETCH: &str = "webfetch";
+    pub const WEB_SEARCH: &str = "websearch";
+    pub const SUB_AGENT: &str = "sub_agent";
 }
 
-/// `build` / `yolo` agent: every tool is allowed. Used in normal
-/// (non-plan) mode where the user wants maximum autonomy.
+/// Sub-agent types that can be spawned by the `sub_agent` tool.
+/// Each type has its own tool permission set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubAgent {
+    /// Full tool access except `sub_agent` (no recursion).
+    General,
+    /// Read-only exploration: read, grep, glob, list, webfetch, websearch, skill.
+    Explore,
+}
+
+impl SubAgent {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "general" => Some(SubAgent::General),
+            "explore" => Some(SubAgent::Explore),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SubAgent::General => "general",
+            SubAgent::Explore => "explore",
+        }
+    }
+
+    /// Return the permission rules for this sub-agent type.
+    pub fn rules(self) -> &'static [(&'static str, Action)] {
+        match self {
+            SubAgent::General => general_sub_agent_rules(),
+            SubAgent::Explore => explore_sub_agent_rules(),
+        }
+    }
+}
+
+/// `sub_agent` tool: always allowed in build mode, denied in plan mode.
 fn yolo_rules() -> &'static [(&'static str, Action)] {
     &[
         (tool::READ_FILE, Action::Allow),
@@ -36,6 +76,12 @@ fn yolo_rules() -> &'static [(&'static str, Action)] {
         (tool::PLAN, Action::Allow),
         (tool::ASK, Action::Allow),
         (tool::TODO_WRITE, Action::Allow),
+        (tool::GLOB, Action::Allow),
+        (tool::WRITE, Action::Allow),
+        (tool::SKILL, Action::Allow),
+        (tool::WEB_FETCH, Action::Allow),
+        (tool::WEB_SEARCH, Action::Allow),
+        (tool::SUB_AGENT, Action::Allow),
     ]
 }
 
@@ -54,6 +100,54 @@ fn plan_rules() -> &'static [(&'static str, Action)] {
         (tool::PLAN, Action::Allow),
         (tool::ASK, Action::Allow),
         (tool::TODO_WRITE, Action::Allow),
+        (tool::GLOB, Action::Allow),
+        (tool::WRITE, Action::Deny),
+        (tool::SKILL, Action::Allow),
+        (tool::WEB_FETCH, Action::Deny),
+        (tool::WEB_SEARCH, Action::Deny),
+        (tool::SUB_AGENT, Action::Deny),
+    ]
+}
+
+/// `general` sub-agent: all tools except `sub_agent` (no recursion).
+fn general_sub_agent_rules() -> &'static [(&'static str, Action)] {
+    &[
+        (tool::READ_FILE, Action::Allow),
+        (tool::WRITE_FILE, Action::Allow),
+        (tool::SHELL_COMMAND, Action::Allow),
+        (tool::PYTHON_COMMAND, Action::Allow),
+        (tool::GREP, Action::Allow),
+        (tool::LIST, Action::Allow),
+        (tool::PLAN, Action::Allow),
+        (tool::ASK, Action::Allow),
+        (tool::TODO_WRITE, Action::Allow),
+        (tool::GLOB, Action::Allow),
+        (tool::WRITE, Action::Allow),
+        (tool::SKILL, Action::Allow),
+        (tool::WEB_FETCH, Action::Allow),
+        (tool::WEB_SEARCH, Action::Allow),
+        (tool::SUB_AGENT, Action::Deny),
+    ]
+}
+
+/// `explore` sub-agent: read-only tools only.
+fn explore_sub_agent_rules() -> &'static [(&'static str, Action)] {
+    &[
+        (tool::READ_FILE, Action::Allow),
+        (tool::WRITE_FILE, Action::Deny),
+        (tool::SHELL_COMMAND, Action::Deny),
+        (tool::PYTHON_COMMAND, Action::Deny),
+        (tool::GREP, Action::Allow),
+        (tool::LIST, Action::Allow),
+        (tool::PLAN, Action::Allow),
+        (tool::ASK, Action::Allow),
+        (tool::TODO_WRITE, Action::Allow),
+        (tool::GLOB, Action::Allow),
+        (tool::WRITE, Action::Deny),
+        (tool::SKILL, Action::Allow),
+        (tool::WEB_FETCH, Action::Allow),
+        (tool::WEB_SEARCH, Action::Allow),
+        (tool::SUB_AGENT, Action::Deny),
     ]
 }
 
@@ -92,14 +186,20 @@ pub fn check(agent: Agent, tool: &str) -> Action {
         .find(|(name, _)| *name == tool)
         .map(|(_, a)| *a)
         .unwrap_or_else(|| {
-            // Unknown tools (e.g. MCP-discovered `<server>_<tool>`)
-            // are allowed in build/yolo mode (max autonomy) and
-            // denied in plan mode (read-only exploration).
             match agent {
                 Agent::Build => Action::Allow,
                 Agent::Plan => Action::Deny,
             }
         })
+}
+
+pub fn check_sub_agent(agent: SubAgent, tool: &str) -> Action {
+    agent
+        .rules()
+        .iter()
+        .find(|(name, _)| *name == tool)
+        .map(|(_, a)| *a)
+        .unwrap_or(Action::Deny)
 }
 
 #[cfg(test)]
@@ -136,6 +236,12 @@ mod tests {
             tool::LIST,
             tool::PLAN,
             tool::ASK,
+            tool::GLOB,
+            tool::WRITE,
+            tool::SKILL,
+            tool::WEB_FETCH,
+            tool::WEB_SEARCH,
+            tool::SUB_AGENT,
         ] {
             assert_eq!(check(Agent::Build, t), Action::Allow, "{t} should allow");
         }
@@ -162,5 +268,39 @@ mod tests {
         assert_eq!(Agent::parse("yolo"), Some(Agent::Build));
         assert_eq!(Agent::parse("plan"), Some(Agent::Plan));
         assert_eq!(Agent::parse("nope"), None);
+    }
+
+    #[test]
+    fn sub_agent_parse_roundtrip() {
+        assert_eq!(SubAgent::parse("general"), Some(SubAgent::General));
+        assert_eq!(SubAgent::parse("explore"), Some(SubAgent::Explore));
+        assert_eq!(SubAgent::parse("nope"), None);
+    }
+
+    #[test]
+    fn explore_denies_write_tools() {
+        assert_eq!(check_sub_agent(SubAgent::Explore, tool::WRITE_FILE), Action::Deny);
+        assert_eq!(check_sub_agent(SubAgent::Explore, tool::WRITE), Action::Deny);
+        assert_eq!(check_sub_agent(SubAgent::Explore, tool::SHELL_COMMAND), Action::Deny);
+    }
+
+    #[test]
+    fn explore_allows_read_tools() {
+        assert_eq!(check_sub_agent(SubAgent::Explore, tool::READ_FILE), Action::Allow);
+        assert_eq!(check_sub_agent(SubAgent::Explore, tool::GREP), Action::Allow);
+        assert_eq!(check_sub_agent(SubAgent::Explore, tool::GLOB), Action::Allow);
+        assert_eq!(check_sub_agent(SubAgent::Explore, tool::WEB_FETCH), Action::Allow);
+    }
+
+    #[test]
+    fn no_sub_agent_allows_recursion() {
+        assert_eq!(check_sub_agent(SubAgent::General, tool::SUB_AGENT), Action::Deny);
+        assert_eq!(check_sub_agent(SubAgent::Explore, tool::SUB_AGENT), Action::Deny);
+    }
+
+    #[test]
+    fn general_allows_write_tools() {
+        assert_eq!(check_sub_agent(SubAgent::General, tool::WRITE_FILE), Action::Allow);
+        assert_eq!(check_sub_agent(SubAgent::General, tool::SHELL_COMMAND), Action::Allow);
     }
 }

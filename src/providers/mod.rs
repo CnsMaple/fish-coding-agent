@@ -82,6 +82,11 @@ pub struct ChatRequest {
     pub messages: Vec<ChatMessage>,
     pub thinking: crate::config::ReasoningMode,
     pub system: Option<String>,
+    /// Optional custom tool specs. When `None`, the provider uses the
+    /// global `openai_tool_specs()` / `anthropic_tool_specs()`. When
+    /// `Some`, the provider uses these instead. This is used by the
+    /// sub-agent tool to pass filtered tool specs.
+    pub tools: Option<Vec<serde_json::Value>>,
 }
 
 #[derive(Debug, Clone)]

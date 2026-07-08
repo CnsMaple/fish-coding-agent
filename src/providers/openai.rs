@@ -71,7 +71,7 @@ impl Provider for OpenAiProvider {
             "stream": true,
             "stream_options": { "include_usage": true },
             "messages": req.messages.iter().map(openai_message).collect::<Vec<_>>(),
-            "tools": crate::tools::openai_tool_specs(),
+            "tools": req.tools.unwrap_or_else(crate::tools::openai_tool_specs),
             "tool_choice": "auto",
         });
         if let Some(sys) = &req.system {

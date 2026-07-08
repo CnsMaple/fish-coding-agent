@@ -4,6 +4,7 @@ use crate::function::notifications::ToastLevel;
 use crate::function::SidebarTab;
 use crate::providers::{ChatMessage, ChatRequest, ToolCall};
 use crate::session::{Message, Role};
+use serde_json::json;
 use std::time::Duration;
 
 pub fn dispatch(app: &mut App, cmd: &str, arg: &str) {
@@ -694,12 +695,17 @@ Current OS: {os}, shell: {shell}
 
   - read(path, start_line?, end_line?)
   - edit(path, content, oldString?, replaceAll?, start_line?, end_line?)
+  - write(filePath, content) - create or overwrite a file
   - shell_command(command) - runs in {shell}
     Current shell details: {shell_details}
   - python_command(code) - runs Python source code directly
   - grep(pattern, path?) - search text in files
+  - glob(pattern, path?) - find files by name pattern
   - list(path?) - list files under a directory
   - plan(title?, content, steps?) - present a plan for user confirmation
+  - skill(name) - load a skill's instructions
+  - webfetch(url, format?) - fetch web page content (text/markdown/html)
+  - websearch(query, numResults?) - search the web for information
 
 When a task requires one of these actions you MUST invoke the appropriate tool via the API's structured tool_calls mechanism. Never describe using a tool without actually calling it.
 
@@ -742,6 +748,7 @@ Read-only exploration:
 
   - read(path, start_line?, end_line?)
   - grep(pattern, path?) — search text in files
+  - glob(pattern, path?) — find files by name pattern
   - list(path?) — list files under a directory
 
 Communication with the user:
@@ -755,14 +762,18 @@ Communication with the user:
     body is rendered in the session; the user approves / rejects / closes \
     in the plan tab. Call this exactly once when you have enough \
     information to act.
+  - skill(name) — load a skill's instructions and resources
 
 ## What you must NOT do
 
 The runtime will reject (with an error) any attempt to:
 
   - edit (no file edits)
+  - write (no file creation)
   - shell_command (no arbitrary shell)
   - python_command (no code execution)
+  - webfetch (no web fetching)
+  - websearch (no web searching)
 
 If a task truly requires running a command or mutating a file, hand it back \
 to the user — they can switch to build mode with `/build` and re-send. Do \
@@ -963,6 +974,7 @@ pub fn send_message(app: &mut App, user_msg: Message) {
         messages,
         thinking,
         system: Some(system_prompt(app.active_agent)),
+        tools: None,
     };
 
     if let Some(tx) = app.msg_tx.clone() {
@@ -1050,6 +1062,7 @@ pub async fn run_chat_stream(
             messages: req.messages.clone(),
             thinking: req.thinking,
             system: req.system.clone(),
+            tools: req.tools.clone(),
         };
         let call = tokio::spawn(async move {
             p.chat_stream(
@@ -1190,14 +1203,29 @@ pub async fn run_chat_stream(
                 name: call.name.clone(),
                 title: title.clone(),
             });
-            let result = crate::tools::execute_tool_streaming_with_agent(
-                agent,
-                &call.name,
-                &call.arguments,
-                &cwd,
-                tx.clone(),
-            )
-            .await;
+            let result = if call.name == "sub_agent" {
+                run_sub_agent(
+                    &client,
+                    &base,
+                    &key,
+                    provider,
+                    &req.model,
+                    &call.arguments,
+                    &cwd,
+                    &cancel_rx,
+                    &tx,
+                )
+                .await
+            } else {
+                crate::tools::execute_tool_streaming_with_agent(
+                    agent,
+                    &call.name,
+                    &call.arguments,
+                    &cwd,
+                    tx.clone(),
+                )
+                .await
+            };
             req.messages.push(ChatMessage {
                 role: "tool".to_string(),
                 content: result.clone(),
@@ -1225,6 +1253,207 @@ pub async fn run_chat_stream(
             return;
         }
         send_msg(crate::event::AppMsg::ChatTimerResume);
+    }
+}
+
+/// Spawn a sub-agent conversation loop. The sub-agent runs with filtered
+/// tool permissions (e.g. `explore` is read-only, `general` has full
+/// access but cannot recurse). Returns a JSON-formatted result string
+/// compatible with the tool-result envelope.
+#[allow(clippy::too_many_arguments)]
+async fn run_sub_agent(
+    client: &reqwest::Client,
+    base: &str,
+    key: &str,
+    provider: ProviderKind,
+    model: &str,
+    args: &str,
+    cwd: &std::path::Path,
+    cancel_rx: &tokio::sync::watch::Receiver<bool>,
+    tx: &tokio::sync::mpsc::UnboundedSender<crate::event::AppMsg>,
+) -> String {
+    let args: serde_json::Value = match serde_json::from_str(args) {
+        Ok(v) => v,
+        Err(e) => return json!({"ok": false, "error": format!("invalid sub_agent args: {e}")}).to_string(),
+    };
+    let sub_type = args
+        .get("subagent_type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let Some(sub) = crate::permission::SubAgent::parse(sub_type) else {
+        return json!({"ok": false, "error": format!("unknown subagent_type: {sub_type}")}).to_string();
+    };
+    let prompt = args
+        .get("prompt")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if prompt.trim().is_empty() {
+        return json!({"ok": false, "error": "prompt is empty"}).to_string();
+    }
+
+    let _ = tx.send(crate::event::AppMsg::ToolDelta {
+        content: format!("[sub_agent:{}] starting…\n", sub.as_str()),
+    });
+
+    let system_prompt = sub_agent_system_prompt(sub);
+    let tools = match provider {
+        ProviderKind::Anthropic => crate::tools::anthropic_tool_specs_for_sub_agent(sub),
+        _ => crate::tools::openai_tool_specs_for_sub_agent(sub),
+    };
+
+    let mut req = crate::providers::ChatRequest {
+        model: model.to_string(),
+        messages: vec![crate::providers::ChatMessage {
+            role: "user".to_string(),
+            content: prompt.to_string(),
+            content_parts: Vec::new(),
+            tool_call_id: None,
+            tool_calls: Vec::new(),
+        }],
+        thinking: crate::config::ReasoningMode::Off,
+        system: Some(system_prompt),
+        tools: Some(tools),
+    };
+
+    const MAX_STEPS: usize = 15;
+    for step in 0..MAX_STEPS {
+        if *cancel_rx.borrow() {
+            return json!({"ok": false, "error": "sub-agent cancelled"}).to_string();
+        }
+
+        let (chat_tx, mut chat_rx) =
+            tokio::sync::mpsc::unbounded_channel::<crate::providers::ChatEvent>();
+        let p = crate::providers::provider(provider);
+        let client_c = client.clone();
+        let base_c = base.to_string();
+        let key_c = key.to_string();
+        let req_c = crate::providers::ChatRequest {
+            model: req.model.clone(),
+            messages: req.messages.clone(),
+            thinking: req.thinking,
+            system: req.system.clone(),
+            tools: req.tools.clone(),
+        };
+        let call = tokio::spawn(async move {
+            p.chat_stream(&client_c, &base_c, &key_c, req_c, chat_tx).await
+        });
+
+        let mut text = String::new();
+        let mut tool_calls: Vec<crate::providers::ToolCall> = Vec::new();
+        let mut stream_done = false;
+
+        while let Some(ev) = chat_rx.recv().await {
+            if *cancel_rx.borrow() {
+                return json!({"ok": false, "error": "sub-agent cancelled"}).to_string();
+            }
+            match ev {
+                crate::providers::ChatEvent::Delta(s) => text.push_str(&s),
+                crate::providers::ChatEvent::ToolCalls(calls) => tool_calls = calls,
+                crate::providers::ChatEvent::Done => {
+                    stream_done = true;
+                    break;
+                }
+                crate::providers::ChatEvent::Error(e) => {
+                    return json!({"ok": false, "error": format!("sub-agent stream error: {e}")})
+                        .to_string();
+                }
+                _ => {}
+            }
+        }
+
+        if !stream_done {
+            match call.await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    return json!({"ok": false, "error": format!("sub-agent stream failed: {e:#}")})
+                        .to_string();
+                }
+                Err(e) => {
+                    return json!({"ok": false, "error": format!("sub-agent task failed: {e:#}")})
+                        .to_string();
+                }
+            }
+            continue;
+        }
+
+        if tool_calls.is_empty() {
+            let _ = tx.send(crate::event::AppMsg::ToolDelta {
+                content: format!("[sub_agent:{}] done ({steps} steps)\n", sub.as_str(), steps = step + 1),
+            });
+            return json!({"ok": true, "result": text}).to_string();
+        }
+
+        req.messages.push(crate::providers::ChatMessage {
+            role: "assistant".to_string(),
+            content: text,
+            content_parts: Vec::new(),
+            tool_call_id: None,
+            tool_calls: tool_calls.clone(),
+        });
+
+        for tc in &tool_calls {
+            if matches!(
+                crate::permission::check_sub_agent(sub, &tc.name),
+                crate::permission::Action::Deny
+            ) {
+                req.messages.push(crate::providers::ChatMessage {
+                    role: "tool".to_string(),
+                    content: json!({"ok": false, "error": format!("tool `{}` is not allowed for sub-agent `{}`", tc.name, sub.as_str())}).to_string(),
+                    content_parts: Vec::new(),
+                    tool_call_id: Some(tc.id.clone()),
+                    tool_calls: Vec::new(),
+                });
+                continue;
+            }
+
+            let _ = tx.send(crate::event::AppMsg::ToolDelta {
+                content: format!("[sub_agent:{}] step {step}: {tool}\n", sub.as_str(), step = step + 1, tool = tc.name),
+            });
+
+            let result = crate::tools::execute_tool_with_agent(
+                crate::permission::Agent::Build,
+                &tc.name,
+                &tc.arguments,
+                cwd,
+            )
+            .await;
+
+            req.messages.push(crate::providers::ChatMessage {
+                role: "tool".to_string(),
+                content: result,
+                content_parts: Vec::new(),
+                tool_call_id: Some(tc.id.clone()),
+                tool_calls: Vec::new(),
+            });
+        }
+    }
+
+    json!({"ok": false, "error": format!("sub-agent exceeded max steps ({MAX_STEPS})")}).to_string()
+}
+
+fn sub_agent_system_prompt(sub: crate::permission::SubAgent) -> String {
+    match sub {
+        crate::permission::SubAgent::General => "\
+You are a sub-agent handling a delegated task. Work autonomously and return a single concise result.\n\
+Do not ask questions or present plans — just complete the task and report back.\n\
+\n\
+Guidelines:\n\
+- Use the tools available to you to gather information and complete the task.\n\
+- Be thorough but efficient. Do not repeat work you have already done.\n\
+- Return your findings clearly and concisely.\n\
+- Do not call the sub_agent tool — you cannot spawn further sub-agents."
+            .to_string(),
+        crate::permission::SubAgent::Explore => "\
+You are a fast codebase exploration sub-agent. Your job is to search, read, and analyze code.\n\
+Use grep, glob, read, list, webfetch, and websearch to find information.\n\
+\n\
+Guidelines:\n\
+- Do not modify files or run commands — you are read-only.\n\
+- Be thorough but concise. Return clear, structured findings.\n\
+- When searching, try multiple patterns and approaches to be comprehensive.\n\
+- Include file paths and line numbers in your findings.\n\
+- Do not call the sub_agent tool — you cannot spawn further sub-agents."
+            .to_string(),
     }
 }
 
@@ -1288,6 +1517,7 @@ pub async fn run_compaction_stream(
         }],
         thinking: crate::config::ReasoningMode::Off,
         system: Some(compaction_system_prompt()),
+        tools: None,
     };
 
     let (chat_tx, mut chat_rx) =

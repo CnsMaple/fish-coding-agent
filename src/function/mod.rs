@@ -1909,6 +1909,9 @@ impl App {
                 self.status.set_mcp_summary(stored.mcp_summary.clone());
                 self.focus_target = FocusTarget::Input;
                 self.function_panel_cursor = None;
+                if stored.todo_items.is_empty() {
+                    self.function_visible = false;
+                }
                 self.notify(
                     crate::function::notifications::ToastLevel::Ok,
                     format!("resumed session: {}", self.session_title),

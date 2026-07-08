@@ -74,7 +74,7 @@ impl Provider for AnthropicProvider {
             "max_tokens": 8192,
             "stream": true,
             "messages": req.messages.iter().map(anthropic_message).collect::<Vec<_>>(),
-            "tools": crate::tools::anthropic_tool_specs(),
+            "tools": req.tools.unwrap_or_else(crate::tools::anthropic_tool_specs),
         });
         if let Some(sys) = &req.system {
             body["system"] = serde_json::Value::String(sys.clone());
