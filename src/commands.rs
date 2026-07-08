@@ -449,10 +449,27 @@ pub fn compact_now(app: &mut App, _arg: &str) {
         crate::compaction::DEFAULT_TAIL_TURNS,
     )
     .or_else(|| crate::compaction::plan_cutoff_force(&app.session.messages));
-    let Some((start, end)) = plan else {
+    let Some((mut start, end)) = plan else {
         app.notify(ToastLevel::Fail, "session is too short to compact");
         return;
     };
+    let adjusted = crate::compaction::trim_to_size(
+        &app.session.messages,
+        start,
+        end,
+        crate::compaction::MAX_COMPACTION_PROMPT_CHARS,
+    );
+    if adjusted > start {
+        app.notify(
+            ToastLevel::Info,
+            &format!("trimming {} oldest messages to fit compaction limit", adjusted - start),
+        );
+        start = adjusted;
+    }
+    if start >= end {
+        app.notify(ToastLevel::Fail, "compaction prompt too large — try a shorter session");
+        return;
+    }
     let history: Vec<crate::session::Message> = app.session.messages[start..end].to_vec();
     let key = match app.config.effective_api_key(&active_id) {
         Some(k) if !k.is_empty() => k,
@@ -910,6 +927,33 @@ pub fn send_message(app: &mut App, user_msg: Message) {
     app.response_output_chars = 0;
     app.response_output_tokens = None;
 
+    if app.config.auto_compact
+        && app.status.context_window_known
+        && !app.compacting
+        && app.inflight.is_none()
+    {
+        let sp = system_prompt(app.active_agent);
+        let msg_texts: Vec<String> = app
+            .session
+            .messages
+            .iter()
+            .filter(|m| !matches!(m.role, Role::System))
+            .filter(|m| !(matches!(m.role, Role::Assistant) && m.content.is_empty()))
+            .map(|m| m.content.clone())
+            .collect();
+        let inp = crate::compaction::CompactionInputs {
+            auto_enabled: app.config.auto_compact,
+            ctx_window: app.status.context_window_tokens,
+            max_output_tokens: app.status.max_output_tokens,
+            reserved_override: app.config.compact_reserved,
+        };
+        if crate::compaction::compact_if_needed(&msg_texts, &sp, inp) {
+            app.notify(ToastLevel::Info, "compacting session before sending...");
+            compact_now(app, "");
+            return;
+        }
+    }
+
     let messages: Vec<ChatMessage> = app
         .session
         .messages
@@ -1214,16 +1258,16 @@ pub async fn run_chat_stream(
     }
 }
 
-/// System prompt used by the compaction stream. Distinct from the
-/// normal agent's prompt because the summarizer should focus on
-/// preserving intent, not on producing tool calls.
+/// System prompt used by the compaction stream. Asks the model to
+/// produce a structured summary following the template in
+/// `compaction::SUMMARY_TEMPLATE`.
 fn compaction_system_prompt() -> String {
     "You are a helpful assistant that summarizes conversations. \
-Produce a single concise summary that preserves every decision, \
-identifier, file path, and open question from the source. Do not \
-use any tools. Reply with the summary only — no preamble, no \
-closing remarks."
-    .to_string()
+Follow the Markdown template provided in the user message exactly. \
+Preserve every decision, identifier, file path, and open question \
+from the source. Do not use any tools. Reply with the summary \
+only — no preamble, no closing remarks."
+        .to_string()
 }
 
 /// Spawn a one-shot chat stream that summarizes `history`. Used by
@@ -1257,7 +1301,12 @@ pub async fn run_compaction_stream(
     if *cancel_rx.borrow() {
         return;
     }
-    let prompt = crate::compaction::build_summary_prompt(&history);
+    let history_text: Vec<String> = history
+        .iter()
+        .map(|m| crate::compaction::serialize_message(m))
+        .filter(|s| !s.is_empty())
+        .collect();
+    let prompt = crate::compaction::build_prompt(None, &history_text);
     let req = crate::providers::ChatRequest {
         model,
         messages: vec![crate::providers::ChatMessage {

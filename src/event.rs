@@ -958,6 +958,28 @@ fn handle_msg(msg: AppMsg, app: &mut App) {
             app.cancel_state = CancelState::Idle;
             use crate::function::notifications::ToastLevel;
             app.notify(ToastLevel::Fail, error.clone());
+            // If this is a context-overflow error, try to compact
+            // and recover. Remove the error message and the
+            // streaming assistant placeholder, then trigger
+            // compaction. The auto-continue mechanism will resume
+            // the conversation after compaction succeeds.
+            if crate::compaction::is_context_overflow_error(&error)
+                && app.config.auto_compact
+                && !app.compacting
+            {
+                app.notify(ToastLevel::Info, "context overflow — compacting and retrying...");
+                // Pop the error message we just pushed
+                app.session.messages.pop();
+                // Remove the streaming assistant placeholder
+                if let Some(last) = app.session.messages.last() {
+                    if matches!(last.role, crate::session::Role::Assistant) && last.streaming {
+                        app.session.messages.pop();
+                    }
+                }
+                app.session.streaming_id = None;
+                maybe_trigger_auto_compact(app);
+                return;
+            }
             app.session.push(crate::session::Message::new(
                 crate::session::Role::System,
                 format!("[request failed: {error}]"),
@@ -1239,6 +1261,27 @@ fn maybe_trigger_auto_compact(app: &mut App) {
     if crate::compaction::plan_cutoff(&app.session.messages, crate::compaction::DEFAULT_TAIL_TURNS)
         .is_none()
     {
+        return;
+    }
+    // Verify that the compaction range is not empty after trimming
+    // to the API input limit. If it is, skip this cycle — the
+    // prompt is too large to compact in one shot.
+    let Some((start, end)) =
+        crate::compaction::plan_cutoff(&app.session.messages, crate::compaction::DEFAULT_TAIL_TURNS)
+    else {
+        return;
+    };
+    let adjusted = crate::compaction::trim_to_size(
+        &app.session.messages,
+        start,
+        end,
+        crate::compaction::MAX_COMPACTION_PROMPT_CHARS,
+    );
+    if adjusted >= end {
+        app.notify(
+            ToastLevel::Warn,
+            "compaction prompt too large — skipping auto-compaction",
+        );
         return;
     }
     app.notify(ToastLevel::Info, "auto compacting session...");

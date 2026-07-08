@@ -1,26 +1,26 @@
 //! Auto-compaction.
 //!
-//! Mirrors opencode's `compaction.ts` + `overflow.ts` flow, but in
-//! Rust and with a much smaller surface area. The goals are:
+//! Mirrors opencode's `compaction.ts` + `overflow.ts` flow. The goals are:
 //!
-//! 1. Decide **when** to compact: a `should_auto_compact` predicate
-//!    matches opencode's `isOverflow` formula:
+//! 1. Decide **when** to compact: `should_auto_compact` (post-response)
+//!    and `compact_if_needed` (pre-flight). Both use the same
+//!    `isOverflow`-style formula:
 //!    ```text
 //!    used >= ctx_window - reserved
 //!    ```
 //!    where `reserved` defaults to `COMPACTION_BUFFER` (20 000), or
 //!    `Config::compact_reserved` if the user has overridden it.
 //!
-//! 2. Decide **what** to compact: `plan_cutoff` returns the `[start,
-//!    end)` slice of `Session::messages` that will be replaced by a
-//!    single `Role::System` summary message. The last
-//!    `DEFAULT_TAIL_TURNS` user/assistant turns are preserved, matching
-//!    opencode's `DEFAULT_TAIL_TURNS = 2`.
+//! 2. Decide **what** to compact: `select` uses a token budget
+//!    (`DEFAULT_KEEP_TOKENS = 8 000`) to walk backward from the most
+//!    recent messages and determine which ones to keep vs. summarise.
+//!    `plan_cutoff` is a simpler turn-based fallback.
 //!
-//! 3. Generate the summary: `build_summary_prompt` is the prompt we
-//!    send to the LLM. The actual stream task lives in
-//!    `event::spawn_compaction_task` so the caller can reuse the same
-//!    `ChatRequest` machinery as the normal send path.
+//! 3. Generate the summary: `build_prompt` constructs a structured
+//!    prompt with a `SUMMARY_TEMPLATE` that asks the LLM to produce
+//!    a Markdown summary with `## Objective`, `## Important Details`,
+//!    `## Work State`, and `## Next Move` sections. Supports
+//!    incremental compaction via `previous_summary`.
 
 use crate::session::Message;
 
@@ -29,14 +29,61 @@ use crate::session::Message;
 /// `reserved` value when `Config::compact_reserved` is `None`.
 pub const COMPACTION_BUFFER: u64 = 20_000;
 
+/// Maximum characters for the compaction summary prompt. When the
+/// prompt exceeds this, the oldest messages are trimmed so the
+/// request stays well under the API's input-token limit (typically
+/// 1 000 000 tokens). 500k chars ≈ 125k tokens is a conservative
+/// upper bound.
+pub const MAX_COMPACTION_PROMPT_CHARS: usize = 500_000;
+
 /// Number of trailing user/assistant turns to keep verbatim.
-/// Matches opencode's `DEFAULT_TAIL_TURNS = 2`. Each "turn" is a
-/// pair of (user, assistant) messages; partial tails (e.g. a lone
-/// streaming assistant) are also preserved.
+/// Used by `plan_cutoff` as a fallback. Each "turn" is a
+/// pair of (user, assistant) messages.
 pub const DEFAULT_TAIL_TURNS: usize = 2;
 
-/// Prompt asking the model to summarize a chunk of history. Kept
-/// as a `const` so the unit tests can pin it.
+/// Tokens to keep as recent context during compaction. Matches
+/// opencode's `DEFAULT_KEEP_TOKENS = 8_000`.
+pub const DEFAULT_KEEP_TOKENS: u64 = 8_000;
+
+/// Maximum characters for tool output in the compaction prompt.
+/// Tool results are truncated to avoid blowing up the prompt.
+pub const TOOL_OUTPUT_MAX_CHARS: usize = 2_000;
+
+/// Output tokens reserved for the summary. Matches opencode's
+/// `SUMMARY_OUTPUT_TOKENS = 4_096`.
+pub const SUMMARY_OUTPUT_TOKENS: u64 = 4_096;
+
+/// Structured template for the compaction summary. The LLM is asked
+/// to produce a Markdown summary with these sections. Matches
+/// opencode's `SUMMARY_TEMPLATE`.
+pub const SUMMARY_TEMPLATE: &str = "\
+Output exactly the Markdown structure shown inside <template> and keep the section order unchanged. Do not include the <template> tags in your response.
+<template>
+## Objective
+- [one or two brief sentences describing what the user is trying to accomplish]
+
+## Important Details
+- [constraints/preferences, decisions and why, important facts/assumptions, exact context needed to continue, or \"(none)\"]
+
+## Work State
+- Completed: [finished work, verified facts, or changes made; otherwise \"(none)\"]
+- Active: [current work, partial changes, or investigation state; otherwise \"(none)\"]
+- Blocked: [blockers, failing commands, or unknowns; otherwise \"(none)\"]
+
+## Next Move
+1. [immediate concrete action, or \"(none)\"]
+2. [next action if known, or \"(none)\"]
+</template>
+
+Rules:
+- Keep every section, even when empty.
+- Use terse bullets, not prose paragraphs.
+- Preserve exact file paths, symbols, commands, error strings, URLs, and identifiers when known.
+- Put relevant files and symbols inside the section where they matter; do not add extra sections.
+- Do not mention the summary process or that context was compacted.";
+
+/// Legacy prompt kept for backward compatibility with unit tests.
+/// New callers should use `build_prompt` + `SUMMARY_TEMPLATE`.
 pub const SUMMARY_PROMPT: &str = "Summarize the following conversation history so it can be \
 used as a compact context for the next turn. Preserve all of the \
 following:\n\
@@ -111,6 +158,139 @@ pub fn headroom_pct(used: u64, inp: CompactionInputs) -> Option<f64> {
     Some((remaining / u as f64).clamp(0.0, 1.0))
 }
 
+/// Coarse token estimation. Uses `chars / 4` (≈4 chars per token
+/// for English text) as a conservative heuristic. CJK-heavy text
+/// is closer to 1 char per token, so this overestimates for those
+/// languages — which is safe for compaction purposes.
+pub fn estimate_tokens(text: &str) -> u64 {
+    ((text.len() as f64) / 4.0).ceil() as u64
+}
+
+/// Truncate a string to `max_chars`, appending "\n[truncated]" if
+/// it was cut.
+fn truncate(s: &str, max_chars: usize) -> String {
+    if s.len() <= max_chars {
+        s.to_string()
+    } else {
+        let mut out = s[..max_chars].to_string();
+        out.push_str("\n[truncated]");
+        out
+    }
+}
+
+/// Serialize a single message for the compaction prompt. Handles
+/// different message types with appropriate formatting.
+pub fn serialize_message(m: &Message) -> String {
+    match m.role {
+        crate::session::Role::User => {
+            let mut out = format!("[User]: {}", m.content);
+            if !m.tool_results.is_empty() {
+                for tr in &m.tool_results {
+                    out.push_str(&format!("\n[Tool result {}]: {}", tr.name, truncate(&tr.content, TOOL_OUTPUT_MAX_CHARS)));
+                }
+            }
+            out
+        }
+        crate::session::Role::Assistant => {
+            if m.content.is_empty() {
+                "[Assistant]: (empty)".to_string()
+            } else {
+                format!("[Assistant]: {}", m.content)
+            }
+        }
+        crate::session::Role::System => {
+            format!("[System update]: {}", m.content)
+        }
+    }
+}
+
+/// Select which messages to keep as recent context and which to
+/// compact. Walks backward from the most recent messages, accumulating
+/// token estimates, until the `keep_tokens` budget is exhausted.
+/// Returns `(head, recent)` where `head` is the serialized text of
+/// messages to compact and `recent` is the serialized text to keep
+/// verbatim.
+pub fn select(messages: &[Message], keep_tokens: u64) -> Option<(String, String)> {
+    if messages.is_empty() {
+        return None;
+    }
+    let conversation: Vec<String> = messages
+        .iter()
+        .map(|m| serialize_message(m))
+        .filter(|s| !s.is_empty())
+        .collect();
+    if conversation.is_empty() {
+        return None;
+    }
+    let mut total: u64 = 0;
+    let mut split = conversation.len();
+    for (i, item) in conversation.iter().enumerate().rev() {
+        let next = total + estimate_tokens(item);
+        if next > keep_tokens {
+            split = i + 1;
+            break;
+        }
+        total = next;
+        split = i;
+    }
+    let head = conversation[..split].join("\n\n");
+    let recent = conversation[split..].join("\n\n");
+    if head.is_empty() && recent.is_empty() {
+        return None;
+    }
+    Some((head, recent))
+}
+
+/// Build the compaction prompt. If `previous_summary` is provided,
+/// the LLM is asked to update the existing summary rather than
+/// create a new one. Matches opencode's `buildPrompt`.
+pub fn build_prompt(previous_summary: Option<&str>, context: &[String]) -> String {
+    let mut parts = Vec::new();
+    if let Some(prev) = previous_summary {
+        parts.push(format!(
+            "Update the anchored summary below using the conversation history above.\n\
+             Preserve still-true details, remove stale details, and merge in the new facts.\n\
+             <previous-summary>\n{prev}\n</previous-summary>"
+        ));
+    } else {
+        parts.push("Create a new anchored summary from the conversation history.".to_string());
+    }
+    parts.push(SUMMARY_TEMPLATE.to_string());
+    for ctx in context {
+        if !ctx.is_empty() {
+            parts.push(ctx.clone());
+        }
+    }
+    parts.join("\n\n")
+}
+
+/// Pre-flight check: estimate the token count of the given messages
+/// and return `true` if compaction is needed before sending.
+/// This mirrors opencode's `compactIfNeeded` pre-flight guard.
+///
+/// `messages` are the serialized model messages (the same ones that
+/// will be sent to the API). Returns `false` when context window is
+/// unknown or auto-compaction is disabled.
+pub fn compact_if_needed(
+    messages: &[String],
+    system_prompt: &str,
+    inp: CompactionInputs,
+) -> bool {
+    if !inp.auto_enabled || inp.ctx_window == 0 {
+        return false;
+    }
+    let mut total: u64 = 0;
+    total += estimate_tokens(system_prompt);
+    for m in messages {
+        total += estimate_tokens(m);
+    }
+    let u = usable(inp);
+    if u == 0 {
+        return false;
+    }
+    total > u
+}
+
 /// Locate the slice of `messages` that should be replaced with a
 /// single summary message. Returns
 /// `Some((start_inclusive, end_exclusive))` where everything in
@@ -125,9 +305,6 @@ pub fn plan_cutoff(messages: &[Message], tail_turns: usize) -> Option<(usize, us
     }
     let turns = tail_turns.max(1);
 
-    // Collect every user-message index; the tail is the last
-    // `turns` entries. Everything between the first message and
-    // the start of the tail is the "head" we may compact.
     let user_idxs: Vec<usize> = messages
         .iter()
         .enumerate()
@@ -153,19 +330,50 @@ pub fn plan_cutoff_force(messages: &[Message]) -> Option<(usize, usize)> {
     if messages.is_empty() {
         return None;
     }
-    // Skip a leading summary block if the session is *just* a
-    // summary already (re-compacting a summary is a no-op the
-    // user does not need).
     if messages.len() == 1 && matches!(messages[0].role, crate::session::Role::System) {
         return None;
     }
     Some((0, messages.len()))
 }
 
+/// Given a compaction range `[start, end)` and a maximum character
+/// limit, walk backward from `end` and return the greatest `start`
+/// index such that the content of `messages[adjusted..end]` fits
+/// within `max_chars` when formatted by [`build_summary_prompt`].
+/// Returns `min(start, end)` (i.e. `end`) when even a single message
+/// exceeds the limit — the caller should treat that as "skip
+/// compaction".
+pub fn trim_to_size(
+    messages: &[Message],
+    start: usize,
+    end: usize,
+    max_chars: usize,
+) -> usize {
+    let overhead = SUMMARY_PROMPT.len() + 50;
+    let max_content = max_chars.saturating_sub(overhead);
+    let mut total = 0usize;
+    let mut new_start = end;
+    for i in (start..end).rev() {
+        let m = &messages[i];
+        let role_len = match m.role {
+            crate::session::Role::User => 4,
+            crate::session::Role::Assistant => 9,
+            crate::session::Role::System => 6,
+        };
+        let body = if m.content.is_empty() { "<empty>" } else { &m.content };
+        let msg_len = role_len + body.len() + 10;
+        total += msg_len;
+        if total > max_content {
+            return new_start;
+        }
+        new_start = i;
+    }
+    start
+}
+
 /// Build the user-prompt body for the LLM that will summarize the
-/// dropped history. The output is plain text; the chat path will
-/// pass it through `commands::send_chat` after the summary task
-/// succeeds.
+/// dropped history. Uses the legacy format; new callers should
+/// prefer `build_prompt` + `select` for structured summaries.
 pub fn build_summary_prompt(history: &[Message]) -> String {
     let mut out = String::new();
     out.push_str(SUMMARY_PROMPT);
@@ -186,6 +394,21 @@ pub fn build_summary_prompt(history: &[Message]) -> String {
     out
 }
 
+/// Check if an error message indicates a context-length overflow.
+/// Used to detect API errors that should trigger auto-compaction.
+pub fn is_context_overflow_error(error: &str) -> bool {
+    let lower = error.to_lowercase();
+    lower.contains("context_length_exceeded")
+        || lower.contains("context length")
+        || lower.contains("token limit")
+        || lower.contains("too long")
+        || lower.contains("1000000")
+        || lower.contains("input length")
+        || lower.contains("max context")
+        || lower.contains("maximum context")
+        || lower.contains("reduce the length")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -200,8 +423,6 @@ mod tests {
 
     #[test]
     fn usable_uses_buffer_when_output_unknown() {
-        // 128k context, 0 max-output => reserved defaults to
-        // COMPACTION_BUFFER (we treat 0 as "unknown", not "free").
         let inp = CompactionInputs {
             auto_enabled: true,
             ctx_window: 128_000,
@@ -213,8 +434,6 @@ mod tests {
 
     #[test]
     fn usable_clamps_to_min_buffer_and_max_output() {
-        // Huge output cap is clamped down to BUFFER; the buffer
-        // is the upper bound on the reservation.
         let inp = CompactionInputs {
             auto_enabled: true,
             ctx_window: 200_000,
@@ -222,8 +441,6 @@ mod tests {
             reserved_override: None,
         };
         assert_eq!(usable(inp), 200_000 - 16_384);
-        // Tiny output cap wins; we only reserve what the model
-        // will actually emit.
         let inp = CompactionInputs {
             auto_enabled: true,
             ctx_window: 200_000,
@@ -302,17 +519,12 @@ mod tests {
 
     #[test]
     fn plan_cutoff_returns_none_when_too_short() {
-        // 2 users, 2 assistants — exactly the tail; nothing to compact.
         let msgs = vec![user("a"), assistant("a"), user("b"), assistant("b")];
         assert_eq!(plan_cutoff(&msgs, 2), None);
     }
 
     #[test]
     fn plan_cutoff_keeps_last_two_turns() {
-        // 3 user+assistant turns; with tail_turns=2 we keep the
-        // last two (positions 2..6) and compact the first
-        // (positions 0..2). The "turn" boundary is a user
-        // message index, matching opencode's `turns()` helper.
         let msgs = vec![
             user("u1"),
             assistant("a1"),
@@ -326,7 +538,6 @@ mod tests {
 
     #[test]
     fn plan_cutoff_returns_none_when_everything_is_tail() {
-        // Single user message, no history to compact.
         let msgs = vec![user("u1")];
         assert_eq!(plan_cutoff(&msgs, 1), None);
     }
@@ -354,9 +565,124 @@ mod tests {
 
     #[test]
     fn plan_cutoff_force_rejects_pure_summary() {
-        // A session that is *only* a single compaction summary is
-        // already compact; re-compacting is a no-op.
         let msgs = vec![Message::new(Role::System, "summary")];
         assert_eq!(plan_cutoff_force(&msgs), None);
+    }
+
+    #[test]
+    fn estimate_tokens_english() {
+        // 48 chars of English text ≈ 12 tokens (48/4)
+        let text = "This is a test of the token estimation function.";
+        let tokens = estimate_tokens(text);
+        assert_eq!(tokens, 12);
+    }
+
+    #[test]
+    fn serialize_message_user() {
+        let m = user("hello world");
+        let s = serialize_message(&m);
+        assert_eq!(s, "[User]: hello world");
+    }
+
+    #[test]
+    fn serialize_message_assistant() {
+        let m = assistant("hi there");
+        let s = serialize_message(&m);
+        assert_eq!(s, "[Assistant]: hi there");
+    }
+
+    #[test]
+    fn serialize_message_empty_assistant() {
+        let m = assistant("");
+        let s = serialize_message(&m);
+        assert_eq!(s, "[Assistant]: (empty)");
+    }
+
+    #[test]
+    fn serialize_message_system() {
+        let m = Message::new(Role::System, "config updated");
+        let s = serialize_message(&m);
+        assert_eq!(s, "[System update]: config updated");
+    }
+
+    #[test]
+    fn select_returns_none_for_empty() {
+        let msgs: Vec<Message> = vec![];
+        assert_eq!(select(&msgs, 100), None);
+    }
+
+    #[test]
+    fn select_splits_on_budget() {
+        // 4 messages: ~3+4+3+4 = 14 tokens, budget of 5 keeps the last
+        let msgs = vec![
+            user("a"),
+            assistant("bb"),
+            user("c"),
+            assistant("dd"),
+        ];
+        let result = select(&msgs, 5);
+        assert!(result.is_some());
+        let (head, recent) = result.unwrap();
+        assert!(!head.is_empty());
+        assert!(!recent.is_empty());
+    }
+
+    #[test]
+    fn build_prompt_includes_template() {
+        let prompt = build_prompt(None, &["head content".to_string()]);
+        assert!(prompt.contains("## Objective"));
+        assert!(prompt.contains("## Important Details"));
+        assert!(prompt.contains("## Work State"));
+        assert!(prompt.contains("## Next Move"));
+        assert!(prompt.contains("head content"));
+    }
+
+    #[test]
+    fn build_prompt_updates_previous_summary() {
+        let prompt = build_prompt(
+            Some("old summary"),
+            &["new content".to_string()],
+        );
+        assert!(prompt.contains("Update the anchored summary"));
+        assert!(prompt.contains("<previous-summary>"));
+        assert!(prompt.contains("old summary"));
+        assert!(prompt.contains("new content"));
+    }
+
+    #[test]
+    fn compact_if_needed_returns_false_when_fits() {
+        let inp = CompactionInputs {
+            auto_enabled: true,
+            ctx_window: 128_000,
+            max_output_tokens: 0,
+            reserved_override: None,
+        };
+        let messages = vec!["short message".to_string()];
+        let system = "short system prompt".to_string();
+        assert!(!compact_if_needed(&messages, &system, inp));
+    }
+
+    #[test]
+    fn compact_if_needed_returns_false_when_disabled() {
+        let inp = CompactionInputs {
+            auto_enabled: false,
+            ctx_window: 128_000,
+            max_output_tokens: 0,
+            reserved_override: None,
+        };
+        let messages = vec!["x".repeat(500_000)]; // huge message
+        let system = "system".to_string();
+        assert!(!compact_if_needed(&messages, &system, inp));
+    }
+
+    #[test]
+    fn is_context_overflow_error_detects() {
+        assert!(is_context_overflow_error("context_length_exceeded"));
+        assert!(is_context_overflow_error("input length too long"));
+        assert!(is_context_overflow_error("token limit exceeded"));
+        assert!(is_context_overflow_error("range of input length should be [1, 1000000]"));
+        assert!(is_context_overflow_error("reduce the length of the messages"));
+        assert!(!is_context_overflow_error("network timeout"));
+        assert!(!is_context_overflow_error("auth failed"));
     }
 }
