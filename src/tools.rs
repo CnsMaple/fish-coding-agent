@@ -146,14 +146,16 @@ fn tool_defs() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "edit",
-            description: "Write or edit a UTF-8 text file within the current workspace. Use this tool for all file modifications including creating new files and editing existing ones. To edit, provide the target line range with start_line and end_line (1-based, inclusive) together with the replacement content. To create or overwrite a file, omit start_line and end_line.".to_string(),
+            description: "Write or edit a UTF-8 text file within the current workspace. Use this tool for all file modifications including creating new files and editing existing ones. To edit, provide oldString (the exact text to find and replace) with the replacement content. When oldString matches multiple locations, use start_line/end_line to narrow the search scope, or use replaceAll: true. To create or overwrite a file, omit oldString.".to_string(),
             schema: json!({
                 "type": "object",
                 "properties": {
                     "path": { "type": "string", "description": "Workspace-relative path to write." },
-                    "content": { "type": "string", "description": "Content to write or insert as replacement." },
-                    "start_line": { "type": "integer", "minimum": 1, "description": "Optional 1-based line to start replacing." },
-                    "end_line": { "type": "integer", "minimum": 1, "description": "Optional 1-based line to stop replacing, inclusive." }
+                    "content": { "type": "string", "description": "Content to write, or replacement text when oldString is provided." },
+                    "oldString": { "type": "string", "description": "Exact text to find and replace in the file. Must be unique within the search scope (whole file or specified line range). Omit to create/overwrite the entire file." },
+                    "replaceAll": { "type": "boolean", "description": "Replace all occurrences of oldString. Default false (requires unique match)." },
+                    "start_line": { "type": "integer", "minimum": 1, "description": "Optional 1-based line to start searching for oldString. Must be used with end_line." },
+                    "end_line": { "type": "integer", "minimum": 1, "description": "Optional 1-based line to stop searching for oldString, inclusive. Must be used with start_line." }
                 },
                 "required": ["path", "content"],
                 "additionalProperties": false
@@ -595,6 +597,10 @@ struct ReadArgs {
 struct WriteArgs {
     path: String,
     content: String,
+    #[serde(rename = "oldString")]
+    old_string: Option<String>,
+    #[serde(rename = "replaceAll")]
+    replace_all: Option<bool>,
     start_line: Option<usize>,
     end_line: Option<usize>,
 }
@@ -631,29 +637,32 @@ async fn read_file(args: &str, cwd: &Path) -> Result<String> {
 async fn write_file(args: &str, cwd: &Path) -> Result<String> {
     let args: WriteArgs = serde_json::from_str(args)?;
     let path = resolve_workspace_path(cwd, &args.path)?;
-    match (args.start_line, args.end_line) {
-        (Some(start), Some(end)) => {
-            if start > end {
-                return Err(anyhow!("start_line must be <= end_line"));
-            }
-            let original = tokio::fs::read_to_string(&path).await?;
-            let updated = replace_lines(&original, start, end, &args.content)?;
-            tokio::fs::write(&path, &updated).await?;
-            Ok(write_diff_result(&args.path, &original, &updated))
+    if let Some(old_string) = &args.old_string {
+        if old_string.is_empty() {
+            return Err(anyhow!("oldString must not be empty"));
         }
-        (None, None) => {
-            let original = match tokio::fs::read_to_string(&path).await {
-                Ok(text) => text,
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
-                Err(err) => return Err(err.into()),
-            };
-            if let Some(parent) = path.parent() {
-                tokio::fs::create_dir_all(parent).await?;
-            }
-            tokio::fs::write(&path, &args.content).await?;
-            Ok(write_diff_result(&args.path, &original, &args.content))
+        let original = tokio::fs::read_to_string(&path).await?;
+        let updated = replace_string(
+            &original,
+            old_string,
+            &args.content,
+            args.replace_all.unwrap_or(false),
+            args.start_line,
+            args.end_line,
+        )?;
+        tokio::fs::write(&path, &updated).await?;
+        Ok(write_diff_result(&args.path, &original, &updated))
+    } else {
+        let original = match tokio::fs::read_to_string(&path).await {
+            Ok(text) => text,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(err) => return Err(err.into()),
+        };
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
         }
-        _ => Err(anyhow!("start_line and end_line must be provided together")),
+        tokio::fs::write(&path, &args.content).await?;
+        Ok(write_diff_result(&args.path, &original, &args.content))
     }
 }
 
@@ -1077,40 +1086,71 @@ fn select_lines(text: &str, start_line: Option<usize>, end_line: Option<usize>) 
     }
 }
 
-fn replace_lines(text: &str, start: usize, end: usize, replacement: &str) -> Result<String> {
-    if start == 0 || end == 0 || start > end {
-        return Err(anyhow!("invalid line range"));
+fn replace_string(
+    text: &str,
+    old_string: &str,
+    new_string: &str,
+    replace_all: bool,
+    start_line: Option<usize>,
+    end_line: Option<usize>,
+) -> Result<String> {
+    let (search_text, search_offset) = if let (Some(start), Some(end)) = (start_line, end_line) {
+        if start == 0 || end == 0 || start > end {
+            return Err(anyhow!("start_line must be <= end_line and >= 1"));
+        }
+        let lines: Vec<&str> = text.lines().collect();
+        if end > lines.len() {
+            return Err(anyhow!(
+                "line range [{}, {}] exceeds file length ({})",
+                start,
+                end,
+                lines.len()
+            ));
+        }
+        let offset = lines[..start - 1].iter().map(|l| l.len() + 1).sum::<usize>();
+        let range_text = lines[start - 1..end].join("\n");
+        (range_text, offset)
+    } else {
+        (text.to_string(), 0)
+    };
+
+    let matches: Vec<usize> = search_text
+        .match_indices(old_string)
+        .map(|(idx, _)| idx)
+        .collect();
+    if matches.is_empty() {
+        if let (Some(s), Some(e)) = (start_line, end_line) {
+            return Err(anyhow!(
+                "oldString not found in lines [{}, {}]",
+                s,
+                e
+            ));
+        }
+        return Err(anyhow!("oldString not found in file"));
+    }
+    if !replace_all && matches.len() > 1 {
+        let hint = if start_line.is_some() {
+            "provide more context to make oldString unique within the range"
+        } else {
+            "use replaceAll=true to replace all, or provide start_line/end_line to narrow the scope"
+        };
+        return Err(anyhow!(
+            "oldString found {} times; {}",
+            matches.len(),
+            hint
+        ));
     }
 
-    // Detect the file's line ending style so we don't corrupt CRLF files.
-    let le = if text.contains("\r\n") { "\r\n" } else { "\n" };
-
-    // Normalise any \r\n in the replacement to \n so split('\n') works correctly.
-    let normalized = replacement.replace("\r\n", "\n");
-
-    // Split on the actual line ending, preserving the trailing empty segment
-    // that indicates the file ends with a newline.
-    let mut lines: Vec<&str> = text.split(le).collect();
-    let had_trailing_nl = text.ends_with('\n');
-    if had_trailing_nl && lines.last() == Some(&"") {
-        lines.pop();
+    if start_line.is_some() {
+        let mut result = text.to_string();
+        result.replace_range(
+            search_offset..search_offset + search_text.len(),
+            &search_text.replace(old_string, new_string),
+        );
+        Ok(result)
+    } else {
+        Ok(text.replace(old_string, new_string))
     }
-
-    if end > lines.len() {
-        return Err(anyhow!("line range exceeds file length"));
-    }
-
-    let mut repl_lines: Vec<&str> = normalized.split('\n').collect();
-    if replacement.ends_with('\n') && repl_lines.last() == Some(&"") {
-        repl_lines.pop();
-    }
-
-    lines.splice(start - 1..end, repl_lines);
-    let mut out = lines.join(le);
-    if had_trailing_nl || replacement.ends_with('\n') {
-        out.push_str(le);
-    }
-    Ok(out)
 }
 
 pub fn is_valid_tool(name: &str) -> bool {
@@ -1251,73 +1291,96 @@ mod tests {
             .contains("empty"));
     }
 
-    // ── replace_lines unit tests ──
+    // ── replace_string unit tests ──
 
     #[test]
-    fn replace_lines_basic_lf() {
+    fn replace_string_basic() {
         let input = "line1\nline2\nline3\n";
-        let result = replace_lines(input, 2, 2, "new\n").unwrap();
+        let result = replace_string(input, "line2\n", "new\n", false, None, None).unwrap();
         assert_eq!(result, "line1\nnew\nline3\n");
     }
 
     #[test]
-    fn replace_lines_crlf_preserved() {
+    fn replace_string_crlf() {
         let input = "line1\r\nline2\r\nline3\r\n";
-        let result = replace_lines(input, 2, 2, "new\r\n").unwrap();
+        let result = replace_string(input, "line2", "new", false, None, None).unwrap();
         assert_eq!(result, "line1\r\nnew\r\nline3\r\n");
     }
 
     #[test]
-    fn replace_lines_trailing_newline_preserved_lf() {
-        let input = "a\nb\n";
-        let result = replace_lines(input, 1, 1, "X\n").unwrap();
-        assert_eq!(result, "X\nb\n");
-    }
-
-    #[test]
-    fn replace_lines_trailing_newline_preserved_crlf() {
-        let input = "a\r\nb\r\n";
-        let result = replace_lines(input, 1, 1, "X\r\n").unwrap();
-        assert_eq!(result, "X\r\nb\r\n");
-    }
-
-    #[test]
-    fn replace_lines_no_trailing_newline() {
-        let input = "a\nb";
-        let result = replace_lines(input, 1, 1, "X").unwrap();
-        assert_eq!(result, "X\nb");
-    }
-
-    #[test]
-    fn replace_lines_replacement_no_trailing_newline() {
-        let input = "a\nb\n";
-        let result = replace_lines(input, 1, 1, "X").unwrap();
-        // trailing newline comes from input, not replacement
-        assert_eq!(result, "X\nb\n");
-    }
-
-    #[test]
-    fn replace_lines_replace_multiple() {
+    fn replace_string_multiple_lines() {
         let input = "a\nb\nc\nd\n";
-        let result = replace_lines(input, 2, 3, "X\nY\n").unwrap();
+        let result = replace_string(input, "b\nc\n", "X\nY\n", false, None, None).unwrap();
         assert_eq!(result, "a\nX\nY\nd\n");
     }
 
     #[test]
-    fn replace_lines_replace_multiple_crlf() {
+    fn replace_string_multiple_lines_crlf() {
         let input = "a\r\nb\r\nc\r\nd\r\n";
-        let result = replace_lines(input, 2, 3, "X\r\nY\r\n").unwrap();
+        let result = replace_string(input, "b\r\nc", "X\r\nY", false, None, None).unwrap();
         assert_eq!(result, "a\r\nX\r\nY\r\nd\r\n");
     }
 
     #[test]
-    fn replace_lines_invalid_range() {
-        assert!(replace_lines("a\nb\n", 0, 1, "X\n").is_err());
-        assert!(replace_lines("a\nb\n", 2, 1, "X\n").is_err());
+    fn replace_string_not_found() {
+        let input = "a\nb\nc\n";
+        assert!(replace_string(input, "X", "Y", false, None, None).is_err());
     }
 
     #[test]
-    fn replace_lines_range_exceeds_length() {
-        assert!(replace_lines("a\nb\n", 1, 10, "X\n").is_err());
+    fn replace_string_multiple_matches_without_replace_all() {
+        let input = "a\nb\na\n";
+        assert!(replace_string(input, "a", "X", false, None, None).is_err());
+    }
+
+    #[test]
+    fn replace_string_replace_all() {
+        let input = "a\nb\na\nc\n";
+        let result = replace_string(input, "a", "X", true, None, None).unwrap();
+        assert_eq!(result, "X\nb\nX\nc\n");
+    }
+
+    #[test]
+    fn replace_string_empty_old_string() {
+        let input = "a\nb\n";
+        let result = replace_string(input, "a", "X", false, None, None).unwrap();
+        assert_eq!(result, "X\nb\n");
+    }
+
+    #[test]
+    fn replace_string_with_line_range() {
+        let input = "a\nb\nc\nd\n";
+        let result = replace_string(input, "b", "X", false, Some(2), Some(3)).unwrap();
+        assert_eq!(result, "a\nX\nc\nd\n");
+    }
+
+    #[test]
+    fn replace_string_with_line_range_not_found() {
+        let input = "a\nb\nc\n";
+        assert!(replace_string(input, "a", "X", false, Some(2), Some(3)).is_err());
+    }
+
+    #[test]
+    fn replace_string_with_line_range_multiple_matches() {
+        let input = "a\na\na\na\n";
+        assert!(replace_string(input, "a", "X", false, Some(1), Some(3)).is_err());
+    }
+
+    #[test]
+    fn replace_string_with_line_range_replace_all() {
+        let input = "a\na\na\na\n";
+        let result = replace_string(input, "a", "X", true, Some(1), Some(3)).unwrap();
+        assert_eq!(result, "X\nX\nX\na\n");
+    }
+
+    #[test]
+    fn replace_string_invalid_line_range() {
+        assert!(replace_string("a\nb\n", "a", "X", false, Some(2), Some(1)).is_err());
+        assert!(replace_string("a\nb\n", "a", "X", false, Some(0), Some(1)).is_err());
+    }
+
+    #[test]
+    fn replace_string_line_range_exceeds_length() {
+        assert!(replace_string("a\nb\n", "a", "X", false, Some(1), Some(10)).is_err());
     }
 }

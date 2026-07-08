@@ -693,7 +693,7 @@ Current workspace: {workspace}
 Current OS: {os}, shell: {shell}
 
   - read(path, start_line?, end_line?)
-  - edit(path, content, start_line?, end_line?)
+  - edit(path, content, oldString?, replaceAll?, start_line?, end_line?)
   - shell_command(command) - runs in {shell}
     Current shell details: {shell_details}
   - python_command(code) - runs Python source code directly
@@ -1410,15 +1410,27 @@ fn tool_result_title(call: &ToolCall) -> String {
         return "Ask".to_string();
     }
 
-if call.name == "read" || call.name == "edit" {
+if call.name == "read" {
         if let Ok(val) = serde_json::from_str::<serde_json::Value>(&call.arguments) {
             let start = val.get("start_line").and_then(|v| v.as_u64());
             let end = val.get("end_line").and_then(|v| v.as_u64());
             match (start, end) {
-                (Some(s), Some(e)) => return format!("{} [{}:{}]", call.name, s, e),
-                (Some(s), None) => return format!("{} [{}:]", call.name, s),
-                (None, Some(e)) => return format!("{} [{}:]", call.name, e),
+                (Some(s), Some(e)) => return format!("read [{}:{}]", s, e),
+                (Some(s), None) => return format!("read [{}:]", s),
+                (None, Some(e)) => return format!("read [{}:]", e),
                 (None, None) => {}
+            }
+        }
+    }
+    if call.name == "edit" {
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&call.arguments) {
+            if let Some(old) = val.get("oldString").and_then(|v| v.as_str()) {
+                let display = if old.len() > 40 {
+                    format!("{}…", &old[..40])
+                } else {
+                    old.to_string()
+                };
+                return format!("edit [{}]", display);
             }
         }
     }
