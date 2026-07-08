@@ -617,7 +617,7 @@ pub fn render_agents_area(area: ratatui::layout::Rect, buf: &mut ratatui::buffer
     // Render line separator
     let sep_y = area.y + 4;
     let sep_line = Line::from(Span::styled(
-        "\u{2500}".repeat(area.width.saturating_sub(1) as usize),
+        "-".repeat(area.width.saturating_sub(1) as usize),
         Theme::dim(),
     ));
     let p_sep = Paragraph::new(sep_line);

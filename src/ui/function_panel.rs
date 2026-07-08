@@ -44,7 +44,7 @@ pub fn render(area: Rect, buf: &mut Buffer, app: &mut App) {
     let mut title_spans: Vec<Span> = Vec::new();
     for (i, tab) in app.function.tabs.iter().enumerate() {
         if i > 0 {
-            title_spans.push(Span::raw(" │ "));
+            title_spans.push(Span::raw(" | "));
         }
         let name = match tab {
             SidebarTab::Notifications => "notifications",
