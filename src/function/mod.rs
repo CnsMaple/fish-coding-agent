@@ -1893,7 +1893,7 @@ impl App {
     /// not coast. The integer offset is written to `session.scroll` so
     /// the existing render path picks it up, and the render cache is
     /// invalidated so the change is visible on the next frame.
-    pub fn set_scroll_anchored(&mut self, value: u16) {
+    pub fn set_scroll_anchored(&mut self, value: u32) {
         self.session_scroll.snap(value as f32);
         self.session.scroll = value;
     }

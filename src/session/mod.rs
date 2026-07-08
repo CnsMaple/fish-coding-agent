@@ -261,7 +261,7 @@ pub struct Session {
     #[serde(default)]
     pub todo_items: Vec<TodoItem>,
     /// scroll offset from bottom; 0 = follow tail
-    pub scroll: u16,
+    pub scroll: u32,
     /// id of the message currently being edited/streamed
     #[serde(skip)]
     pub streaming_id: Option<usize>,
@@ -384,8 +384,8 @@ impl Session {
             .map(|(_, n)| n)
             .unwrap_or(new_total);
         if self.scroll > 0 && new_total > old_total {
-            let delta = (new_total - old_total) as u16;
-            let room = u16::MAX - self.scroll;
+            let delta = new_total - old_total;
+            let room = u32::MAX - self.scroll;
             self.scroll = self.scroll.saturating_add(delta.min(room));
         }
         self.last_rendered_total = Some((width, new_total));
@@ -810,7 +810,7 @@ impl Session {
 
         // Compute total lines the same way render.rs does.
         let total = self.count_all_lines();
-        let scroll = (self.scroll as u32).min(total.saturating_sub(inner_h));
+        let scroll = self.scroll.min(total.saturating_sub(inner_h));
         let offset_from_bottom = inner_h + scroll;
         total.saturating_sub(offset_from_bottom)
     }
@@ -999,7 +999,7 @@ impl Session {
         let lines_before = self.lines_before(last_user);
         let total = self.count_all_lines();
         let target = total.saturating_sub(lines_before + inner_h);
-        self.scroll = target.min(u16::MAX as u32) as u16;
+        self.scroll = target;
     }
 
     /// Set `scroll` so the message at index `msg_idx` appears at the
@@ -1013,8 +1013,7 @@ impl Session {
         let total = self.count_all_lines();
         self.scroll = total
             .saturating_sub(inner_h)
-            .saturating_sub(lines_before)
-            .min(u16::MAX as u32) as u16;
+            .saturating_sub(lines_before);
     }
 
     /// Number of rendered lines from the top of the buffer up to (but
@@ -1293,18 +1292,18 @@ mod tests {
         assert_eq!(s.scroll, 10, "delta resumes on the new width");
     }
 
-    /// Overflow: scroll saturates at u16::MAX instead of wrapping.
+    /// Overflow: scroll saturates at u32::MAX instead of wrapping.
     #[test]
-    fn pin_scroll_saturates_at_u16_max() {
+    fn pin_scroll_saturates_at_u32_max() {
         let mut s = Session {
-            scroll: u16::MAX - 2,
+            scroll: u32::MAX - 2,
             ..Default::default()
         };
         s.pin_scroll_for_total(80, 100);
         s.pin_scroll_for_total(80, 200);
         assert_eq!(
             s.scroll,
-            u16::MAX,
+            u32::MAX,
             "scroll must saturate, never overflow"
         );
     }

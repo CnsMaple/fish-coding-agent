@@ -52,12 +52,11 @@ pub fn render(
         .unwrap_or_else(|| count_lines_estimate(session));
     // Do the viewport math in u32 so a session that overflows u16
     // (10M+ token threads) still scrolls correctly. `session.scroll`
-    // is u16 because it stores "scroll offset from bottom" which is
-    // bounded by viewport height in practice; clamp it here against
-    // the true u32 max so the offset is derived from the real total.
+    // is u32 and stores "scroll offset from bottom"; clamp it here
+    // against the true u32 max so the offset is derived from the real total.
     let total_u32: u32 = total;
     let max_scroll_u32: u32 = total_u32.saturating_sub(inner_h as u32);
-    let scroll_u32: u32 = (session.scroll as u32).min(max_scroll_u32);
+    let scroll_u32: u32 = session.scroll.min(max_scroll_u32);
     let offset_from_top: u32 = max_scroll_u32.saturating_sub(scroll_u32);
     let start: u32 = offset_from_top;
     let end: u32 = (offset_from_top + inner_h as u32).min(total_u32);
@@ -524,7 +523,19 @@ fn build_lines_viewport(
     end_line: u32,
 ) -> Vec<Line<'static>> {
     let mut out: Vec<Line<'static>> = Vec::new();
-    if session.messages.is_empty() || session.line_offsets.len() <= 1 {
+    if session.messages.is_empty() {
+        return out;
+    }
+    // When line_offsets is stale (e.g. cache was invalidated between
+    // count_all_lines_with_width and render), fall back to a full
+    // build + slice so the viewport is never blank.
+    if session.line_offsets.len() <= 1 {
+        let (all, _) = build_lines(session, width);
+        let start = (start_line as usize).min(all.len());
+        let end = (end_line as usize).min(all.len());
+        if start < end {
+            out.extend(all[start..end].iter().cloned());
+        }
         return out;
     }
 

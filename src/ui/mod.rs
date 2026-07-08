@@ -88,7 +88,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     let scroll = app
         .session
         .scroll
-        .min(total_lines.saturating_sub(inner_h) as u16);
+        .min(total_lines.saturating_sub(inner_h).min(u32::MAX as usize) as u32);
     render_session_scrollbar(
         session_frame_area,
         f.buffer_mut(),

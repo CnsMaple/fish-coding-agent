@@ -1890,13 +1890,13 @@ impl ScrollAnimator {
     /// integer-rounded `current` (callers write it into
     /// `session.scroll`); `settled` is `true` once the gating window
     /// has been cleared.
-    pub fn step(&mut self, now: Instant) -> (u16, bool) {
+    pub fn step(&mut self, now: Instant) -> (u32, bool) {
         self.last_tick = Some(now);
         if !self.animating {
-            return (self.current.round() as u16, true);
+            return (self.current.round() as u32, true);
         }
         self.animating = false;
-        (self.current.round() as u16, true)
+        (self.current.round() as u32, true)
     }
 }
 
@@ -1980,9 +1980,9 @@ fn handle_mouse(m: MouseEvent, app: &mut App) {
         let max_scroll_f = if let Some(area) = app.session_area {
             let inner_h = area.height.saturating_sub(2) as u32;
             let total = app.session.count_all_lines_with_width(area.width as usize);
-            (total.saturating_sub(inner_h).min(u16::MAX as u32)) as f32
+            total.saturating_sub(inner_h) as f32
         } else {
-            u16::MAX as f32
+            u32::MAX as f32
         };
         app.session_scroll.begin_gesture(delta, step, now);
         if app.session_scroll.target > max_scroll_f {
@@ -1990,7 +1990,7 @@ fn handle_mouse(m: MouseEvent, app: &mut App) {
             app.session_scroll.current = max_scroll_f;
         }
         // Write the integer anchor. The view jumps on the next draw.
-        app.session.scroll = app.session_scroll.current.round() as u16;
+        app.session.scroll = app.session_scroll.current.round() as u32;
         return;
     }
 
@@ -3817,7 +3817,7 @@ fn commit_timeline_jump(app: &mut App, state: &crate::function::TimelinePickerSt
     let mut scroll = app.session.scroll;
     if tool_idx.is_some() {
         // Nudge scroll up a bit so the tool block is more visible.
-        let nudge = 3u16.min(scroll);
+        let nudge = 3u32.min(scroll);
         scroll = scroll.saturating_sub(nudge);
     }
     // Programmatic jump — land immediately, cancel any momentum.
@@ -7912,9 +7912,9 @@ mod tests {
     // Smooth-scroll animator
     // ============================================================
 
-    fn advance_animator(a: &mut ScrollAnimator, ticks: u32, ms_per_tick: u64) -> (u16, bool) {
+    fn advance_animator(a: &mut ScrollAnimator, ticks: u32, ms_per_tick: u64) -> (u32, bool) {
         let mut last_settled = true;
-        let mut last_v = a.current.round() as u16;
+        let mut last_v = a.current.round() as u32;
         for i in 0..ticks {
             let now = Instant::now() + Duration::from_millis(ms_per_tick * (i as u64 + 1));
             let (v, settled) = a.step(now);
