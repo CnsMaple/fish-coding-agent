@@ -2860,6 +2860,14 @@ async fn dispatch_to_active_tab(k: crossterm::event::KeyEvent, app: &mut App) ->
                 app.function.active = app.function.tabs.len().saturating_sub(1);
             }
             app.maybe_hide_panel();
+        } else if matches!(&tab, crate::function::SidebarTab::SessionPicker(state) if state.consumed) {
+            // The handler already closed the tab and resumed the session.
+            // Don't restore it.
+            app.function.tabs.remove(active);
+            if app.function.active >= app.function.tabs.len() {
+                app.function.active = app.function.tabs.len().saturating_sub(1);
+            }
+            app.maybe_hide_panel();
         } else {
             app.function.tabs[active] = tab;
         }
@@ -3272,6 +3280,7 @@ fn handle_session_picker_key(
         }
         KeyCode::Enter => {
             if let Some(id) = state.selected_id() {
+                state.consumed = true;
                 close_active_function_tab(app);
                 app.resume_session(&id);
             }

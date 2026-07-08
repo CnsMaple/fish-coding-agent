@@ -953,6 +953,10 @@ pub struct SessionPickerState {
     pub cursor: usize,
     pub scroll: usize,
     pub focus: PickerFocus,
+    /// Set to `true` when the user presses Enter to resume a session,
+    /// so that `dispatch_to_active_tab` removes the tab instead of
+    /// restoring it (the handler already closed the tab and resumed).
+    pub consumed: bool,
 }
 
 impl SessionPickerState {
@@ -966,6 +970,7 @@ impl SessionPickerState {
             cursor: 0,
             scroll: 0,
             focus: PickerFocus::Search,
+            consumed: false,
         };
         s.reload(cwd);
         s
