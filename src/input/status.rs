@@ -71,7 +71,7 @@ impl StatusBar {
         // directory prefix as `~` so the line stays compact.
         if let Some(home) = dirs::home_dir() {
             if let Ok(stripped) = p.strip_prefix(&home) {
-                self.cwd = format!("~/{}", stripped.display());
+                self.cwd = format!("~/{}/", stripped.display());
                 return;
             }
         }
@@ -222,12 +222,9 @@ impl StatusBar {
         self.recompute_compact_pct();
     }
 
-    /// Render the model / thinking / hit line shown inside the input
-    /// area. The project cwd is intentionally NOT included here — it is
-    /// rendered on its own line below the input block.
-    ///
-    /// If no provider name is set, we omit the `name:` prefix so the
-    /// user doesn't see a stray `-:(no model)` style label.
+    /// Render the model / thinking / ctx / cmp line shown inside the
+    /// input area title. tok, hit, and mcp stats are rendered
+    /// separately on the cwd line via `render_stats_line`.
     pub fn render_line(&self) -> Line<'static> {
         self.render_line_with_mode(&self.mode)
     }
@@ -236,10 +233,6 @@ impl StatusBar {
         let fmt_pct = |v: Option<f64>| match v {
             None => "--".to_string(),
             Some(x) => format!("{:.1}%", x * 100.0),
-        };
-        let fmt_tps = |v: Option<f64>| match v {
-            None => "--".to_string(),
-            Some(x) => format!("{:.1}/s", x),
         };
         let fmt_total = |v: Option<u64>| match v {
             None => "--".to_string(),
@@ -260,13 +253,6 @@ impl StatusBar {
             spans.push(Span::raw(" | think:"));
             spans.push(Span::styled(self.thinking.as_str(), Theme::bold()));
         }
-        spans.push(Span::raw(" | tok:"));
-        spans.push(Span::styled(fmt_tps(self.tok_cur), Theme::base()));
-        if let Some(avg) = self.tok_avg {
-            spans.push(Span::raw(" (avg "));
-            spans.push(Span::styled(format!("{:.1}/s", avg), Theme::dim()));
-            spans.push(Span::raw(")"));
-        }
         spans.push(Span::raw(" | ctx:"));
         if self.context_window_known {
             spans.push(Span::styled(fmt_pct(self.token_pct), Theme::base()));
@@ -280,10 +266,6 @@ impl StatusBar {
         } else {
             spans.push(Span::styled(fmt_total(self.token_total), Theme::dim()));
         }
-        // Auto-compact segment. Only emitted when the toggle is on
-        // and we have enough information to compute a headroom
-        // percentage (or a triggered flash). Mirrors opencode's
-        // `cmp:X% free` indicator.
         if self.auto_compact {
             if self.compact_triggered {
                 spans.push(Span::raw(" | "));
@@ -295,6 +277,28 @@ impl StatusBar {
                     Theme::base(),
                 ));
             }
+        }
+        Line::from(spans)
+    }
+
+    /// Render only the tok, hit, and mcp stats — shown right-aligned on
+    /// the cwd line below the input block.
+    pub fn render_stats_line(&self) -> Line<'static> {
+        let fmt_pct = |v: Option<f64>| match v {
+            None => "--".to_string(),
+            Some(x) => format!("{:.1}%", x * 100.0),
+        };
+        let fmt_tps = |v: Option<f64>| match v {
+            None => "--".to_string(),
+            Some(x) => format!("{:.1}/s", x),
+        };
+        let mut spans: Vec<Span<'static>> = Vec::new();
+        spans.push(Span::raw("tok:"));
+        spans.push(Span::styled(fmt_tps(self.tok_cur), Theme::base()));
+        if let Some(avg) = self.tok_avg {
+            spans.push(Span::raw(" (avg "));
+            spans.push(Span::styled(format!("{:.1}/s", avg), Theme::dim()));
+            spans.push(Span::raw(")"));
         }
         spans.push(Span::raw(" | hit:"));
         spans.push(Span::styled(fmt_pct(self.hit_cur), Theme::base()));

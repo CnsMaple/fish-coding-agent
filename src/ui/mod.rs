@@ -352,6 +352,23 @@ fn render_cwd(area: Rect, buf: &mut Buffer, app: &App) {
     let avail = area.width as usize;
     let path = &app.status.cwd;
 
+    // Compute the right-aligned stats line and its display width.
+    let stats_line = app.status.render_stats_line();
+    let stats_width = stats_line.width();
+    let stats_pad = if stats_width > 0 && avail > stats_width { 1 } else { 0 };
+
+    // Split area: left for cwd, right for stats.
+    let left_w = avail.saturating_sub(stats_width + stats_pad);
+    let right_w = stats_width;
+
+    // --- Left: cwd / interrupt hint ---
+    let left_area = Rect {
+        x: area.x,
+        y: area.y,
+        width: left_w as u16,
+        height: 1,
+    };
+
     if app.inflight.is_some() {
         let hint = match app.cancel_state {
             CancelState::Idle => {
@@ -365,7 +382,7 @@ fn render_cwd(area: Rect, buf: &mut Buffer, app: &App) {
         let sep = " | ";
         let prefix = "~ ";
         let fixed_w = hint_w + sep.len() + prefix.len();
-        let path_max = avail.saturating_sub(fixed_w);
+        let path_max = left_w.saturating_sub(fixed_w);
         let truncated = truncate_path(path, path_max);
         let line = Line::from(vec![
             Span::styled(hint, Theme::dim()),
@@ -374,17 +391,29 @@ fn render_cwd(area: Rect, buf: &mut Buffer, app: &App) {
             Span::styled(truncated, Theme::dim()),
         ]);
         let p = ratatui::widgets::Paragraph::new(line);
-        p.render(area, buf);
+        p.render(left_area, buf);
     } else {
         let prefix = "~ ";
-        let path_max = avail.saturating_sub(prefix.len());
+        let path_max = left_w.saturating_sub(prefix.len());
         let truncated = truncate_path(path, path_max);
         let line = Line::from(vec![
             Span::styled(prefix, Theme::dim()),
             Span::styled(truncated, Theme::dim()),
         ]);
         let p = ratatui::widgets::Paragraph::new(line);
-        p.render(area, buf);
+        p.render(left_area, buf);
+    }
+
+    // --- Right: stats ---
+    if right_w > 0 {
+        let right_area = Rect {
+            x: area.x + left_w as u16 + stats_pad as u16,
+            y: area.y,
+            width: right_w as u16,
+            height: 1,
+        };
+        let p = ratatui::widgets::Paragraph::new(stats_line);
+        p.render(right_area, buf);
     }
 }
 

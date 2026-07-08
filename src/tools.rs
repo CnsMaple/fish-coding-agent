@@ -529,8 +529,9 @@ async fn run_shell_streaming_impl(
                     Ok(0) => break,
                     Ok(_) => {
                         buf.push_str(&line);
+                        let clean = strip_ansi(&line);
                         let _ = tx.send(AppMsg::ToolDelta {
-                            content: line.clone(),
+                            content: clean,
                         });
                     }
                     Err(_) => break,
@@ -545,14 +546,14 @@ async fn run_shell_streaming_impl(
         if let Some(mut reader) = stderr_reader {
             let mut line = String::new();
             loop {
-                line.clear();
                 match reader.read_line(&mut line).await {
                     Ok(0) => break,
                     Ok(_) => {
                         let tag = "stderr: ";
                         buf.push_str(&line);
+                        let clean = strip_ansi(&line);
                         let _ = tx.send(AppMsg::ToolDelta {
-                            content: format!("{tag}{line}"),
+                            content: format!("{tag}{clean}"),
                         });
                     }
                     Err(_) => break,

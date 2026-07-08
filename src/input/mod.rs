@@ -473,26 +473,37 @@ format!("[!{}] | ", app.pending_events),
             ),
         );
     }
-    // One space of padding on each side so the title text does not touch
-    // the left/right border lines.
-    title.spans.insert(0, Span::raw(" "));
+    title.spans.insert(0, Span::raw("-- "));
     title.spans.push(Span::raw(" "));
 
+    let border_set = ratatui::symbols::border::Set {
+        top_left: "-",
+        top_right: "-",
+        bottom_left: "-",
+        bottom_right: "-",
+        vertical_left: " ",
+        vertical_right: " ",
+        horizontal_top: "-",
+        horizontal_bottom: "-",
+        ..ratatui::symbols::border::Set::default()
+    };
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_set(app.config.border_type.ratatui_set())
+        .border_set(border_set)
         .border_style(match app.focus_target {
             crate::function::FocusTarget::Input => Theme::focused_border(),
             crate::function::FocusTarget::FunctionPanel => Theme::unfocused_border(),
         })
         .title(title);
-    let inner = block.inner(area);
+    let mut inner = block.inner(area);
+    // Keep 1 extra space on the right (border already gives 1, total = 2).
+    inner.width = inner.width.saturating_sub(1);
     block.render(area, buf);
     if inner.height < 1 {
         return;
     }
 
-    let prompt = " > ".to_string();
+    let prompt = " ".to_string();
     let prompt_width = UnicodeWidthStr::width(prompt.as_str());
     let buffer = &app.input.buffer;
     let cursor = app.input.cursor.min(buffer.len());
@@ -522,6 +533,7 @@ format!("[!{}] | ", app.pending_events),
         let max_scroll = all_lines.len().saturating_sub(1);
         let scroll = scroll.min(max_scroll);
         let mut vis_before = 0usize;
+
         for (i, &v) in seg_vis.iter().enumerate() {
             if i >= scroll {
                 break;
@@ -691,7 +703,8 @@ format!("[!{}] | ", app.pending_events),
                 cursor_col = prompt_width as u16;
             }
             // Count visual lines from all earlier visible segments
-let mut vis_before = 0usize;
+            let mut vis_before = 0usize;
+
             for visible in seg_vis.iter().take(idx.min(end_line)).skip(start_line) {
                 vis_before += *visible;
             }
