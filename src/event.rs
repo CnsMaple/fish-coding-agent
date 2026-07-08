@@ -25,6 +25,7 @@ fn position_ime_cursor(app: &mut App) {
     let cursor = match app.focus_target {
         crate::function::FocusTarget::FunctionPanel => app.function_panel_cursor,
         crate::function::FocusTarget::Input => app.input_cursor_screen,
+        crate::function::FocusTarget::AgentsCheckbox => None,
     };
     let Some((cx, cy)) = cursor else {
         return;
@@ -1389,21 +1390,66 @@ async fn handle_key(k: crossterm::event::KeyEvent, app: &mut App) {
         return;
     }
 
-    // Alt+L: toggle focus between function panel and input.
+    // Alt+L: cycle focus between Input -> FunctionPanel -> AgentsCheckbox -> Input.
     if k.modifiers.contains(KeyModifiers::ALT)
         && matches!(k.code, KeyCode::Char('l') | KeyCode::Char('L'))
     {
-        if app.focus_target == crate::function::FocusTarget::FunctionPanel {
-            app.focus_target = crate::function::FocusTarget::Input;
-        } else if app.function_visible {
-            app.focus_target = crate::function::FocusTarget::FunctionPanel;
+        match app.focus_target {
+            crate::function::FocusTarget::Input => {
+                if app.function_visible {
+                    app.focus_target = crate::function::FocusTarget::FunctionPanel;
+                } else if app.agents_visible {
+                    app.focus_target = crate::function::FocusTarget::AgentsCheckbox;
+                }
+            }
+            crate::function::FocusTarget::FunctionPanel => {
+                if app.agents_visible {
+                    app.focus_target = crate::function::FocusTarget::AgentsCheckbox;
+                } else {
+                    app.focus_target = crate::function::FocusTarget::Input;
+                }
+            }
+            crate::function::FocusTarget::AgentsCheckbox => {
+                app.focus_target = crate::function::FocusTarget::Input;
+            }
         }
         return;
+    }
+
+    // Handle Up/Down for agents checkbox navigation
+    if app.focus_target == crate::function::FocusTarget::AgentsCheckbox {
+        if matches!(k.code, KeyCode::Up) {
+            if app.agents_cursor > 0 {
+                app.agents_cursor -= 1;
+            }
+            return;
+        }
+        if matches!(k.code, KeyCode::Down) {
+            let count = app.config.agents.entries.len();
+            if count > 0 && app.agents_cursor + 1 < count {
+                app.agents_cursor += 1;
+            }
+            return;
+        }
     }
 
     if app.focus_target == crate::function::FocusTarget::FunctionPanel
         && dispatch_to_active_tab(k, app).await
     {
+        return;
+    }
+
+    // Handle Enter/Space for agents checkbox toggle
+    if app.focus_target == crate::function::FocusTarget::AgentsCheckbox
+        && (matches!(k.code, KeyCode::Enter) || matches!(k.code, KeyCode::Char(' ')))
+    {
+        let keys: Vec<String> = app.config.agents.entries.keys().cloned().collect();
+        if app.agents_cursor < keys.len() {
+            if let Some(entry) = app.config.agents.entries.get_mut(&keys[app.agents_cursor]) {
+                *entry = !*entry;
+                app.save_config();
+            }
+        }
         return;
     }
 
@@ -2280,6 +2326,8 @@ fn expand_paste_blocks(mut raw: String, paste_blocks: &mut VecDeque<String>) -> 
 }
 
 fn submit_input(app: &mut App) {
+    // Hide the agents splash area once the user sends input.
+    app.agents_visible = false;
     // Snap the chat viewport to the tail before we push any new
     // messages. If the user scrolled up to look at older content,
     // we want their just-submitted message to be visible (so they
@@ -4967,6 +5015,8 @@ mod tests {
             compacting: false,
             pending_post_compaction_prompt: None,
             last_mouse_event: None,
+            agents_visible: false,
+            agents_cursor: 0,
         }
     }
 

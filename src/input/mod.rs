@@ -493,6 +493,7 @@ format!("[!{}] | ", app.pending_events),
         .border_style(match app.focus_target {
             crate::function::FocusTarget::Input => Theme::focused_border(),
             crate::function::FocusTarget::FunctionPanel => Theme::unfocused_border(),
+            crate::function::FocusTarget::AgentsCheckbox => Theme::unfocused_border(),
         })
         .title(title);
     let mut inner = block.inner(area);

@@ -374,6 +374,17 @@ pub fn default_tool_preview_lines() -> usize {
 pub const TOOL_PREVIEW_LINES_MIN: usize = 3;
 pub const TOOL_PREVIEW_LINES_MAX: usize = 50;
 
+/// Per-file enabled/disabled state for discovered agents.md files.
+/// Keyed by absolute path so the user can independently control
+/// `~/.agents/agents.md` and `./agents.md`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AgentsConfig {
+    #[serde(default)]
+    pub entries: HashMap<String, bool>,
+    #[serde(default)]
+    pub visible: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     /// Active entry id, e.g. "openai:key". None means no entry is active.
@@ -422,6 +433,9 @@ pub struct Config {
     /// toggle used to disable a remote default.
     #[serde(default)]
     pub mcp: HashMap<String, crate::mcp::McpEntry>,
+    /// Per-file enabled/disabled state for discovered agents.md files.
+    #[serde(default)]
+    pub agents: AgentsConfig,
 }
 
 impl Config {
@@ -489,6 +503,7 @@ impl Config {
             compact_reserved: None,
             entries,
             mcp: HashMap::new(),
+            agents: AgentsConfig::default(),
         }
     }
 
@@ -676,6 +691,7 @@ impl Default for Config {
             compact_reserved: None,
             entries: HashMap::new(),
             mcp: HashMap::new(),
+            agents: AgentsConfig::default(),
         }
     }
 }

@@ -14,73 +14,67 @@ pub mod picker_widget;
 
 /// Height of the standalone cwd line that sits below the input block.
 const CWD_HEIGHT: u16 = 1;
+const AGENTS_AREA_HEIGHT: u16 = 5;
+
 pub fn render(f: &mut Frame, app: &mut App) {
     let area = f.area();
-    // Layout: [session, (function panel)?, input, cwd]. The cwd is shown
-    // as a separate line below the input — the user no longer wants the
-    // project path on the input block's title.
+    let agents_height = if app.agents_visible { AGENTS_AREA_HEIGHT } else { 0 };
     let input_height = input_height(app, area.height, area.width);
-    let chunks = if app.function_visible {
-        let remaining = area.height.saturating_sub(input_height + CWD_HEIGHT);
+
+    let mut constraints = vec![];
+    if app.agents_visible {
+        constraints.push(Constraint::Length(agents_height));
+    }
+    constraints.push(Constraint::Min(0));
+    if app.function_visible {
+        let remaining = area.height.saturating_sub(input_height + CWD_HEIGHT + agents_height);
         let pct_height = (remaining as f64 * 0.20) as u16;
         let panel_height = app.function.tabs.get(app.function.active)
             .map_or(4, |t| t.panel_height(pct_height));
-
-        Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Min(0),
-                Constraint::Length(panel_height),
-                Constraint::Length(input_height),
-                Constraint::Length(CWD_HEIGHT),
-            ])
-            .split(area)
-    } else {
-        Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Min(0),
-                Constraint::Length(input_height),
-                Constraint::Length(CWD_HEIGHT),
-            ])
-            .split(area)
-    };
+        constraints.push(Constraint::Length(panel_height));
+    }
+    constraints.push(Constraint::Length(input_height));
+    constraints.push(Constraint::Length(CWD_HEIGHT));
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(constraints)
+        .split(area);
 
     app.session.display = app.config.thinking_display;
     app.session.tool_display = app.config.tool_display;
     app.session.tool_preview_lines = app.config.tool_preview_lines;
-    let session_frame_area = chunks[0];
-    let area = session_content_area(session_frame_area);
-    app.session_area = Some(area);
 
-    let width_u16 = area.width;
+    let agents_idx = if app.agents_visible { 0 } else { 0 };
+    let session_idx = if app.agents_visible { 1 } else { 0 };
+    let panel_idx = session_idx + 1;
+    let input_idx = if app.function_visible { panel_idx + 1 } else { session_idx + 1 };
+    let cwd_idx = input_idx + 1;
+
+    if app.agents_visible {
+        render_agents_area(chunks[agents_idx], f.buffer_mut(), app);
+    }
+    let session_frame_area = chunks[session_idx];
+    let content_area = session_content_area(session_frame_area);
+    app.session_area = Some(content_area);
+
+    let width_u16 = content_area.width;
     app.session.count_all_lines_with_width(width_u16 as usize);
 
+    crate::session::render::render(
+        content_area,
+        f.buffer_mut(),
+        &app.session,
+        &mut app.tool_toggle_rows,
+    );
     if app.function_visible {
-        crate::session::render::render(
-            area,
-            f.buffer_mut(),
-            &app.session,
-            &mut app.tool_toggle_rows,
-        );
-        function_panel::render(chunks[1], f.buffer_mut(), app);
-        crate::input::render(chunks[2], f.buffer_mut(), app);
-        render_cwd(chunks[3], f.buffer_mut(), app);
-    } else {
-        crate::session::render::render(
-            area,
-            f.buffer_mut(),
-            &app.session,
-            &mut app.tool_toggle_rows,
-        );
-        crate::input::render(chunks[1], f.buffer_mut(), app);
-        render_cwd(chunks[2], f.buffer_mut(), app);
+        function_panel::render(chunks[panel_idx], f.buffer_mut(), app);
     }
+    crate::input::render(chunks[input_idx], f.buffer_mut(), app);
+    render_cwd(chunks[cwd_idx], f.buffer_mut(), app);
 
     app.thinking_toggle_rows.clear();
     app.tool_toggle_rows.clear();
-    let area = session_content_area(session_frame_area);
-    let inner_h = area.height as usize;
+    let inner_h = content_area.height as usize;
 
     let total_lines: usize = app
         .session
@@ -147,7 +141,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
                     && (m.streaming || m.thinking_visible));
             for seg in &m.thinking_segments {
                 if line_idx >= start && line_idx < end {
-                    let screen_y = area.y + (line_idx - start) as u16;
+                    let screen_y = content_area.y + (line_idx - start) as u16;
                     app.thinking_toggle_rows.push((screen_y, msg_idx));
                 }
                 let lines = if expanded {
@@ -182,7 +176,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
                     t.cached_line_count_collapsed.unwrap_or(0) as usize
                 };
                 if lines > 0 && line_idx >= start && line_idx < end && t.name != "plan" {
-                    let screen_y = area.y + (line_idx - start) as u16;
+                    let screen_y = content_area.y + (line_idx - start) as u16;
                     app.tool_toggle_rows.push((screen_y, msg_idx, tool_idx));
                 }
                 line_idx += lines;
@@ -588,6 +582,87 @@ fn is_cjk(c: char) -> bool {
 
 fn is_cjk_punctuation(c: char) -> bool {
     matches!(c, '\u{3000}'..='\u{303F}' | '\u{FF00}'..='\u{FFEF}')
+}
+
+
+/// Render the agents.md splash area at the top of a new session.
+/// Left side: logo, right side: checkboxes for discovered agents.md files.
+pub fn render_agents_area(area: ratatui::layout::Rect, buf: &mut ratatui::buffer::Buffer, app: &mut crate::app::App) {
+    use crate::theme::Theme;
+    use ratatui::text::{Line, Span};
+    use ratatui::widgets::Paragraph;
+
+    if area.height < 5 || area.width < 20 {
+        return;
+    }
+    let logo_lines = [
+        "\u{2590}\u{2588}\u{259B}\u{2588}\u{259B}\u{2588}\u{258C}",
+        "\u{2590}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{258C}",
+    ];
+    let logo_width = 7u16;
+    let right_x = area.x + logo_width + 2;
+    let right_w = area.width.saturating_sub(logo_width + 2);
+
+    // Render logo
+    for (i, line) in logo_lines.iter().enumerate() {
+        let y = area.y + 1 + i as u16;
+        let logo_line = Line::from(Span::styled(*line, Theme::bold()));
+        let p = Paragraph::new(logo_line);
+        p.render(
+            ratatui::layout::Rect { x: area.x + 1, y, width: logo_width, height: 1 },
+            buf,
+        );
+    }
+
+    // Render line separator
+    let sep_y = area.y + 4;
+    let sep_line = Line::from(Span::styled(
+        "\u{2500}".repeat(area.width.saturating_sub(1) as usize),
+        Theme::dim(),
+    ));
+    let p_sep = Paragraph::new(sep_line);
+    p_sep.render(
+        ratatui::layout::Rect { x: area.x, y: sep_y, width: area.width.saturating_sub(1), height: 1 },
+        buf,
+    );
+
+    // Render checkboxes
+    let entries: Vec<(&String, &bool)> = app.config.agents.entries.iter().collect();
+    if entries.is_empty() {
+        let hint = Line::from(Span::styled("No agents.md found", Theme::dim()));
+        let p = Paragraph::new(hint);
+        p.render(
+            ratatui::layout::Rect { x: right_x, y: area.y + 1, width: right_w, height: 1 },
+            buf,
+        );
+        return;
+    }
+
+    for (i, (path, &enabled)) in entries.iter().enumerate() {
+        let y = area.y + 1 + i as u16;
+        if y >= area.y + 3 {
+            break;
+        }
+        let marker = if enabled { "[x]" } else { "[ ]" };
+        let cursor = if app.agents_cursor == i && app.focus_target == crate::function::FocusTarget::AgentsCheckbox {
+            "> "
+        } else {
+            "  "
+        };
+        let short = path.rsplit('/').next().or_else(|| path.rsplit('\\').next()).unwrap_or(path);
+        let label = format!("{cursor}{marker} {short}");
+        let style = if app.focus_target == crate::function::FocusTarget::AgentsCheckbox && app.agents_cursor == i {
+            Theme::bold()
+        } else {
+            Theme::dim()
+        };
+        let line = Line::from(Span::styled(label, style));
+        let p = Paragraph::new(line);
+        p.render(
+            ratatui::layout::Rect { x: right_x, y, width: right_w, height: 1 },
+            buf,
+        );
+    }
 }
 
 /// Test-only re-export under a stable name. The implementation lives in

@@ -75,6 +75,7 @@ pub fn render(area: Rect, buf: &mut Buffer, app: &mut App) {
         .border_style(match app.focus_target {
             crate::function::FocusTarget::FunctionPanel => Theme::focused_border(),
             crate::function::FocusTarget::Input => Theme::unfocused_border(),
+            crate::function::FocusTarget::AgentsCheckbox => Theme::unfocused_border(),
         })
         .title(Line::from(title_spans));
     let inner = block.inner(area);

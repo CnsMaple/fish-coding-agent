@@ -676,7 +676,23 @@ pub fn open_session_rename(app: &mut App, target_id: Option<String>, title: Stri
 /// System prompt instructing the model about available tools.
 /// Stresses using the structured tool_calls API, and provides a
 /// text-based fallback format for providers that don't support it.
-fn system_prompt(agent: crate::permission::Agent) -> String {
+/// Build a string containing the content of all enabled agents.md files.
+fn build_agents_content(app: &App) -> String {
+    let mut out = String::new();
+    for (path, &enabled) in &app.config.agents.entries {
+        if !enabled {
+            continue;
+        }
+        if let Ok(body) = std::fs::read_to_string(path) {
+            if !body.trim().is_empty() {
+                out.push_str(&format!("\n\n## User instructions from {}\n\n{}\n", path, body));
+            }
+        }
+    }
+    out
+}
+
+fn system_prompt(agent: crate::permission::Agent, agents_content: &str) -> String {
     let now = chrono::Local::now();
     let date = now.format("%Y-%m-%d %A").to_string();
     let cwd = std::env::current_dir()
@@ -833,13 +849,15 @@ convention demands it.
 ## Language
 
 - Respond in the same language as the user's first prompt. If the user explicitly \
-requests a different language in a later message, switch to that language.",
+requests a different language in a later message, switch to that language.
+{agents}",
             date = date,
             workspace = cwd,
             os = os,
             shell = shell,
             shell_details = crate::tools::shell_guidance(),
             skills = crate::skill::skills_for_system_prompt(),
+            agents = agents_content,
         ),
         crate::permission::Agent::Plan => format!(
             "\
@@ -911,12 +929,14 @@ its result.
     follow-up question (e.g. translation, clarification, summary), answer \
     using the information you already have. Do not re-explore the codebase \
     or call `plan` again.
-{skills}",
+{skills}
+{agents}",
             date = date,
             workspace = cwd,
             os = os,
             shell = shell,
             skills = crate::skill::skills_for_system_prompt(),
+            agents = agents_content,
         ),
     }
 }
@@ -1025,7 +1045,8 @@ pub fn send_message(app: &mut App, user_msg: Message) {
         && !app.compacting
         && app.inflight.is_none()
     {
-        let sp = system_prompt(app.active_agent);
+        let agents = build_agents_content(app);
+        let sp = system_prompt(app.active_agent, &agents);
         let msg_texts: Vec<String> = app
             .session
             .messages
@@ -1088,11 +1109,14 @@ pub fn send_message(app: &mut App, user_msg: Message) {
     });
     app.cancel_state = crate::function::CancelState::Idle;
 
+    let agents = build_agents_content(app);
+    let sp = system_prompt(app.active_agent, &agents);
+
     let req = ChatRequest {
         model,
         messages,
         thinking,
-        system: Some(system_prompt(app.active_agent)),
+        system: Some(sp),
         tools: None,
     };
 

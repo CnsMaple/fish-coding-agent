@@ -123,6 +123,7 @@ pub enum SidebarTab {
 pub enum FocusTarget {
     Input,
     FunctionPanel,
+    AgentsCheckbox,
 }
 
 impl SidebarTab {
@@ -1544,6 +1545,11 @@ pub struct App {
     /// `None` means "no follow-up pending". Drained on the next
     /// idle frame.
     pub pending_post_compaction_prompt: Option<String>,
+
+    /// Whether the agents.md splash area is visible (new session, no input yet).
+    pub agents_visible: bool,
+    /// Cursor position in the agents checkbox list.
+    pub agents_cursor: usize,
 }
 
 /// Mouse-driven text selection spanning the full TUI. Coordinates are
@@ -1675,6 +1681,8 @@ impl App {
             input_scroll_decoupled: false,
             compacting: false,
             pending_post_compaction_prompt: None,
+            agents_visible: true,
+            agents_cursor: 0,
         };
         // Sync the auto-compact status from the loaded config so
         // the very first render of the input bar shows the right
@@ -1687,6 +1695,7 @@ impl App {
         // cmp segment is suppressed when the model is unknown.
         app.status.set_max_output_tokens(0);
         app.refresh_status_model_context();
+        app.load_agents();
         app
     }
 
@@ -1815,6 +1824,46 @@ impl App {
         }
     }
 
+    /// Discover agents.md files at known paths and seed the config entries.
+    /// Called once on startup so the checkbox defaults are populated.
+    pub fn load_agents(&mut self) {
+        let mut paths: Vec<String> = Vec::new();
+
+        // ~/.agents/agents.md
+        if let Some(home) = dirs::home_dir() {
+            let p = home.join(".agents").join("agents.md");
+            paths.push(p.to_string_lossy().to_string());
+        }
+
+        // ./agents.md (relative to cwd)
+        let local = self.cwd.join("agents.md");
+        paths.push(local.to_string_lossy().to_string());
+
+        let mut changed = false;
+        for p in &paths {
+            if std::path::Path::new(p).exists() {
+                if !self.config.agents.entries.contains_key(p) {
+                    self.config.agents.entries.insert(p.clone(), true);
+                    changed = true;
+                }
+            } else {
+                if self.config.agents.entries.remove(p).is_some() {
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            self.save_config();
+        }
+        // Clamp cursor to valid range after entries may have changed.
+        let count = self.config.agents.entries.len();
+        if count == 0 {
+            self.agents_cursor = 0;
+        } else if self.agents_cursor >= count {
+            self.agents_cursor = count - 1;
+        }
+    }
+
     pub fn start_new_session(&mut self) {
         if !self.session.messages.is_empty() {
             self.save_current_session();
@@ -1829,6 +1878,10 @@ impl App {
             self.function.active = self.function.tabs.len().saturating_sub(1);
         }
         self.maybe_hide_panel();
+        // Show the agents splash area for the new session.
+        self.load_agents();
+        self.agents_visible = true;
+        self.agents_cursor = 0;
         // Land at the tail immediately; cancel any in-flight momentum.
         self.set_scroll_anchored(0);
         self.status.reset_usage_stats();
@@ -1869,6 +1922,7 @@ impl App {
     }
 
     pub fn resume_session(&mut self, id: &str) {
+        self.agents_visible = false;
         match crate::session::store::load(id) {
             Ok(stored) => {
                 self.session = Session {
@@ -1969,6 +2023,7 @@ impl App {
 
     pub fn fork_session(&mut self, source_id: Option<String>) {
         self.save_current_session();
+        self.agents_visible = false;
         let source = source_id.unwrap_or_else(|| self.session_id.clone());
         match crate::session::store::fork(&source, &self.cwd, None) {
             Ok(stored) => {
@@ -2468,6 +2523,8 @@ mod tests {
             input_scroll_decoupled: false,
             compacting: false,
             pending_post_compaction_prompt: None,
+            agents_visible: false,
+            agents_cursor: 0,
         }
     }
 
