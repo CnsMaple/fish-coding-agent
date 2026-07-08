@@ -11,7 +11,6 @@ An AI CLI agent with a TUI written in Rust.
 - `/settings` opens a fresh hierarchical settings tab every time (each invocation is a new view; old tabs are kept and closable with Esc)
 - `/model` to browse cached models (fetched via `GET /v1/models`) or enter a manual model id
 - `/hotkey` for the keyboard reference
-- `/provider` to switch the active provider quickly
 - `/clear` to reset the conversation
 - Streaming chat responses for both OpenAI and Anthropic
 - Live cache-hit rate parsed from API usage (`prompt_tokens_details.cached_tokens` / `cache_read_input_tokens`)
@@ -47,8 +46,7 @@ Config is stored at `~/.config/fish-coding-agent/config.json` (or
 - `api_key` and `api_key_env` are an **OR**: if `api_key` is non-empty it
   is used; otherwise the env var named by `api_key_env` is read. At least
   one of them must resolve for chat and model-list requests to succeed.
-- Switch the active entry with `/provider openai:env` (defaults to
-  `:key` mode) or pick from the `/model` picker.
+- Pick the active entry from the `/model` picker.
 
 ### Settings navigation
 

@@ -1,5 +1,5 @@
 use crate::app::App;
-use crate::config::{parse_id, ProviderKind, ProviderMode};
+use crate::config::{parse_id, ProviderKind};
 use crate::function::notifications::ToastLevel;
 use crate::function::SidebarTab;
 use crate::providers::{ChatMessage, ChatRequest, ToolCall};
@@ -94,36 +94,6 @@ pub fn dispatch(app: &mut App, cmd: &str, arg: &str) {
         }
         "quit" | "exit" | "q" => {
             app.should_quit = true;
-        }
-        "provider" => {
-            // /provider <kind>[:<mode>]   (defaults to key mode)
-            let arg = arg.trim();
-            if arg.is_empty() {
-                let id = app.config.active.clone().unwrap_or_else(|| "-".to_string());
-                app.notify(ToastLevel::Info, format!("current provider: {id}"));
-                return;
-            }
-            let id = if arg.contains(':') {
-                arg.to_string()
-            } else if let Some(k) = ProviderKind::from_str_opt(arg) {
-                crate::config::make_id(k, ProviderMode::Key)
-            } else {
-                app.notify(ToastLevel::Fail, format!("unknown provider: {arg}"));
-                return;
-            };
-            if !app.config.entries.contains_key(&id) {
-                app.notify(
-                    ToastLevel::Fail,
-                    format!("provider {id} not configured; open /settings"),
-                );
-                return;
-            }
-            app.config.active = Some(id.clone());
-            app.status.set_provider_name(&app.config.active_name());
-            app.status.set_model(&app.config.active_model_display());
-            app.refresh_status_model_context();
-            app.save_config();
-            app.notify(ToastLevel::Ok, format!("provider switched to {id}"));
         }
         "skill" => dispatch_skill(app, arg, ""),
         "mcp" => open_mcp(app, arg),

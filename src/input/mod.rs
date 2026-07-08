@@ -756,7 +756,6 @@ pub const COMMAND_LIST: &[&str] = &[
     "/hotkey",
     "/new",
     "/clear",
-    "/provider",
     "/think",
     "/timeline",
     "/session",
