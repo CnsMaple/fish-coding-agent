@@ -207,28 +207,11 @@ pub fn build_message_lines(
     {
         let lru = session.message_lines_cache.lock().unwrap();
         if let Some(cached) = lru.get(&msg_idx) {
-            // Streaming messages: key by content_len instead of
-            // content_version (which changes on every write).
-            // display_cursor is always content.len() during streaming
-            // (see append_to_last), so the render only changes when
-            // content actually grows. This avoids re-rendering the
-            // entire message on every frame when no new data arrived.
-            let valid = if m.streaming {
-                // For streaming messages, key by content_len + display_cursor
-                // instead of content_version (which changes on every write).
-                // display_cursor is always content.len() during streaming
-                // (see append_to_last), so the cache only invalidates when
-                // content actually grows, avoiding re-render on every frame.
-                cached.content_len == m.content.len()
-                    && cached.display_cursor == m.display_cursor
-                    && cached.width == width as u16
-            } else {
-                cached.content_version == m.content_version
-                    && cached.width == width as u16
-                    && cached.display_cursor == m.display_cursor
-                    && cached.content_len == m.content.len()
-            };
-            if valid {
+            if cached.content_version == m.content_version
+                && cached.width == width as u16
+                && cached.display_cursor == m.display_cursor
+                && cached.content_len == m.content.len()
+            {
                 return Arc::clone(&cached.lines);
             }
         }
