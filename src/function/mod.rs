@@ -2173,7 +2173,7 @@ impl App {
             self.function.push(SidebarTab::Todo(TodoTabState::new()));
         }
         if !self.function_visible {
-            self.show_panel();
+            self.function_visible = true;
         }
     }
 
