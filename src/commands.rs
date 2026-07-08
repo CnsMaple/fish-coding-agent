@@ -1606,7 +1606,7 @@ async fn run_sub_agent(
             }
 
             let _ = tx.send(crate::event::AppMsg::ToolDelta {
-                content: format!("[sub_agent:{}] step {step}: {tool}\n", sub.as_str(), step = step + 1, tool = tc.name),
+                content: format!("[sub_agent:{}] step {step}: {tool}\n", sub.as_str(), step = step + 1, tool = tool_result_title(tc)),
             });
 
             let result = crate::tools::execute_tool_with_agent(
@@ -1918,6 +1918,97 @@ if call.name == "read" {
                     return format!("list [{}]", p);
                 }
             }
+        }
+    }
+    if call.name == "glob" {
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&call.arguments) {
+            if let Some(pattern) = val.get("pattern").and_then(|v| v.as_str()) {
+                let short = pattern.trim();
+                let display = if short.len() > 40 {
+                    format!("{}…", &short[..40])
+                } else {
+                    short.to_string()
+                };
+                return format!("glob [{}]", display);
+            }
+        }
+    }
+    if call.name == "write" {
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&call.arguments) {
+            if let Some(file_path) = val.get("filePath").and_then(|v| v.as_str()) {
+                let p = file_path.trim();
+                let display = if p.len() > 50 {
+                    format!("…{}", &p[p.len() - 50..])
+                } else {
+                    p.to_string()
+                };
+                return format!("write [{}]", display);
+            }
+        }
+    }
+    if call.name == "todowrite" {
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&call.arguments) {
+            if let Some(todos) = val.get("todos").and_then(|v| v.as_array()) {
+                return format!("todowrite ({} items)", todos.len());
+            }
+        }
+    }
+    if call.name == "skill" {
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&call.arguments) {
+            if let Some(name) = val.get("name").and_then(|v| v.as_str()) {
+                let n = name.trim();
+                let display = if n.len() > 40 {
+                    format!("{}…", &n[..40])
+                } else {
+                    n.to_string()
+                };
+                return format!("skill [{}]", display);
+            }
+        }
+    }
+    if call.name == "webfetch" {
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&call.arguments) {
+            if let Some(url) = val.get("url").and_then(|v| v.as_str()) {
+                let u = url.trim();
+                let display = if u.len() > 50 {
+                    format!("{}…", &u[..50])
+                } else {
+                    u.to_string()
+                };
+                return format!("webfetch [{}]", display);
+            }
+        }
+    }
+    if call.name == "websearch" {
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&call.arguments) {
+            if let Some(query) = val.get("query").and_then(|v| v.as_str()) {
+                let q = query.trim();
+                let display = if q.len() > 40 {
+                    format!("{}…", &q[..40])
+                } else {
+                    q.to_string()
+                };
+                return format!("websearch [{}]", display);
+            }
+        }
+    }
+    if call.name == "sub_agent" {
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&call.arguments) {
+            let stype = val
+                .get("subagent_type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let desc = val
+                .get("description")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let short = desc.trim();
+            let display = if short.len() > 40 {
+                format!("{}…", &short[..40])
+            } else {
+                short.to_string()
+            };
+            return format!("sub_agent [{stype}] {display}");
         }
     }
 
