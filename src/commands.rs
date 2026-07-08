@@ -692,8 +692,8 @@ Current date: {date}
 Current workspace: {workspace}
 Current OS: {os}, shell: {shell}
 
-  - read_file(path, start_line?, end_line?)
-  - write_file(path, content, start_line?, end_line?)
+  - read(path, start_line?, end_line?)
+  - edit(path, content, start_line?, end_line?)
   - shell_command(command) - runs in {shell}
     Current shell details: {shell_details}
   - python_command(code) - runs Python source code directly
@@ -740,7 +740,7 @@ Current OS: {os}, shell: {shell}
 
 Read-only exploration:
 
-  - read_file(path, start_line?, end_line?)
+  - read(path, start_line?, end_line?)
   - grep(pattern, path?) — search text in files
   - list(path?) — list files under a directory
 
@@ -760,7 +760,7 @@ Communication with the user:
 
 The runtime will reject (with an error) any attempt to:
 
-  - write_file (no file edits)
+  - edit (no file edits)
   - shell_command (no arbitrary shell)
   - python_command (no code execution)
 
@@ -776,7 +776,7 @@ its result.
    calling the `plan` tool — the user only sees your plan when the tool \
    result is rendered.
 2. **Explore before you plan.** If the request touches code you have not \
-   read, use read_file/grep/list to ground the plan in the actual \
+   read, use read/grep/list to ground the plan in the actual \
    repository. Do not invent file paths, function names, or behaviour.
 3. **Be concise.** The plan body should be actionable: what changes, where, \
    and why. Numbered steps are good. Skip preamble and apologies.
@@ -1410,7 +1410,7 @@ fn tool_result_title(call: &ToolCall) -> String {
         return "Ask".to_string();
     }
 
-if call.name == "read_file" || call.name == "write_file" {
+if call.name == "read" || call.name == "edit" {
         if let Ok(val) = serde_json::from_str::<serde_json::Value>(&call.arguments) {
             let start = val.get("start_line").and_then(|v| v.as_u64());
             let end = val.get("end_line").and_then(|v| v.as_u64());

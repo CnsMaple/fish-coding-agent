@@ -1128,8 +1128,8 @@ fn build_tool_block_rows(
 
     let visible = if tool.name == "plan" { true } else { visible };
 
-    let mut rows: Vec<Line<'static>> = if tool.name == "write_file" {
-        if let Some(r) = build_write_file_diff_rows(tool, visible, preview_lines, width, bg) {
+    let mut rows: Vec<Line<'static>> = if tool.name == "edit" {
+        if let Some(r) = build_edit_diff_rows(tool, visible, preview_lines, width, bg) {
             r
         } else {
             return vec![];
@@ -1607,14 +1607,14 @@ struct DiffLine {
     content: String,
 }
 
-fn build_write_file_diff_rows(
+fn build_edit_diff_rows(
     tool: &ToolResultBlock,
     visible: bool,
     preview_lines: usize,
     width: usize,
     bg: Color,
 ) -> Option<Vec<Line<'static>>> {
-    let (path, old, new) = parse_write_file_diff(&tool.content)?;
+    let (path, old, new) = parse_edit_diff(&tool.content)?;
     let diff = unified_diff_rows(&old, &new);
     let added = diff
         .iter()
@@ -1694,9 +1694,9 @@ fn diff_box_row_line(diff: &DiffLine, width: usize, bg: Color, lang: &str) -> Li
     Line::from(spans)
 }
 
-fn parse_write_file_diff(content: &str) -> Option<(String, String, String)> {
+fn parse_edit_diff(content: &str) -> Option<(String, String, String)> {
     let value: serde_json::Value = serde_json::from_str(content).ok()?;
-    if value.get("kind").and_then(|v| v.as_str()) != Some("write_file_diff") {
+    if value.get("kind").and_then(|v| v.as_str()) != Some("edit_diff") {
         return None;
     }
     Some((
@@ -2130,14 +2130,14 @@ mod tool_block_count_tests {
             .join("\n")
     }
 
-    fn make_write_file_tool() -> ToolResultBlock {
+    fn make_edit_tool() -> ToolResultBlock {
         // A small but valid write_file_diff payload so the bottom
         // border is part of the rendered block.
         ToolResultBlock {
-            name: "write_file".to_string(),
-            title: "write_file".to_string(),
+            name: "edit".to_string(),
+            title: "edit".to_string(),
             content: serde_json::json!({
-                "kind": "write_file_diff",
+                "kind": "edit_diff",
                 "path": "src/demo.py",
                 "old": "alpha\nold_call()\nomega\n",
                 "new": "alpha\nnew_call()\nomega\n",
@@ -2200,7 +2200,7 @@ mod tool_block_count_tests {
     /// session-level gaps (one per message).
     #[test]
     fn tool_block_count_matches_rendered_no_content() {
-        let mut s = session_with_tool(make_write_file_tool(), false);
+        let mut s = session_with_tool(make_edit_tool(), false);
         let width = 80u16;
         let total = count_all(&mut s, width);
         let user_lines = lines_for_msg(&s, 0, width as usize).len() as u32;
@@ -2215,7 +2215,7 @@ mod tool_block_count_tests {
 
     #[test]
     fn tool_block_count_matches_rendered_with_content() {
-        let mut s = session_with_tool(make_write_file_tool(), true);
+        let mut s = session_with_tool(make_edit_tool(), true);
         let width = 80u16;
         let total = count_all(&mut s, width);
         let user_lines = lines_for_msg(&s, 0, width as usize).len() as u32;
@@ -2226,7 +2226,7 @@ mod tool_block_count_tests {
 
     #[test]
     fn two_tool_blocks_count_matches_rendered() {
-        let mut s = session_with_tool(make_write_file_tool(), false);
+        let mut s = session_with_tool(make_edit_tool(), false);
         s.messages[1].tool_results.push(make_shell_tool());
         let width = 80u16;
         let total = count_all(&mut s, width);
@@ -2238,7 +2238,7 @@ mod tool_block_count_tests {
 
     #[test]
     fn thinking_plus_tool_count_matches_rendered() {
-        let mut s = session_with_tool(make_write_file_tool(), false);
+        let mut s = session_with_tool(make_edit_tool(), false);
         // Add a thinking segment so the assistant has both kinds of
         // blocks.
         s.messages[1].thinking = "let me think about this".to_string();
@@ -2265,7 +2265,7 @@ mod tool_block_count_tests {
     /// session, with only the bottom-gap blank line after it.
     #[test]
     fn bottom_border_line_is_in_viewport() {
-        let mut s = session_with_tool(make_write_file_tool(), false);
+        let mut s = session_with_tool(make_edit_tool(), false);
         let width: usize = 80;
         // Warm the layout cache and force a render so the per-block
         // counts are populated.
@@ -2466,7 +2466,7 @@ mod tool_block_count_tests {
             cached_line_count_collapsed: None,
         }];
         asst.thinking_visible = true;
-        asst.tool_results.push(make_write_file_tool());
+        asst.tool_results.push(make_edit_tool());
         s.push(asst);
         let width = 80;
         let rendered = build_message_lines(&s, 1, width);
@@ -2930,12 +2930,12 @@ mod tests {
     }
 
     #[test]
-    fn build_tool_block_renders_write_file_diff() {
+    fn build_tool_block_renders_edit_diff() {
         let tool = ToolResultBlock {
-            name: "write_file".to_string(),
-            title: "write_file".to_string(),
+            name: "edit".to_string(),
+            title: "edit".to_string(),
             content: serde_json::json!({
-                "kind": "write_file_diff",
+                "kind": "edit_diff",
                 "path": "src/demo.py",
                 "old": "alpha\n    old_call()\nomega\n",
                 "new": "alpha\n    new_call()\nomega\n",

@@ -844,7 +844,7 @@ async fn handle_read_exec(
         read_result::Result::InvalidFile(e) => format!("[invalid file] {}", e.reason),
     };
     let _ = tx.send(ChatEvent::ToolResult {
-        name: "read_file".to_string(),
+        name: "read".to_string(),
         title: format!("[read] {}", args.path),
         content: display,
     });

@@ -12,8 +12,8 @@ pub enum Action {
 /// Names of tools the agent may invoke. Centralised so the rule tables
 /// stay in sync with `crate::tools`.
 pub mod tool {
-    pub const READ_FILE: &str = "read_file";
-    pub const WRITE_FILE: &str = "write_file";
+    pub const READ_FILE: &str = "read";
+    pub const WRITE_FILE: &str = "edit";
     pub const SHELL_COMMAND: &str = "shell_command";
     pub const PYTHON_COMMAND: &str = "python_command";
     pub const GREP: &str = "grep";

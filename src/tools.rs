@@ -131,7 +131,7 @@ struct ToolDef {
 fn tool_defs() -> Vec<ToolDef> {
     vec![
         ToolDef {
-            name: "read_file",
+            name: "read",
             description: "Read a UTF-8 text file within the current workspace. Supports optional 1-based inclusive line ranges.".to_string(),
             schema: json!({
                 "type": "object",
@@ -145,7 +145,7 @@ fn tool_defs() -> Vec<ToolDef> {
             }),
         },
         ToolDef {
-            name: "write_file",
+            name: "edit",
             description: "Write or edit a UTF-8 text file within the current workspace. Use this tool for all file modifications including creating new files and editing existing ones. To edit, provide the target line range with start_line and end_line (1-based, inclusive) together with the replacement content. To create or overwrite a file, omit start_line and end_line.".to_string(),
             schema: json!({
                 "type": "object",
@@ -284,7 +284,7 @@ pub async fn execute_tool_with_agent(
     }
     let result = match name {
         t::READ_FILE => read_file(args, cwd).await,
-        t::WRITE_FILE => write_file(args, cwd).await,
+t::WRITE_FILE => write_file(args, cwd).await,
         t::SHELL_COMMAND | "command" => run_command(args, cwd).await,
         t::PYTHON_COMMAND => run_python_command(args, cwd).await,
         t::GREP => grep_text(args, cwd).await,
@@ -658,7 +658,7 @@ async fn write_file(args: &str, cwd: &Path) -> Result<String> {
 
 fn write_diff_result(path: &str, old: &str, new: &str) -> String {
     json!({
-        "kind": "write_file_diff",
+        "kind": "edit_diff",
         "path": path,
         "old": old,
         "new": new,
@@ -773,7 +773,7 @@ async fn plan_review(args: &str) -> Result<String> {
                 .unwrap_or_default()
         });
     if content.trim().is_empty() {
-        return Err(anyhow!("plan content is empty"));
+        return Err(anyhow!("plan content or steps must be non-empty. Provide 'content' (a string describing the plan) or 'steps' (an array of step strings)."));
     }
     Ok(json!({
         "kind": "plan",
@@ -1044,7 +1044,7 @@ fn strip_ansi(s: &str) -> String {
 fn resolve_workspace_path(cwd: &Path, path: &str) -> Result<PathBuf> {
     let requested = Path::new(path);
     if requested.is_absolute() {
-        return Err(anyhow!("path must be relative to workspace"));
+        return Err(anyhow!("path must be relative to workspace (got absolute path: {})", path));
     }
     if requested
         .components()
@@ -1080,15 +1080,34 @@ fn replace_lines(text: &str, start: usize, end: usize, replacement: &str) -> Res
     if start == 0 || end == 0 || start > end {
         return Err(anyhow!("invalid line range"));
     }
-    let mut lines: Vec<&str> = text.lines().collect();
+
+    // Detect the file's line ending style so we don't corrupt CRLF files.
+    let le = if text.contains("\r\n") { "\r\n" } else { "\n" };
+
+    // Normalise any \r\n in the replacement to \n so split('\n') works correctly.
+    let normalized = replacement.replace("\r\n", "\n");
+
+    // Split on the actual line ending, preserving the trailing empty segment
+    // that indicates the file ends with a newline.
+    let mut lines: Vec<&str> = text.split(le).collect();
+    let had_trailing_nl = text.ends_with('\n');
+    if had_trailing_nl && lines.last() == Some(&"") {
+        lines.pop();
+    }
+
     if end > lines.len() {
         return Err(anyhow!("line range exceeds file length"));
     }
-    let replacement_lines: Vec<&str> = replacement.lines().collect();
-    lines.splice(start - 1..end, replacement_lines);
-    let mut out = lines.join("\n");
-    if text.ends_with('\n') || replacement.ends_with('\n') {
-        out.push('\n');
+
+    let mut repl_lines: Vec<&str> = normalized.split('\n').collect();
+    if replacement.ends_with('\n') && repl_lines.last() == Some(&"") {
+        repl_lines.pop();
+    }
+
+    lines.splice(start - 1..end, repl_lines);
+    let mut out = lines.join(le);
+    if had_trailing_nl || replacement.ends_with('\n') {
+        out.push_str(le);
     }
     Ok(out)
 }
@@ -1096,8 +1115,8 @@ fn replace_lines(text: &str, start: usize, end: usize, replacement: &str) -> Res
 pub fn is_valid_tool(name: &str) -> bool {
     matches!(
         name,
-        "read_file"
-            | "write_file"
+        "read"
+            | "edit"
             | "shell_command"
             | "python_command"
             | "grep"
@@ -1107,6 +1126,7 @@ pub fn is_valid_tool(name: &str) -> bool {
             | "command"
     )
 }
+
 
 fn truncate(mut text: String, limit: usize) -> String {
     if text.len() <= limit {
@@ -1130,7 +1150,7 @@ mod tests {
     async fn plan_mode_denies_write_file() {
         let result = execute_tool_with_agent(
             crate::permission::Agent::Plan,
-            "write_file",
+            "edit",
             r#"{"path":"x","content":"y"}"#,
             Path::new("."),
         )
@@ -1166,7 +1186,7 @@ mod tests {
         })
         .to_string();
         let result =
-            execute_tool_with_agent(crate::permission::Agent::Build, "write_file", &args, &dir)
+            execute_tool_with_agent(crate::permission::Agent::Build, "edit", &args, &dir)
                 .await;
         let v: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(v.get("ok").and_then(|s| s.as_bool()), Some(true));
@@ -1228,5 +1248,75 @@ mod tests {
             .and_then(|s| s.as_str())
             .unwrap_or("")
             .contains("empty"));
+    }
+
+    // ── replace_lines unit tests ──
+
+    #[test]
+    fn replace_lines_basic_lf() {
+        let input = "line1\nline2\nline3\n";
+        let result = replace_lines(input, 2, 2, "new\n").unwrap();
+        assert_eq!(result, "line1\nnew\nline3\n");
+    }
+
+    #[test]
+    fn replace_lines_crlf_preserved() {
+        let input = "line1\r\nline2\r\nline3\r\n";
+        let result = replace_lines(input, 2, 2, "new\r\n").unwrap();
+        assert_eq!(result, "line1\r\nnew\r\nline3\r\n");
+    }
+
+    #[test]
+    fn replace_lines_trailing_newline_preserved_lf() {
+        let input = "a\nb\n";
+        let result = replace_lines(input, 1, 1, "X\n").unwrap();
+        assert_eq!(result, "X\nb\n");
+    }
+
+    #[test]
+    fn replace_lines_trailing_newline_preserved_crlf() {
+        let input = "a\r\nb\r\n";
+        let result = replace_lines(input, 1, 1, "X\r\n").unwrap();
+        assert_eq!(result, "X\r\nb\r\n");
+    }
+
+    #[test]
+    fn replace_lines_no_trailing_newline() {
+        let input = "a\nb";
+        let result = replace_lines(input, 1, 1, "X").unwrap();
+        assert_eq!(result, "X\nb");
+    }
+
+    #[test]
+    fn replace_lines_replacement_no_trailing_newline() {
+        let input = "a\nb\n";
+        let result = replace_lines(input, 1, 1, "X").unwrap();
+        // trailing newline comes from input, not replacement
+        assert_eq!(result, "X\nb\n");
+    }
+
+    #[test]
+    fn replace_lines_replace_multiple() {
+        let input = "a\nb\nc\nd\n";
+        let result = replace_lines(input, 2, 3, "X\nY\n").unwrap();
+        assert_eq!(result, "a\nX\nY\nd\n");
+    }
+
+    #[test]
+    fn replace_lines_replace_multiple_crlf() {
+        let input = "a\r\nb\r\nc\r\nd\r\n";
+        let result = replace_lines(input, 2, 3, "X\r\nY\r\n").unwrap();
+        assert_eq!(result, "a\r\nX\r\nY\r\nd\r\n");
+    }
+
+    #[test]
+    fn replace_lines_invalid_range() {
+        assert!(replace_lines("a\nb\n", 0, 1, "X\n").is_err());
+        assert!(replace_lines("a\nb\n", 2, 1, "X\n").is_err());
+    }
+
+    #[test]
+    fn replace_lines_range_exceeds_length() {
+        assert!(replace_lines("a\nb\n", 1, 10, "X\n").is_err());
     }
 }
