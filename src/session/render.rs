@@ -1149,13 +1149,21 @@ fn build_shell_command_rows(
     let mut rows = Vec::new();
     rows.push(border_line(width, bg));
 
-    // Highlight the shell command in the title row
+    // Highlight the shell command with multi-line wrapping
     if let Some(cmd) = title.strip_prefix("$ ") {
-        let cmd_spans = crate::session::markdown::highlight_line(cmd, "sh");
-        let cmd_spans = spans_with_bg(&cmd_spans, bg);
-        let mut label_spans = vec![Span::styled("$ ", bg_style(bg))];
-        label_spans.extend(cmd_spans);
-        rows.push(box_row_line_spans(label_spans, width, bg));
+        let max_cmd_width = width.saturating_sub(6); // | $  |
+        let cmd_lines = wrap_line(cmd, max_cmd_width);
+        for (i, line) in cmd_lines.iter().enumerate() {
+            let cmd_spans = crate::session::markdown::highlight_line(line, "sh");
+            let cmd_spans = spans_with_bg(&cmd_spans, bg);
+            let mut label_spans = if i == 0 {
+                vec![Span::styled("$ ", bg_style(bg))]
+            } else {
+                vec![Span::styled("  ", bg_style(bg))]
+            };
+            label_spans.extend(cmd_spans);
+            rows.push(box_row_line_spans(label_spans, width, bg));
+        }
     } else {
         rows.extend(box_row_lines(title, width, bg));
     }
