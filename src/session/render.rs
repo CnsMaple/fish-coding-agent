@@ -3469,3 +3469,158 @@ tool_calls: Vec::new(),
         assert_eq!(w3, width, "box_row_line CJK width {w3} != {width}");
     }
 }
+
+#[cfg(test)]
+mod code_block_content_width_tests {
+    use super::*;
+    use crate::session::{Message, Role, Session};
+
+    #[test]
+    fn code_block_lines_in_user_message_have_same_width() {
+        let short = "short";
+        let long = "this_is_a_very_long_line_that_exceeds_normal_width";
+        let content = format!("Look at this:\n\n```\n{short}\n{long}\n```\n\nAfter block.");
+
+        let mut s = Session::default();
+        s.push(Message::new(Role::User, content));
+
+        let width = 80usize;
+        let rendered = build_message_lines(&s, 0, width);
+
+        let text = rendered
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        // Find code block lines: those that contain the pipe border
+        let mut code_line_widths = Vec::new();
+        let mut in_code = false;
+        for line in rendered.iter() {
+            let joined: String = line
+                .spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect();
+            if joined.contains('+') && joined.contains('-') && joined.contains("code") {
+                in_code = true;
+                continue;
+            }
+            if joined.contains('+') && joined.contains('-') && in_code {
+                break;
+            }
+            if in_code && joined.contains('|') {
+                let total_w: usize = line
+                    .spans
+                    .iter()
+                    .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+                    .sum();
+                code_line_widths.push((joined.trim().to_string(), total_w));
+            }
+        }
+
+        assert!(
+            !code_line_widths.is_empty(),
+            "no code block lines found in:\n{text}"
+        );
+
+        let first = code_line_widths[0].1;
+        for (i, (content, w)) in code_line_widths.iter().enumerate() {
+            assert_eq!(
+                *w, first,
+                "code line {i} width {w} != {first}\n  content: {content:?}\n  all: {code_line_widths:?}\n\nfull text:\n{text}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod skill_output_block_width_tests {
+    use super::*;
+    use ratatui::style::Color;
+
+    #[test]
+    fn skill_output_block_lines_have_consistent_width() {
+        let content = "\
+<skill_content name=\"test\">
+# Skill
+
+Some text.
+
+```xml
+<validation>
+<type>feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert</type>
+<scope>optional</scope>
+</validation>
+```
+
+</skill_content>";
+
+        let width = 80;
+        let bg = Color::Reset;
+        let rows = output_row_lines(content, width, bg);
+
+        assert!(!rows.is_empty(), "no output rows");
+
+        let first_w = rows[0].width();
+        for (i, row) in rows.iter().enumerate() {
+            let joined: String = row.spans.iter().map(|s| s.content.as_ref()).collect();
+            let line_w = row.width();
+            assert_eq!(
+                line_w, first_w,
+                "line {i} width mismatch: {line_w} != {first_w}\n  content: {joined:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn full_build_output_block_rows_consistent_width() {
+        let content = "\
+<skill_content name=\"test\">
+# Skill
+
+Some text.
+
+```xml
+<validation>
+<type>feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert</type>
+<scope>optional</scope>
+</validation>
+```
+
+</skill_content>";
+
+        let width = 80;
+        let bg = Color::Reset;
+        let rows = build_output_block_rows(
+            " Skill ",
+            content,
+            "",
+            true,   // visible
+            10,     // preview_lines
+            width,
+            bg,
+        );
+
+        assert!(!rows.is_empty(), "no output rows");
+
+        let first_w = rows[0].width();
+        for (i, row) in rows.iter().enumerate() {
+            let joined: String = row
+                .spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect();
+            let line_w = row.width();
+            assert_eq!(
+                line_w, first_w,
+                "line {i} width mismatch: {line_w} != {first_w}\n  content: {joined:?}"
+            );
+        }
+    }
+}

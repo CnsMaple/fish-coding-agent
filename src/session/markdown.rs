@@ -469,9 +469,8 @@ fn code_line(content: TableCell, width: usize) -> Line<'static> {
     let content_width = cell_width(&content);
     let mut spans = vec![Span::styled("|", Theme::dim()), Span::raw(" ")];
     spans.extend(content);
-    if width > content_width {
-        spans.push(Span::raw(" ".repeat(width - content_width)));
-    }
+    let pad = width.saturating_sub(content_width);
+    spans.push(Span::raw(" ".repeat(pad)));
     spans.push(Span::raw(" "));
     spans.push(Span::styled("|", Theme::dim()));
     Line::from(spans)
@@ -944,5 +943,142 @@ let x = 1;
         let md = "| 姓 名    | 年 龄  | 职 业      ||--------|------|----------|| 张 三    | 25   | 程 序 员    |";
         let lines = render(md);
         assert!(!lines.is_empty(), "concatenated table must produce output");
+    }
+
+    #[test]
+    fn code_block_lines_have_consistent_width() {
+        let short = "short";
+        // 长行恰好等于 max_content_width = render_width - 4 = 76
+        let long = "x".repeat(76);
+        let md = format!("```\n{short}\n{long}\n```");
+
+        let width = 80;
+        let lines = render_with_width(&md, width);
+
+        let mut code_line_widths = Vec::new();
+        let mut in_code = false;
+        for line in &lines {
+            let joined: String = line
+                .spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect();
+            let is_border = joined.starts_with('+') && joined.contains('-');
+            if is_border {
+                if !in_code {
+                    in_code = true;
+                    code_line_widths.push((format!("[top] {joined}"), line.width()));
+                    continue;
+                } else {
+                    code_line_widths.push((format!("[bottom] {joined}"), line.width()));
+                    break;
+                }
+            }
+            if in_code {
+                code_line_widths.push((format!("[code] {joined}"), line.width()));
+            }
+        }
+
+        assert!(!code_line_widths.is_empty(), "no code block lines found");
+
+        let first = code_line_widths[0].1;
+        for (i, (label, w)) in code_line_widths.iter().enumerate() {
+            assert_eq!(
+                *w, first,
+                "line {i} width mismatch: {w} != {first}\n  label: {label}\n  all: {code_line_widths:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn code_block_lines_wider_than_max_content_width() {
+        let short = "short";
+        let long = "x".repeat(80);
+        let md = format!("```\n{short}\n{long}\n```");
+
+        let width = 80;
+        let lines = render_with_width(&md, width);
+
+        let mut code_line_widths = Vec::new();
+        let mut in_code = false;
+        for line in &lines {
+            let joined: String = line
+                .spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect();
+            let is_border = joined.starts_with('+') && joined.contains('-');
+            if is_border {
+                if !in_code {
+                    in_code = true;
+                    code_line_widths.push((format!("[top] {joined}"), line.width()));
+                    continue;
+                } else {
+                    code_line_widths.push((format!("[bottom] {joined}"), line.width()));
+                    break;
+                }
+            }
+            if in_code {
+                code_line_widths.push((format!("[code] {joined}"), line.width()));
+            }
+        }
+
+        assert!(!code_line_widths.is_empty(), "no code block lines found");
+
+        let first = code_line_widths[0].1;
+        for (i, (label, w)) in code_line_widths.iter().enumerate() {
+            assert_eq!(
+                *w, first,
+                "line {i} width mismatch: {w} != {first}\n  label: {label}\n  all: {code_line_widths:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn code_block_with_xml_syntax_highlighting_consistent() {
+        // 模拟用户实际场景：```xml 代码块，有长短不一的 XML 行
+        let short = "<validation>";
+        let long = "<type>feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert</type>";
+        let md = format!("```xml\n{short}\n{long}\n</validation>\n```");
+
+        let width = 80;
+        let lines = render_with_width(&md, width);
+
+        let mut code_line_widths = Vec::new();
+        let mut in_code = false;
+        for line in &lines {
+            let joined: String = line
+                .spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect();
+            let is_border = joined.starts_with('+') && joined.contains('-');
+            if is_border {
+                if !in_code {
+                    in_code = true;
+                    code_line_widths.push((format!("[top] {joined}"), line.width()));
+                    continue;
+                } else {
+                    code_line_widths.push((format!("[bottom] {joined}"), line.width()));
+                    break;
+                }
+            }
+            if in_code {
+                code_line_widths.push((format!("[code] {joined}"), line.width()));
+            }
+        }
+
+        assert!(
+            !code_line_widths.is_empty(),
+            "no code block lines found"
+        );
+
+        let first = code_line_widths[0].1;
+        for (i, (label, w)) in code_line_widths.iter().enumerate() {
+            assert_eq!(
+                *w, first,
+                "line {i} width mismatch: {w} != {first}\n  label: {label}\n  all: {code_line_widths:?}"
+            );
+        }
     }
 }
