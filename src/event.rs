@@ -3410,27 +3410,43 @@ fn handle_session_rename_key(
             true
         }
         KeyCode::Left => {
-            if state.cursor > 0 {
-                state.cursor -= 1;
+            if let Some(idx) = state.title[..state.cursor].char_indices().last() {
+                state.cursor = idx.0;
+            } else {
+                state.cursor = 0;
             }
             true
         }
         KeyCode::Right => {
             if state.cursor < state.title.len() {
-                state.cursor += 1;
+                state.cursor = state
+                    .title[state.cursor..]
+                    .char_indices()
+                    .nth(1)
+                    .map(|(i, _)| state.cursor + i)
+                    .unwrap_or(state.title.len());
             }
             true
         }
         KeyCode::Backspace => {
             if state.cursor > 0 {
-                state.cursor -= 1;
-                state.title.remove(state.cursor);
+                if let Some(idx) = state.title[..state.cursor].char_indices().last() {
+                    let start = idx.0;
+                    state.title.replace_range(start..state.cursor, "");
+                    state.cursor = start;
+                }
             }
             true
         }
         KeyCode::Delete => {
             if state.cursor < state.title.len() {
-                state.title.remove(state.cursor);
+                let end = state
+                    .title[state.cursor..]
+                    .char_indices()
+                    .nth(1)
+                    .map(|(i, _)| state.cursor + i)
+                    .unwrap_or(state.title.len());
+                state.title.replace_range(state.cursor..end, "");
             }
             true
         }

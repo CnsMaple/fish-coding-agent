@@ -1140,7 +1140,9 @@ fn render_session_rename(
         Span::raw(s.title.clone()),
     ]);
     buf.set_line(rows[0].x, rows[0].y, &line, rows[0].width);
-    let cursor_x = rows[0].x + 8 + s.cursor.min(s.title.len()) as u16;
+    let cursor_byte = s.cursor.min(s.title.len());
+    let cursor_w = unicode_width::UnicodeWidthStr::width(&s.title[..cursor_byte]);
+    let cursor_x = rows[0].x + 8 + cursor_w as u16;
     let hint = Line::from(Span::styled(
         " Enter: save | Ctrl+E: edit | Esc: close ",
         Theme::dim(),
