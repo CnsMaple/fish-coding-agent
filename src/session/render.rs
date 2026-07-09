@@ -635,8 +635,12 @@ fn render_content_segment(text: &str, width: usize, out: &mut Vec<Line<'static>>
         // by default; a long unbreakable span would otherwise overflow
         // the viewport and break the background fill.
         if line.width() <= inner_w {
+            let pad = (inner_w + 1).saturating_sub(line.width());
             let mut indented = vec![Span::raw("   ")];
             indented.extend(line.spans.into_iter());
+            if pad > 0 {
+                indented.push(Span::raw(" ".repeat(pad)));
+            }
             out.push(Line::from(indented));
         } else {
             // Concatenate all spans into a single string, wrap, then split
@@ -645,17 +649,20 @@ fn render_content_segment(text: &str, width: usize, out: &mut Vec<Line<'static>>
             let combined: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
             let wrapped_lines = wrap_line(&combined, inner_w);
             for (i, wrapped) in wrapped_lines.into_iter().enumerate() {
+                let ww = visible_width(&wrapped);
                 if i == 0 {
+                    let pad = (inner_w + 1).saturating_sub(ww);
                     out.push(Line::from(vec![
                         Span::raw("   ".to_string()),
                         Span::raw(wrapped),
-                        Span::raw(" ".to_string()),
+                        Span::raw(" ".repeat(pad)),
                     ]));
                 } else {
+                    let pad = (inner_w + 3).saturating_sub(ww);
                     out.push(Line::from(vec![
                         Span::raw(" ".to_string()),
                         Span::raw(wrapped),
-                        Span::raw(" ".to_string()),
+                        Span::raw(" ".repeat(pad)),
                     ]));
                 }
             }
@@ -928,14 +935,30 @@ fn build_thinking_block_rows(
     rows.push(border_with_label_line(width, " Thinking ", bg));
     let inner_w = width.saturating_sub(4);
     let content = content.trim_end();
+
+    // Render a single markdown line into the thinking box, wrapping
+    // if it exceeds inner_w (box_row_line_spans would otherwise
+    // truncate and content would disappear off the right edge).
+    let push_md_line = |line: &Line<'static>, rows: &mut Vec<Line<'static>>| {
+        if line.width() <= inner_w {
+            let spans = spans_with_bg(&line.spans, bg);
+            rows.push(box_row_line_spans(spans, width, bg));
+        } else {
+            let combined: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            for w in &wrap_line(&combined, inner_w) {
+                let spans = spans_with_bg(&[Span::raw(w.clone())], bg);
+                rows.push(box_row_line_spans(spans, width, bg));
+            }
+        }
+    };
+
     if visible {
         let md_lines = crate::session::markdown::render_with_width(content, inner_w);
         if md_lines.is_empty() {
             rows.extend(box_row_lines("[no thinking content]", width, bg));
         } else {
-            for line in md_lines {
-                let spans = spans_with_bg(&line.spans, bg);
-                rows.push(box_row_line_spans(spans, width, bg));
+            for line in &md_lines {
+                push_md_line(line, &mut rows);
             }
         }
     } else {
@@ -946,8 +969,7 @@ fn build_thinking_block_rows(
             let shown = preview_lines.min(md_lines.len());
             let skip = md_lines.len().saturating_sub(shown);
             for line in md_lines.iter().skip(skip) {
-                let spans = spans_with_bg(&line.spans, bg);
-                rows.push(box_row_line_spans(spans, width, bg));
+                push_md_line(line, &mut rows);
             }
             if md_lines.len() >= preview_lines {
                 while rows.len() < preview_lines + 1 {
@@ -1151,8 +1173,9 @@ fn build_shell_command_rows(
 
     // Highlight the shell command with multi-line wrapping
     if let Some(cmd) = title.strip_prefix("$ ") {
+        let cmd = strip_control_chars(cmd);
         let max_cmd_width = width.saturating_sub(6); // | $  |
-        let cmd_lines = wrap_line(cmd, max_cmd_width);
+        let cmd_lines = wrap_line(&cmd, max_cmd_width);
         for (i, line) in cmd_lines.iter().enumerate() {
             let cmd_spans = crate::session::markdown::highlight_line(line, "sh");
             let cmd_spans = spans_with_bg(&cmd_spans, bg);
@@ -1246,7 +1269,8 @@ fn build_output_block_rows(
 fn output_row_lines(output: &str, width: usize, bg: Color) -> Vec<Line<'static>> {
     let mut rows = Vec::new();
     for line in output.lines() {
-        for wrapped in wrap_line(line, width.saturating_sub(4)) {
+        let line = strip_control_chars(line);
+        for wrapped in wrap_line(&line, width.saturating_sub(4)) {
             rows.push(box_row_line(&wrapped, width, bg));
         }
     }
@@ -1320,9 +1344,11 @@ fn ctrl_o_hint_line(skipped: usize, width: usize, bg: Color) -> Line<'static> {
 /// separate rows by the caller.
 fn box_row_line_two(left: &str, right: &str, width: usize, bg: Color) -> Line<'static> {
     let max_content = width.saturating_sub(4);
-    let right_w = visible_width(right);
+    let right = strip_control_chars(right);
+    let right_w = visible_width(&right);
     let left_max = max_content.saturating_sub(right_w);
-    let left = truncate_str_to_width(left, left_max);
+    let left = strip_control_chars(left);
+    let left = truncate_str_to_width(&left, left_max);
     let left_w = visible_width(&left);
     let pad = max_content.saturating_sub(left_w).saturating_sub(right_w);
     let line_str = format!("| {}{}{} |", left, " ".repeat(pad), right);
@@ -1356,7 +1382,8 @@ fn border_with_label_line(width: usize, label: &str, bg: Color) -> Line<'static>
 
 fn box_row_line(text: &str, width: usize, bg: Color) -> Line<'static> {
     let max_content = width.saturating_sub(4);
-    let text = truncate_str_to_width(text, max_content);
+    let text = strip_control_chars(text);
+    let text = truncate_str_to_width(&text, max_content);
     let pad = max_content.saturating_sub(visible_width(&text));
     let line_str = format!("| {}{} |", text, " ".repeat(pad));
     Line::from(Span::styled(line_str, bg_style(bg)))
@@ -1367,10 +1394,12 @@ fn box_row_line_spans(spans: Vec<Span<'static>>, width: usize, bg: Color) -> Lin
     let mut content_width: usize = 0;
     let mut result_spans: Vec<Span<'static>> = Vec::new();
     for span in spans {
-        let sw = UnicodeWidthStr::width(span.content.as_ref());
+        let cleaned = strip_control_chars(span.content.as_ref());
+        let cleaned_span = Span::styled(cleaned, span.style);
+        let sw = UnicodeWidthStr::width(cleaned_span.content.as_ref());
         if content_width + sw <= max_content {
             content_width += sw;
-            result_spans.push(span);
+            result_spans.push(cleaned_span);
         } else {
             let remaining = max_content.saturating_sub(content_width);
             if remaining > 0 {
@@ -1644,21 +1673,45 @@ fn diff_box_row_line(diff: &DiffLine, width: usize, bg: Color, lang: &str) -> Li
     let prefix = format!("{}{:>width$} ", sign, diff.line_no, width = number_width);
 
     let content = &diff.content;
-    let content_spans = crate::session::markdown::highlight_line(content, lang);
+    let content = strip_control_chars(content);
+    let content_spans = crate::session::markdown::highlight_line(&content, lang);
     let content_spans = spans_with_bg(&content_spans, line_bg);
 
-    let content_width: usize = content_spans
-        .iter()
-        .map(|s| unicode_width::UnicodeWidthStr::width(s.content.as_ref()))
-        .sum();
     let prefix_width = unicode_width::UnicodeWidthStr::width(prefix.as_str());
-    let inner_w = width.saturating_sub(4);
-    let pad = inner_w.saturating_sub(prefix_width).saturating_sub(content_width);
+    // Layout: "| " (2) + prefix + "│ " (2) + content + pad + " |" (2) = 6 + prefix + content + pad
+    // So inner_w (space for prefix+content+pad) = width - 6
+    let inner_w = width.saturating_sub(6);
+    let max_content = inner_w.saturating_sub(prefix_width);
+
+    // Truncate content_spans to max_content (mirrors box_row_line_spans logic)
+    let mut truncated_spans: Vec<Span<'static>> = Vec::new();
+    let mut content_width: usize = 0;
+    for span in content_spans {
+        let sw = unicode_width::UnicodeWidthStr::width(span.content.as_ref());
+        if content_width + sw <= max_content {
+            content_width += sw;
+            truncated_spans.push(span);
+        } else {
+            let remaining = max_content.saturating_sub(content_width);
+            if remaining > 0 {
+                let truncated = truncate_str_to_width(span.content.as_ref(), remaining);
+                if !truncated.is_empty() {
+                    truncated_spans.push(Span::styled(truncated, span.style));
+                    content_width += unicode_width::UnicodeWidthStr::width(
+                        truncated_spans.last().unwrap().content.as_ref(),
+                    );
+                }
+            }
+            break;
+        }
+    }
+
+    let pad = max_content.saturating_sub(content_width);
 
     let mut spans = vec![Span::styled("| ", dim_bg_style(bg))];
     spans.push(Span::styled(prefix, Style::default().fg(sign_color).bg(bg)));
     spans.push(Span::styled("│ ", bg_style(line_bg)));
-    spans.extend(content_spans);
+    spans.extend(truncated_spans);
     if pad > 0 {
         spans.push(Span::styled(" ".repeat(pad), bg_style(line_bg)));
     }
@@ -1856,6 +1909,17 @@ fn truncate_str_to_width(s: &str, max_width: usize) -> String {
 /// helper used by tests / other renderers
 pub fn visible_width(s: &str) -> usize {
     UnicodeWidthStr::width(s)
+}
+
+/// Strip control characters (except newline) that cause width
+/// mismatches between `unicode-width` v0.1 (used by our code,
+/// counts them as width 0) and v0.2 (used by ratatui, counts
+/// them as width 1). Without this, a stray `\r` in the content
+/// would push the right border `|` past the visible area.
+fn strip_control_chars(s: &str) -> String {
+    s.chars()
+        .filter(|c| !c.is_control() || *c == '\n')
+        .collect()
 }
 
 #[cfg(test)]
@@ -3643,6 +3707,352 @@ Some text.
                 line_w, first_w,
                 "line {i} width mismatch: {line_w} != {first_w}\n  content: {joined:?}"
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod border_fix_tests {
+    use super::*;
+    use ratatui::style::Color;
+
+    /// Bug 3: shell command wrap — all body rows must have the same
+    /// width (= the `width` parameter), including the second wrapped
+    /// line of a long command.  Uses the user's exact command.
+    #[test]
+    fn shell_command_wrapped_rows_consistent_width() {
+        let long_cmd = r#"$ git commit -m "fix(markdown): use saturating_sub to prevent underflow in code_line padding" -m "Replace `width - content_width` with `saturating_sub` to avoid underflow when content exceeds the available width. Add tests for code block and output block line width consistency.""#;
+        for width in [40usize, 60, 80, 100, 120, 140, 150, 160] {
+            let rows = build_shell_command_rows(
+                long_cmd,
+                "output line",
+                "[Wall: 1.0s]",
+                true,
+                10,
+                width,
+                Color::Reset,
+            );
+            assert!(!rows.is_empty(), "no rows for width {width}");
+
+            let first_w = rows[0].width();
+            for (i, row) in rows.iter().enumerate() {
+                let line_w = row.width();
+                assert_eq!(
+                    line_w, first_w,
+                    "width {width}: row {i} has width {line_w} != {first_w}\n  spans: {:?}",
+                    row.spans
+                        .iter()
+                        .map(|s| (s.content.as_ref(), UnicodeWidthStr::width(s.content.as_ref())))
+                        .collect::<Vec<_>>()
+                );
+            }
+            assert_eq!(first_w, width, "row width {first_w} != {width}");
+        }
+    }
+
+    /// Bug 2: diff_box_row_line — the total line width must equal
+    /// `width`, not `width + 2`.
+    #[test]
+    fn diff_box_row_line_width_matches() {
+        let diff = DiffLine {
+            kind: DiffLineKind::Added,
+            line_no: 42,
+            content: "let x = some_long_variable_name_that_might_overflow;".to_string(),
+        };
+        for width in [30usize, 50, 80, 120] {
+            let line = diff_box_row_line(&diff, width, Color::Reset, "rust");
+            let line_w = line.width();
+            assert_eq!(
+                line_w, width,
+                "diff row width {line_w} != {width}\n  spans: {:?}",
+                line.spans
+                    .iter()
+                    .map(|s| (s.content.as_ref(), UnicodeWidthStr::width(s.content.as_ref())))
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+
+    /// Bug 4: render_content_segment — all output lines must have
+    /// width == `width` (so the background fills the entire row).
+    #[test]
+    fn content_segment_lines_fill_full_width() {
+        let content = "This is a paragraph with some text that is long enough to require wrapping at narrower widths.";
+        for width in [30usize, 50, 80] {
+            let mut out = Vec::new();
+            render_content_segment(content, width, &mut out);
+            assert!(!out.is_empty(), "no output for width {width}");
+            for (i, line) in out.iter().enumerate() {
+                let line_w = line.width();
+                assert_eq!(
+                    line_w, width,
+                    "width {width}: line {i} has width {line_w} != {width}"
+                );
+            }
+        }
+    }
+
+    /// Bug 4: code blocks inside content segments must also fill
+    /// the full width.
+    #[test]
+    fn content_segment_code_block_fills_width() {
+        let content = "```\nshort\n```\n";
+        for width in [30usize, 50, 80] {
+            let mut out = Vec::new();
+            render_content_segment(content, width, &mut out);
+            assert!(!out.is_empty(), "no output for width {width}");
+            for (i, line) in out.iter().enumerate() {
+                let line_w = line.width();
+                assert_eq!(
+                    line_w, width,
+                    "width {width}: line {i} has width {line_w} != {width}"
+                );
+            }
+        }
+    }
+
+    /// Bug 1: thinking block — long lines must be wrapped, not
+    /// truncated, so all content is visible.
+    #[test]
+    fn thinking_block_wraps_long_lines() {
+        let long_text = "a".repeat(200);
+        for width in [30usize, 50, 80] {
+            let rows = build_thinking_block_rows(
+                &long_text,
+                true,  // visible
+                10,
+                width,
+                Color::Reset,
+            );
+            assert!(rows.len() > 2, "expected more than 2 rows for width {width}");
+
+            // All body rows (excluding top/bottom borders) must have width == width
+            for (i, row) in rows.iter().enumerate() {
+                if i == 0 || i == rows.len() - 1 {
+                    continue; // skip border rows
+                }
+                let line_w = row.width();
+                assert_eq!(
+                    line_w, width,
+                    "width {width}: body row {i} has width {line_w} != {width}"
+                );
+            }
+
+            // Check that we can see the end of the text (not truncated)
+            let last_body = rows[rows.len() - 2].spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect::<String>();
+            assert!(
+                last_body.contains('a'),
+                "last body row should contain 'a', got: {last_body:?}"
+            );
+        }
+    }
+
+    /// Diagnostic: check if highlight_line preserves the exact text
+    /// width of the input.  If the span widths don't match the input
+    /// line width, box_row_line_spans will produce wrong padding.
+    #[test]
+    fn highlight_line_preserves_width() {
+        let cmd = r#"cd D:\Code\rust\fish_coding_agent; git commit -m "feat(compaction): add context pruning, doom-loop detection, and tool metadata stripping- Add prune pass that clears old tool outputs exceeding 40k token budget- Add doom-loop detector breaking after 3 identical consecutive tool calls- Strip UI-only metadata from tool results before sending to LLM- Enforce token-budget output discipline in system prompt- Cover neologic with unit tests""#;
+
+        for width in [80usize, 100, 120, 140, 150, 160] {
+            let max_cmd_width = width.saturating_sub(6);
+        let cmd_lines = wrap_line(&cmd, max_cmd_width);
+            for (i, line) in cmd_lines.iter().enumerate() {
+                let line_w = visible_width(line);
+                let spans = crate::session::markdown::highlight_line(line, "sh");
+                let span_total: usize = spans
+                    .iter()
+                    .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+                    .sum();
+                let span_text: String = spans.iter().map(|s| s.content.as_ref()).collect();
+                assert_eq!(
+                    span_total, line_w,
+                    "width {width}: cmd line {i}: span total width {span_total} != line width {line_w}\n  line: {line:?}\n  span_text: {span_text:?}\n  spans: {:?}",
+                    spans.iter().map(|s| (s.content.as_ref(), UnicodeWidthStr::width(s.content.as_ref()))).collect::<Vec<_>>()
+                );
+
+                // Also check: prefix + spans should fit in max_content
+                let prefix_w = 2; // "$ " or "  "
+                let total_content = prefix_w + span_total;
+                let max_content = width.saturating_sub(4);
+                assert!(
+                    total_content <= max_content,
+                    "width {width}: cmd line {i}: prefix({prefix_w}) + spans({span_total}) = {total_content} > max_content({max_content})\n  line: {line:?}"
+                );
+            }
+        }
+    }
+
+    /// End-to-end: build a full session with a skill tool result,
+    /// render through build_message_lines, render to buffer, and
+    /// check the `|` is at the rightmost column for every body row.
+    #[test]
+    fn full_session_skill_tool_block_right_border() {
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+        use crate::session::{Message, Role, Session, ToolResultBlock};
+
+        let skill_body = "\
+6. Just execute this prompt and Copilot will handle the commit for you in the terminal.
+
+### Commit Message Structure
+
+```xml
+<commit-message>
+<type>feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert</type>
+<scope>()</scope>
+<description>A short, imperative summary of the change</description>
+<body>(optional: more detailed explanation)</body>
+<footer>(optional: e.g. BREAKING CHANGE: details, or issue references)</footer>
+</commit-message>
+```
+
+### Examples
+
+```xml
+<examples>
+<example>feat(parser): add ability to parse arrays</example>
+<example>fix(ui): correct button alignment</example>
+<example>docs: update README with usage instructions</example>
+<example>refactor: improve performance of data processing</example>
+<example>chore: update dependencies</example>
+<example>feat!: send email on registration (BREAKING CHANGE: email service required)</example>
+</examples>
+```";
+
+        for width in [80usize, 100, 120, 140, 150] {
+            let mut session = Session::default();
+            let mut msg = Message::new(Role::Assistant, "Running skill.");
+            msg.tool_results.push(ToolResultBlock {
+                name: "skill".to_string(),
+                title: " Skill ".to_string(),
+                content: skill_body.to_string(),
+                metadata: String::new(),
+                content_offset: 0,
+                visible: true,
+                running: false,
+                call_id: String::new(),
+                pruned: false,
+                cached_line_count_visible: None,
+                cached_line_count_collapsed: None,
+            });
+            session.push(msg);
+
+            let lines = build_message_lines(&session, 0, width);
+            let lines_vec: Vec<Line<'static>> = lines.iter().cloned().collect();
+
+            let area = Rect::new(0, 0, width as u16, lines_vec.len() as u16);
+            let mut buf = Buffer::empty(area);
+            let p = ratatui::widgets::Paragraph::new(lines_vec.clone())
+                .style(ratatui::style::Style::reset());
+            p.render(area, &mut buf);
+
+            for (i, line) in lines_vec.iter().enumerate() {
+                let content: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+                // Skip blank lines and border rows
+                if content.is_empty() || content.starts_with('+') {
+                    continue;
+                }
+                // Only check rows that have | borders (tool block body rows)
+                if !content.starts_with('|') {
+                    continue;
+                }
+
+                let line_w = line.width();
+                if line_w != width {
+                    // Print detailed span info for debugging
+                    let span_info: Vec<(String, usize)> = line
+                        .spans
+                        .iter()
+                        .map(|s| {
+                            (
+                                s.content.to_string(),
+                                UnicodeWidthStr::width(s.content.as_ref()),
+                            )
+                        })
+                        .collect();
+                    panic!(
+                        "width {width}: row {i} Line::width() = {line_w}, expected {width}\n  content[:80]: {:?}\n  spans: {span_info:?}",
+                        &content[..content.len().min(80)]
+                    );
+                }
+
+                let cell = buf.cell((width as u16 - 1, i as u16));
+                assert!(
+                    cell.is_some(),
+                    "width {width}: no cell at ({}, {i})",
+                    width - 1
+                );
+                let cell_symbol = cell.unwrap().symbol();
+                assert_eq!(
+                    cell_symbol, "|",
+                    "width {width}: row {i} rightmost cell is {:?}, expected \"|\"\n  content[:80]: {:?}",
+                    cell_symbol,
+                    &content[..content.len().min(80)]
+                );
+            }
+        }
+    }
+
+    /// Bug 3 root cause: when content contains a lone `\r`
+    /// (carriage return, e.g. from JSON parsing of Windows paths
+    /// like `"D:\Code\rust"` where `\r` is decoded as CR),
+    /// `unicode-width` v0.1 counts it as width 0 but ratatui
+    /// (using v0.2) renders it as width 1, pushing the `|` border
+    /// past the visible area. The fix: `strip_control_chars` in
+    /// `box_row_line` and `box_row_line_spans`.
+    #[test]
+    fn output_block_with_lone_cr_strips_it() {
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+
+        // Content with a lone \r in the middle (not \r\n)
+        let content = "Line one with\rcarriage return\nShort line\n";
+
+        for width in [30usize, 50, 80] {
+            let rows = build_output_block_rows(
+                " Test ",
+                content,
+                "",
+                true,
+                10,
+                width,
+                Color::Reset,
+            );
+
+            let area = Rect::new(0, 0, width as u16, rows.len() as u16);
+            let mut buf = Buffer::empty(area);
+            let p = ratatui::widgets::Paragraph::new(rows.clone())
+                .style(ratatui::style::Style::reset());
+            p.render(area, &mut buf);
+
+            for (i, row) in rows.iter().enumerate() {
+                let row_content: String = row.spans.iter().map(|s| s.content.as_ref()).collect();
+                if row_content.starts_with('+') {
+                    continue;
+                }
+                // \r should have been stripped — no CR in the output
+                assert!(
+                    !row_content.contains('\r'),
+                    "width {width}: row {i} still contains \\r after strip: {row_content:?}"
+                );
+
+                // Rightmost cell must be `|`
+                let cell = buf.cell((width as u16 - 1, i as u16));
+                assert!(
+                    cell.is_some(),
+                    "width {width}: no cell at ({}, {i})",
+                    width - 1
+                );
+                let sym = cell.unwrap().symbol();
+                assert_eq!(
+                    sym, "|",
+                    "width {width}: row {i} rightmost cell is {sym:?}, expected \"|\"\n  content: {row_content:?}"
+                );
+            }
         }
     }
 }
