@@ -65,6 +65,7 @@ impl ChatEvent {
                 name,
                 title,
                 content,
+                call_id: String::new(),
             },
             ChatEvent::ToolCalls(_) => crate::event::AppMsg::ChatDone { seq },
             ChatEvent::Usage(u) => crate::event::AppMsg::ChatUsage { seq, usage: u },

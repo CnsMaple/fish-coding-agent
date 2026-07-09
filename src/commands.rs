@@ -1025,6 +1025,7 @@ pub fn send_message(app: &mut App, user_msg: Message) {
         thinking_segments: Vec::new(),
         thinking_visible: false,
         tool_results: Vec::new(),
+        tool_calls: Vec::new(),
         attachments: Vec::new(),
         display_cursor: 0,
         line_count: 0,
@@ -1080,17 +1081,53 @@ pub fn send_message(app: &mut App, user_msg: Message) {
         .messages
         .iter()
         .filter(|m| !matches!(m.role, Role::System))
-        .filter(|m| !(matches!(m.role, Role::Assistant) && m.content.is_empty()))
-        .map(|m| ChatMessage {
-            role: match m.role {
+        .filter(|m| {
+            // Keep assistant messages that have tool_calls
+            // (e.g. after plan/ask interaction), even if
+            // content is empty. Otherwise filter out empty
+            // assistant messages.
+            !(matches!(m.role, Role::Assistant) && m.content.is_empty() && m.tool_calls.is_empty())
+        })
+        .flat_map(|m| {
+            let mut msgs: Vec<ChatMessage> = Vec::new();
+            let role = match m.role {
                 Role::User => "user".to_string(),
                 Role::Assistant => "assistant".to_string(),
                 Role::System => "user".to_string(),
-            },
-            content: m.content.clone(),
-            content_parts: Vec::new(),
-            tool_call_id: None,
-            tool_calls: Vec::new(),
+            };
+            if !m.tool_calls.is_empty() {
+                // Emit the assistant message with its tool_calls.
+                msgs.push(ChatMessage {
+                    role: role.clone(),
+                    content: m.content.clone(),
+                    content_parts: Vec::new(),
+                    tool_call_id: None,
+                    tool_calls: m.tool_calls.iter().map(|tc| crate::providers::ToolCall {
+                        id: tc.id.clone(),
+                        name: tc.name.clone(),
+                        arguments: tc.arguments.clone(),
+                    }).collect(),
+                });
+                // Emit a tool result message for each tool result.
+                for tr in &m.tool_results {
+                    msgs.push(ChatMessage {
+                        role: "tool".to_string(),
+                        content: tr.content.clone(),
+                        content_parts: Vec::new(),
+                        tool_call_id: Some(tr.call_id.clone()),
+                        tool_calls: Vec::new(),
+                    });
+                }
+            } else {
+                msgs.push(ChatMessage {
+                    role,
+                    content: m.content.clone(),
+                    content_parts: Vec::new(),
+                    tool_call_id: None,
+                    tool_calls: Vec::new(),
+                });
+            }
+            msgs
         })
         .collect();
     // Bump the request generation. Anything stale from a previous
@@ -1252,6 +1289,7 @@ pub async fn run_chat_stream(
                         name,
                         title,
                         content,
+                        call_id: String::new(),
                     });
                 }
                 crate::providers::ChatEvent::ToolCalls(calls) => {
@@ -1381,8 +1419,22 @@ pub async fn run_chat_stream(
                 name: call.name.clone(),
                 title,
                 content: display_text,
+                call_id: call.id.clone(),
             });
         }
+        // Always persist tool calls to the session so the
+        // conversation context (assistant tool_calls + tool
+        // results) can be reconstructed for follow-up turns.
+        let session_calls: Vec<crate::session::SessionToolCall> = tool_calls
+            .iter()
+            .map(|c| crate::session::SessionToolCall {
+                id: c.id.clone(),
+                name: c.name.clone(),
+                arguments: c.arguments.clone(),
+            })
+            .collect();
+        send_msg(crate::event::AppMsg::AssistantToolCalls(session_calls));
+
         // If the model emitted an interaction tool (plan or
         // ask), stop the auto-continue loop and let the user
         // respond. The plan agent surfaces the question in the

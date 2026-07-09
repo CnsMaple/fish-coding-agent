@@ -1311,20 +1311,14 @@ fn ctrl_o_hint_line(skipped: usize, width: usize, bg: Color) -> Line<'static> {
 /// available inner width, both are shown full-width stacked on
 /// separate rows by the caller.
 fn box_row_line_two(left: &str, right: &str, width: usize, bg: Color) -> Line<'static> {
-    let inner_w = width.saturating_sub(4);
-    let left_w = visible_width(left);
+    let max_content = width.saturating_sub(4);
     let right_w = visible_width(right);
-    let pad = inner_w.saturating_sub(left_w).saturating_sub(right_w);
-    let mut spans = vec![
-        Span::styled("| ", dim_bg_style(bg)),
-        Span::styled(left.to_string(), bg_style(bg)),
-    ];
-    if pad > 0 {
-        spans.push(Span::styled(" ".repeat(pad), bg_style(bg)));
-    }
-    spans.push(Span::styled(right.to_string(), bg_style(bg)));
-    spans.push(Span::styled(" |", dim_bg_style(bg)));
-    Line::from(spans)
+    let left_max = max_content.saturating_sub(right_w);
+    let left = truncate_str_to_width(left, left_max);
+    let left_w = visible_width(&left);
+    let pad = max_content.saturating_sub(left_w).saturating_sub(right_w);
+    let line_str = format!("| {}{}{} |", left, " ".repeat(pad), right);
+    Line::from(Span::styled(line_str, bg_style(bg)))
 }
 
 // ── Line-based helper functions for styled block rendering ──
@@ -1353,26 +1347,39 @@ fn border_with_label_line(width: usize, label: &str, bg: Color) -> Line<'static>
 }
 
 fn box_row_line(text: &str, width: usize, bg: Color) -> Line<'static> {
-    let pad = width.saturating_sub(4).saturating_sub(visible_width(text));
-    let mut spans = vec![
-        Span::styled("| ", dim_bg_style(bg)),
-        Span::styled(text.to_string(), bg_style(bg)),
-    ];
-    if pad > 0 {
-        spans.push(Span::styled(" ".repeat(pad), bg_style(bg)));
-    }
-    spans.push(Span::styled(" |", dim_bg_style(bg)));
-    Line::from(spans)
+    let max_content = width.saturating_sub(4);
+    let text = truncate_str_to_width(text, max_content);
+    let pad = max_content.saturating_sub(visible_width(&text));
+    let line_str = format!("| {}{} |", text, " ".repeat(pad));
+    Line::from(Span::styled(line_str, bg_style(bg)))
 }
 
 fn box_row_line_spans(spans: Vec<Span<'static>>, width: usize, bg: Color) -> Line<'static> {
-    let content_width: usize = spans
-        .iter()
-        .map(|s| unicode_width::UnicodeWidthStr::width(s.content.as_ref()))
-        .sum();
-    let pad = width.saturating_sub(4).saturating_sub(content_width);
+    let max_content = width.saturating_sub(4);
+    let mut content_width: usize = 0;
+    let mut result_spans: Vec<Span<'static>> = Vec::new();
+    for span in spans {
+        let sw = UnicodeWidthStr::width(span.content.as_ref());
+        if content_width + sw <= max_content {
+            content_width += sw;
+            result_spans.push(span);
+        } else {
+            let remaining = max_content.saturating_sub(content_width);
+            if remaining > 0 {
+                let truncated = truncate_str_to_width(span.content.as_ref(), remaining);
+                if !truncated.is_empty() {
+                    result_spans.push(Span::styled(truncated, span.style));
+                    content_width += UnicodeWidthStr::width(
+                        result_spans.last().unwrap().content.as_ref(),
+                    );
+                }
+            }
+            break;
+        }
+    }
+    let pad = max_content.saturating_sub(content_width);
     let mut all_spans = vec![Span::styled("| ", dim_bg_style(bg))];
-    all_spans.extend(spans);
+    all_spans.extend(result_spans);
     if pad > 0 {
         all_spans.push(Span::styled(" ".repeat(pad), bg_style(bg)));
     }
@@ -1821,6 +1828,23 @@ fn wrap_line(line: &str, max_width: usize) -> Vec<String> {
     rows
 }
 
+fn truncate_str_to_width(s: &str, max_width: usize) -> String {
+    if UnicodeWidthStr::width(s) <= max_width {
+        return s.to_string();
+    }
+    let mut result = String::new();
+    let mut current_width = 0;
+    for ch in s.chars() {
+        let ch_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if current_width + ch_width > max_width {
+            break;
+        }
+        result.push(ch);
+        current_width += ch_width;
+    }
+    result
+}
+
 /// helper used by tests / other renderers
 pub fn visible_width(s: &str) -> usize {
     UnicodeWidthStr::width(s)
@@ -2103,6 +2127,7 @@ mod tool_block_count_tests {
             content_offset: 0,
             visible: true,
             running: false,
+            call_id: String::new(),
             cached_line_count_visible: None,
             cached_line_count_collapsed: None,
         }
@@ -2120,6 +2145,7 @@ mod tool_block_count_tests {
             content_offset: 0,
             visible: true,
             running: false,
+            call_id: String::new(),
             cached_line_count_visible: None,
             cached_line_count_collapsed: None,
         }
@@ -2499,6 +2525,7 @@ mod tool_block_count_tests {
                 content_offset: 0,
                 visible: true,
                 running: false,
+            call_id: String::new(),
                 cached_line_count_visible: None,
                 cached_line_count_collapsed: None,
             });
@@ -2548,6 +2575,7 @@ mod tool_block_count_tests {
                 content_offset: 0,
                 visible: true,
                 running: false,
+            call_id: String::new(),
                 cached_line_count_visible: None,
                 cached_line_count_collapsed: None,
             });
@@ -2757,6 +2785,7 @@ mod tests {
             thinking_segments: Vec::new(),
             thinking_visible: false,
             tool_results: Vec::new(),
+tool_calls: Vec::new(),
             attachments: Vec::new(),
             display_cursor: usize::MAX,
             ts: chrono::Utc::now(),
@@ -2797,6 +2826,7 @@ mod tests {
             content_offset: 0,
             visible: true,
             running: false,
+            call_id: String::new(),
             cached_line_count_visible: None,
             cached_line_count_collapsed: None,
         };
@@ -2828,6 +2858,7 @@ mod tests {
             content_offset: 0,
             visible: true,
             running: false,
+            call_id: String::new(),
             cached_line_count_visible: None,
             cached_line_count_collapsed: None,
         };
@@ -2875,6 +2906,7 @@ mod tests {
             content_offset: 0,
             visible: true,
             running: false,
+            call_id: String::new(),
             cached_line_count_visible: None,
             cached_line_count_collapsed: None,
         };
@@ -2901,6 +2933,7 @@ mod tests {
             content_offset: 0,
             visible: true,
             running: false,
+            call_id: String::new(),
             cached_line_count_visible: None,
             cached_line_count_collapsed: None,
         };
@@ -3035,6 +3068,7 @@ mod tests {
                 thinking_segments: Vec::new(),
                 thinking_visible: false,
                 tool_results: Vec::new(),
+tool_calls: Vec::new(),
                 attachments: Vec::new(),
                 display_cursor: usize::MAX,
                 ts: chrono::Utc::now(),
@@ -3191,6 +3225,7 @@ mod tests {
             content_offset: 0,
             visible: true,
             running: false,
+            call_id: String::new(),
             cached_line_count_visible: None,
             cached_line_count_collapsed: None,
         });
@@ -3394,5 +3429,35 @@ mod tests {
             rendered.len(),
             s.messages.len()
         );
+    }
+
+    #[test]
+    fn box_row_line_width_is_exact() {
+        let bg = Color::Black;
+        let width = 100;
+        let line = box_row_line("hello", width, bg);
+        let w: usize = line
+            .spans
+            .iter()
+            .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+            .sum();
+        assert_eq!(w, width, "box_row_line width {w} != {width}");
+
+        let long = "x".repeat(width - 3);
+        let line2 = box_row_line(&long, width, bg);
+        let w2: usize = line2
+            .spans
+            .iter()
+            .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+            .sum();
+        assert_eq!(w2, width, "box_row_line long text width {w2} != {width}");
+
+        let line3 = box_row_line("\u{4e2d}\u{6587}", width, bg);
+        let w3: usize = line3
+            .spans
+            .iter()
+            .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+            .sum();
+        assert_eq!(w3, width, "box_row_line CJK width {w3} != {width}");
     }
 }

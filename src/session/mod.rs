@@ -70,6 +70,13 @@ pub struct ThinkingSegment {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionToolCall {
+    pub id: String,
+    pub name: String,
+    pub arguments: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolResultBlock {
     pub name: String,
     pub title: String,
@@ -78,6 +85,10 @@ pub struct ToolResultBlock {
     pub visible: bool,
     #[serde(default)]
     pub running: bool,
+    /// Tool call id that produced this result. Used to reconstruct
+    /// the conversation context for the LLM in follow-up turns.
+    #[serde(default)]
+    pub call_id: String,
     /// Cached rendered line count for the expanded tool block.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cached_line_count_visible: Option<u32>,
@@ -148,6 +159,11 @@ pub struct Message {
     pub thinking_segments: Vec<ThinkingSegment>,
     /// Whether the thinking block is currently expanded.
     pub thinking_visible: bool,
+    /// Tool calls emitted by the assistant in this turn.
+    /// Used to reconstruct the conversation context for the LLM
+    /// in follow-up turns (e.g. after plan/ask interaction tools).
+    #[serde(default)]
+    pub tool_calls: Vec<SessionToolCall>,
     /// Tool result blocks, each with its own visibility,
     /// rendered as collapsible code sections.
     pub tool_results: Vec<ToolResultBlock>,
@@ -204,6 +220,7 @@ impl Message {
             thinking: String::new(),
             thinking_segments: Vec::new(),
             thinking_visible: false,
+            tool_calls: Vec::new(),
             tool_results: Vec::new(),
             attachments: Vec::new(),
             ts: Utc::now(),
@@ -437,7 +454,7 @@ impl Session {
 
     /// Update the last tool block's content (for streaming: replace placeholder with final content).
     /// If no tool block exists yet (non-streaming path), falls back to appending.
-    pub fn update_last_tool_content(&mut self, name: String, title: String, content: String) {
+    pub fn update_last_tool_content(&mut self, name: String, title: String, content: String, call_id: String) {
         if let Some(id) = self.streaming_id {
             if let Some(m) = self.messages.get_mut(id) {
                 if let Some(last) = m.thinking_segments.last_mut() {
@@ -449,6 +466,7 @@ impl Session {
                     tool.content = content;
                     tool.running = false;
                     tool.title = title;
+                    tool.call_id = call_id;
                     tool.cached_line_count_visible = None;
                     tool.cached_line_count_collapsed = None;
                     m.invalidate_caches();
@@ -483,6 +501,7 @@ impl Session {
                     content_offset,
                     visible,
                     running: false,
+                    call_id: String::new(),
                     cached_line_count_visible: None,
                     cached_line_count_collapsed: None,
                 });
@@ -509,6 +528,7 @@ impl Session {
                     content_offset,
                     visible,
                     running: true,
+                    call_id: String::new(),
                     cached_line_count_visible: None,
                     cached_line_count_collapsed: None,
                 });
@@ -552,9 +572,11 @@ impl Session {
                 content_offset: 0,
                 visible,
                 running: false,
+                call_id: String::new(),
                 cached_line_count_visible: None,
                 cached_line_count_collapsed: None,
             }],
+            tool_calls: Vec::new(),
             attachments: Vec::new(),
             ts: Utc::now(),
             streaming: false,

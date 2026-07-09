@@ -68,7 +68,13 @@ pub enum AppMsg {
         name: String,
         title: String,
         content: String,
+        /// The tool call id that produced this result.
+        call_id: String,
     },
+    /// Tool calls emitted by the assistant. Stored in the session so
+    /// the conversation context can be reconstructed for follow-up
+    /// turns (e.g. after plan/ask interaction tools pause the loop).
+    AssistantToolCalls(Vec<crate::session::SessionToolCall>),
     LocalToolResult {
         name: String,
         title: String,
@@ -876,12 +882,20 @@ fn handle_msg(msg: AppMsg, app: &mut App) {
             name,
             title,
             content,
+            call_id,
         } => {
             if name == "todowrite" {
                 handle_todowrite_result(app, &content);
             }
             open_tool_function_panel(app, &name, &content);
-            app.session.update_last_tool_content(name, title, content);
+            app.session.update_last_tool_content(name, title, content, call_id);
+        }
+        AppMsg::AssistantToolCalls(tool_calls) => {
+            if let Some(id) = app.session.streaming_id {
+                if let Some(m) = app.session.messages.get_mut(id) {
+                    m.tool_calls.extend(tool_calls);
+                }
+            }
         }
         AppMsg::LocalToolResult {
             name,
@@ -2672,6 +2686,7 @@ fn submit_direct_tool_input(app: &mut App, raw: &str) -> bool {
         thinking_segments: Vec::new(),
         thinking_visible: false,
         tool_results: Vec::new(),
+        tool_calls: Vec::new(),
         attachments: Vec::new(),
         display_cursor: 0,
         line_count: 0,
@@ -2771,6 +2786,7 @@ pub async fn run_tool_execution(
         name,
         title,
         content: display,
+        call_id: String::new(),
     });
     send_msg(AppMsg::ChatDone { seq });
     if let Some(ctx) = context {
