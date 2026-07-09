@@ -506,21 +506,37 @@ fn highlight_code_lines(lines: &[&str], lang: Option<&str>) -> Vec<TableCell> {
 /// Returns styled spans with syntax coloring.
 /// Falls back to a plain span if the language is unknown.
 pub(crate) fn highlight_line(line: &str, lang: &str) -> Vec<Span<'static>> {
+    highlight_lines(&[line], lang).into_iter().next().unwrap_or_default()
+}
+
+/// Highlight multiple lines of code using a single highlighter
+/// instance so that syntax state carries across line boundaries
+/// (e.g. multi-line strings in shell commands).
+pub(crate) fn highlight_lines(lines: &[&str], lang: &str) -> Vec<Vec<Span<'static>>> {
     let ps = syntax_set();
     let Some(syntax) = find_syntax_cached(lang) else {
-        return vec![Span::raw(line.to_string())];
+        return lines
+            .iter()
+            .map(|line| vec![Span::raw(line.to_string())])
+            .collect();
     };
     let Some(theme) = theme_set().themes.get("InspiredGitHub") else {
-        return vec![Span::raw(line.to_string())];
+        return lines
+            .iter()
+            .map(|line| vec![Span::raw(line.to_string())])
+            .collect();
     };
     let mut highlighter = HighlightLines::new(syntax, theme);
-    match highlighter.highlight_line(line, ps) {
-        Ok(ranges) => ranges
-            .into_iter()
-            .map(|(style, text)| Span::styled(text.to_string(), syntect_style(style)))
-            .collect(),
-        Err(_) => vec![Span::raw(line.to_string())],
-    }
+    lines
+        .iter()
+        .map(|line| match highlighter.highlight_line(line, ps) {
+            Ok(ranges) => ranges
+                .into_iter()
+                .map(|(style, text)| Span::styled(text.to_string(), syntect_style(style)))
+                .collect(),
+            Err(_) => vec![Span::raw(line.to_string())],
+        })
+        .collect()
 }
 
 fn plain_code_lines(lines: &[&str]) -> Vec<TableCell> {
