@@ -706,6 +706,16 @@ fn system_prompt(agent: crate::permission::Agent, agents_content: &str) -> Strin
 You are an AI coding assistant with access to the tools listed below. Your job is to \
 complete software engineering tasks efficiently and correctly.
 
+## Output discipline (token budget)
+
+You MUST minimize output tokens as much as possible while remaining helpful and accurate. \
+Answer concisely with fewer than 4 lines unless the user asks for detail. One-word answers \
+are best. Avoid introductions, conclusions, and explanations. Do NOT emit text before or \
+after your response such as \"Here is the content of the file...\" or \"Based on the \
+information provided...\". After working on a file, just stop — do NOT summarize what you \
+did unless asked. DO NOT add comments to code unless explicitly asked. Prefer tool calls \
+over prose narration.
+
 You operate in the following environment:
 - Current date: {date}
 - OS: {os}
@@ -733,14 +743,19 @@ output — always wait for the real result.
 
 Read a file from the workspace. When reading a file you've never seen before, start \
 without line limits to understand the full context. For large files you already \
-understand, use `start_line` and `end_line` to focus on the relevant section.
+understand, use `start_line` and `end_line` to focus on the relevant section. Call this \
+tool in parallel (multiple calls in one turn) when you know there are multiple files to \
+read. Avoid tiny repeated slices (e.g. 30-line chunks) — if you need more context, read \
+a larger window in one call rather than re-reading several times.
 
 ### edit(path, content, oldString?, replaceAll?, start_line?, end_line?)
 
 Perform exact string replacements in a file. `oldString` must match the file content \
-exactly (including indentation). If `replaceAll` is true, every occurrence is replaced. \
-Use `start_line`/`end_line` to scope the search. ALWAYS prefer editing existing files \
-over creating new ones.
+exactly (including indentation and whitespace). The edit will FAIL if `oldString` is not \
+found, and will fail with a multiple-match error if it matches more than one location — \
+in that case provide a larger `oldString` with more surrounding context to make the match \
+unique, or set `replaceAll` to replace every occurrence. You MUST read the file first \
+before editing it. ALWAYS prefer editing existing files over creating new ones.
 
 ### write(filePath, content)
 
@@ -1076,6 +1091,11 @@ pub fn send_message(app: &mut App, user_msg: Message) {
         }
     }
 
+    // Prune pass: clear AI-facing content of old tool results whose
+    // cumulative size exceeds the protected budget. The TUI still
+    // shows the original content; only the LLM-bound value is swapped.
+    crate::compaction::prune(&mut app.session.messages);
+
     let messages: Vec<ChatMessage> = app
         .session
         .messages
@@ -1110,9 +1130,17 @@ pub fn send_message(app: &mut App, user_msg: Message) {
                 });
                 // Emit a tool result message for each tool result.
                 for tr in &m.tool_results {
+                    // Pruned tool outputs are swapped for a compact
+                    // placeholder so old read/command results don't
+                    // keep consuming context budget in long sessions.
+                    let content = if tr.pruned {
+                        "[Old tool result content cleared]".to_string()
+                    } else {
+                        tr.content.clone()
+                    };
                     msgs.push(ChatMessage {
                         role: "tool".to_string(),
-                        content: tr.content.clone(),
+                        content,
                         content_parts: Vec::new(),
                         tool_call_id: Some(tr.call_id.clone()),
                         tool_calls: Vec::new(),
@@ -1223,6 +1251,12 @@ pub async fn run_chat_stream(
     };
     let mut stream_retries = 0u32;
     let retry_delays = [3u64, 12, 60];
+    // Rolling record of recent tool calls (name, arguments) used by
+    // the doom-loop detector: when the same tool is invoked 3 times
+    // in a row with identical arguments, the loop is broken and the
+    // user is asked to intervene. Matches opencode's
+    // `DOOM_LOOP_THRESHOLD`.
+    let mut doom_history: Vec<(String, String)> = Vec::new();
     loop {
         if *cancel_rx.borrow() {
             // Silent exit. We do NOT send `ChatDone` / `ChatError`
@@ -1289,6 +1323,7 @@ pub async fn run_chat_stream(
                         name,
                         title,
                         content,
+                        metadata: String::new(),
                         call_id: String::new(),
                     });
                 }
@@ -1384,6 +1419,20 @@ pub async fn run_chat_stream(
                 name: call.name.clone(),
                 title: title.clone(),
             });
+            // Doom-loop detection: if the same tool has just been
+            // called twice in a row with identical arguments, this
+            // would be the 3rd identical call. Break the loop and
+            // hand control back to the user instead of burning
+            // tokens on a stuck repetition.
+            if is_doom_loop(&doom_history, &call.name, &call.arguments) {
+                send_msg(crate::event::AppMsg::ChatWarn(format!(
+                    "doom loop detected: `{}` called 3x with identical args. Pausing for user review.",
+                    call.name
+                )));
+                send_msg(crate::event::AppMsg::ChatDone { seq });
+                return;
+            }
+            doom_history.push((call.name.clone(), call.arguments.clone()));
             let result = if call.name == "sub_agent" {
                 run_sub_agent(
                     &client,
@@ -1407,18 +1456,25 @@ pub async fn run_chat_stream(
                 )
                 .await
             };
+            // The raw `result` envelope may carry a UI-only `metadata`
+            // field (edit_diff JSON for edit/write). Strip it before
+            // the envelope enters the AI context so the model never
+            // sees the full old/new file contents.
+            let ai_result = crate::tools::strip_metadata(&result);
             req.messages.push(ChatMessage {
                 role: "tool".to_string(),
-                content: result.clone(),
+                content: ai_result,
                 content_parts: Vec::new(),
                 tool_call_id: Some(call.id.clone()),
                 tool_calls: Vec::new(),
             });
             let display_text = parse_tool_result_display(&result);
+            let metadata = crate::tools::extract_metadata(&result);
             send_msg(crate::event::AppMsg::ChatToolResult {
                 name: call.name.clone(),
                 title,
                 content: display_text,
+                metadata,
                 call_id: call.id.clone(),
             });
         }
@@ -1870,6 +1926,21 @@ pub async fn run_compaction_stream(
     });
 }
 
+/// Doom-loop detector: returns true when `name`/`args` match each of
+/// the last two entries in `history`, i.e. this would be the 3rd
+/// consecutive identical tool call. Matches opencode's
+/// `DOOM_LOOP_THRESHOLD = 3`.
+fn is_doom_loop(history: &[(String, String)], name: &str, args: &str) -> bool {
+    let n = history.len();
+    if n < 2 {
+        return false;
+    }
+    history[n - 1].0 == name
+        && history[n - 1].1 == args
+        && history[n - 2].0 == name
+        && history[n - 2].1 == args
+}
+
 /// Extract the human-readable display content from a tool result JSON string.
 /// Strips the `{"ok":true,"result":"..."}` wrapper to show just the inner content.
 fn parse_tool_result_display(result: &str) -> String {
@@ -2121,4 +2192,39 @@ fn parse_text_tool_calls(content: &str) -> Vec<ToolCall> {
         search_start = end;
     }
     calls
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn doom_loop_triggers_on_third_identical_call() {
+        let mut h: Vec<(String, String)> = Vec::new();
+        h.push(("read".to_string(), "{\"path\":\"a\"}".to_string()));
+        assert!(!is_doom_loop(&h, "read", "{\"path\":\"a\"}"), "2nd call is fine");
+        h.push(("read".to_string(), "{\"path\":\"a\"}".to_string()));
+        assert!(
+            is_doom_loop(&h, "read", "{\"path\":\"a\"}"),
+            "3rd identical call must trigger"
+        );
+    }
+
+    #[test]
+    fn doom_loop_ignores_different_args() {
+        let h = vec![
+            ("read".to_string(), "{\"path\":\"a\"}".to_string()),
+            ("read".to_string(), "{\"path\":\"b\"}".to_string()),
+        ];
+        assert!(!is_doom_loop(&h, "read", "{\"path\":\"a\"}"));
+    }
+
+    #[test]
+    fn doom_loop_ignores_different_tools() {
+        let h = vec![
+            ("read".to_string(), "x".to_string()),
+            ("grep".to_string(), "x".to_string()),
+        ];
+        assert!(!is_doom_loop(&h, "read", "x"));
+    }
 }

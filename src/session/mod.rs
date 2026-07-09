@@ -81,6 +81,13 @@ pub struct ToolResultBlock {
     pub name: String,
     pub title: String,
     pub content: String,
+    /// UI-only payload that must never be sent to the AI. For
+    /// `edit`/`write` tools this holds the `edit_diff` JSON (full
+    /// old/new file contents) so the TUI can render a rich diff,
+    /// while `content` carries only the short AI-facing success
+    /// message. Empty for tools without structured metadata.
+    #[serde(default)]
+    pub metadata: String,
     pub content_offset: usize,
     pub visible: bool,
     #[serde(default)]
@@ -89,6 +96,13 @@ pub struct ToolResultBlock {
     /// the conversation context for the LLM in follow-up turns.
     #[serde(default)]
     pub call_id: String,
+    /// When true, the AI-facing `content` has been logically cleared
+    /// (replaced with a placeholder) by the prune pass to reclaim
+    /// context budget. The original content is still on disk/in the
+    /// session for the TUI; only the value sent to the LLM is
+    /// swapped. Matches opencode's `part.state.time.compacted`.
+    #[serde(default)]
+    pub pruned: bool,
     /// Cached rendered line count for the expanded tool block.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cached_line_count_visible: Option<u32>,
@@ -454,7 +468,7 @@ impl Session {
 
     /// Update the last tool block's content (for streaming: replace placeholder with final content).
     /// If no tool block exists yet (non-streaming path), falls back to appending.
-    pub fn update_last_tool_content(&mut self, name: String, title: String, content: String, call_id: String) {
+    pub fn update_last_tool_content(&mut self, name: String, title: String, content: String, call_id: String, metadata: String) {
         if let Some(id) = self.streaming_id {
             if let Some(m) = self.messages.get_mut(id) {
                 if let Some(last) = m.thinking_segments.last_mut() {
@@ -464,6 +478,7 @@ impl Session {
                 }
                 if let Some(tool) = m.tool_results.last_mut() {
                     tool.content = content;
+                    tool.metadata = metadata;
                     tool.running = false;
                     tool.title = title;
                     tool.call_id = call_id;
@@ -481,10 +496,10 @@ impl Session {
             }
         }
         // Fallback: no existing block → append as normal
-        self.append_tool_to_last(name, title, content);
+        self.append_tool_to_last(name, title, content, metadata);
     }
 
-    pub fn append_tool_to_last(&mut self, name: String, title: String, content: String) {
+    pub fn append_tool_to_last(&mut self, name: String, title: String, content: String, metadata: String) {
         if let Some(id) = self.streaming_id {
             if let Some(m) = self.messages.get_mut(id) {
                 if let Some(last) = m.thinking_segments.last_mut() {
@@ -498,10 +513,12 @@ impl Session {
                     name,
                     title,
                     content,
+                    metadata,
                     content_offset,
                     visible,
                     running: false,
                     call_id: String::new(),
+                    pruned: false,
                     cached_line_count_visible: None,
                     cached_line_count_collapsed: None,
                 });
@@ -525,10 +542,12 @@ impl Session {
                     name,
                     title,
                     content: String::new(),
+                    metadata: String::new(),
                     content_offset,
                     visible,
                     running: true,
                     call_id: String::new(),
+                    pruned: false,
                     cached_line_count_visible: None,
                     cached_line_count_collapsed: None,
                 });
@@ -557,7 +576,7 @@ impl Session {
         }
     }
 
-    pub fn push_tool_result_message(&mut self, name: String, title: String, content: String) {
+    pub fn push_tool_result_message(&mut self, name: String, title: String, content: String, metadata: String) {
         let visible = name == "plan" || self.expand_new_tool_results;
         let msg = Message {
             role: Role::Assistant,
@@ -569,10 +588,12 @@ impl Session {
                 name,
                 title,
                 content,
+                metadata,
                 content_offset: 0,
                 visible,
                 running: false,
                 call_id: String::new(),
+                pruned: false,
                 cached_line_count_visible: None,
                 cached_line_count_collapsed: None,
             }],

@@ -186,20 +186,82 @@ pub fn serialize_message(m: &Message) -> String {
             let mut out = format!("[User]: {}", m.content);
             if !m.tool_results.is_empty() {
                 for tr in &m.tool_results {
-                    out.push_str(&format!("\n[Tool result {}]: {}", tr.name, truncate(&tr.content, TOOL_OUTPUT_MAX_CHARS)));
+                    let body = if tr.pruned {
+                        PRUNE_PLACEHOLDER.to_string()
+                    } else {
+                        truncate(&tr.content, TOOL_OUTPUT_MAX_CHARS)
+                    };
+                    out.push_str(&format!("\n[Tool result {}]: {}", tr.name, body));
                 }
             }
             out
         }
         crate::session::Role::Assistant => {
-            if m.content.is_empty() {
+            let mut out = if m.content.is_empty() {
                 "[Assistant]: (empty)".to_string()
             } else {
                 format!("[Assistant]: {}", m.content)
+            };
+            // Assistant messages also carry tool results (e.g. the
+            // streaming tool blocks). Surface them in the summary so
+            // the compaction model retains what each tool produced,
+            // with the same prune/truncate discipline as user messages.
+            for tr in &m.tool_results {
+                let body = if tr.pruned {
+                    PRUNE_PLACEHOLDER.to_string()
+                } else {
+                    truncate(&tr.content, TOOL_OUTPUT_MAX_CHARS)
+                };
+                out.push_str(&format!("\n[Tool result {}]: {}", tr.name, body));
             }
+            out
         }
         crate::session::Role::System => {
             format!("[System update]: {}", m.content)
+        }
+    }
+}
+
+/// Token budget protected for recent tool outputs. Older tool
+/// results whose cumulative content exceeds this budget are pruned
+/// (their AI-facing content is replaced with a placeholder).
+/// Matches opencode's `PRUNE_PROTECT`.
+pub const PRUNE_PROTECT_TOKENS: u64 = 40_000;
+
+/// Placeholder substituted for a pruned tool's AI-facing content.
+pub const PRUNE_PLACEHOLDER: &str = "[Old tool result content cleared]";
+
+/// Tools whose output must never be pruned (e.g. `skill`, which
+/// injects instructions the model relies on for the rest of the
+/// session).
+const PRUNE_PROTECTED_TOOLS: &[&str] = &["skill"];
+
+/// Walk the session backward and mark old tool results as pruned
+/// once their cumulative token estimate exceeds `PRUNE_PROTECT_TOKENS`.
+/// Already-pruned tools stop the accumulation (their content is
+/// already cleared). Protected tools (e.g. `skill`) are skipped.
+///
+/// This is an in-place, idempotent pass: running it repeatedly only
+/// newly-overflows get marked. The TUI still shows the original
+/// `content`; only the value sent to the LLM is swapped (see the
+/// `pruned` flag consumer in `commands.rs`).
+pub fn prune(messages: &mut [crate::session::Message]) {
+    let mut accumulated: u64 = 0;
+    // Iterate messages in reverse chronological order.
+    for m in messages.iter_mut().rev() {
+        for tr in m.tool_results.iter_mut().rev() {
+            if tr.pruned {
+                // Already cleared; doesn't add to the budget.
+                continue;
+            }
+            if PRUNE_PROTECTED_TOOLS.contains(&tr.name.as_str()) {
+                continue;
+            }
+            let tokens = estimate_tokens(&tr.content);
+            accumulated += tokens;
+            if accumulated > PRUNE_PROTECT_TOKENS {
+                tr.pruned = true;
+            }
         }
     }
 }
@@ -412,13 +474,78 @@ pub fn is_context_overflow_error(error: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session::{Message, Role};
+    use crate::session::{Message, Role, ToolResultBlock};
 
     fn user(s: &str) -> Message {
         Message::new(Role::User, s)
     }
     fn assistant(s: &str) -> Message {
         Message::new(Role::Assistant, s)
+    }
+
+    fn tool_block(name: &str, content: &str) -> ToolResultBlock {
+        ToolResultBlock {
+            name: name.to_string(),
+            title: name.to_string(),
+            content: content.to_string(),
+            metadata: String::new(),
+            content_offset: 0,
+            visible: true,
+            running: false,
+            call_id: String::new(),
+            pruned: false,
+            cached_line_count_visible: None,
+            cached_line_count_collapsed: None,
+        }
+    }
+
+    #[test]
+    fn prune_clears_old_tool_outputs_beyond_budget() {
+        // Each tool block is ~2500 chars ≈ 625 tokens. With a 40k
+        // token budget, ~64 blocks fit; the 65th and older get pruned.
+        let big = "x".repeat(2500);
+        let mut m = assistant("ran tools");
+        for _ in 0..80 {
+            m.tool_results.push(tool_block("read", &big));
+        }
+        let mut msgs = vec![user("hi"), m];
+        prune(&mut msgs);
+        let tools = &msgs[1].tool_results;
+        // Most recent blocks (tail) must stay unpruned.
+        assert!(!tools.last().unwrap().pruned, "newest tool must survive");
+        // Some older ones must be pruned.
+        assert!(
+            tools.iter().filter(|t| t.pruned).count() > 0,
+            "expected at least one pruned tool"
+        );
+    }
+
+    #[test]
+    fn prune_protects_skill_tool() {
+        let big = "x".repeat(200_000); // well over budget
+        let mut m = assistant("ran tools");
+        m.tool_results.push(tool_block("skill", &big));
+        m.tool_results.push(tool_block("read", &big));
+        let mut msgs = vec![m];
+        prune(&mut msgs);
+        assert!(
+            !msgs[0].tool_results[0].pruned,
+            "skill output must never be pruned"
+        );
+        assert!(msgs[0].tool_results[1].pruned, "read output should be pruned");
+    }
+
+    #[test]
+    fn prune_is_idempotent() {
+        let big = "x".repeat(200_000);
+        let mut m = assistant("ran tools");
+        m.tool_results.push(tool_block("read", &big));
+        let mut msgs = vec![m];
+        prune(&mut msgs);
+        assert!(msgs[0].tool_results[0].pruned);
+        // Running again must not panic or flip the flag back.
+        prune(&mut msgs);
+        assert!(msgs[0].tool_results[0].pruned);
     }
 
     #[test]

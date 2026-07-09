@@ -166,7 +166,7 @@ fn tool_defs() -> Vec<ToolDef> {
     vec![
         ToolDef {
             name: "read",
-            description: "Read a UTF-8 text file within the current workspace. Supports optional 1-based inclusive line ranges.".to_string(),
+            description: "Read a UTF-8 text file within the current workspace. Supports optional 1-based inclusive line ranges. Call this tool in parallel (multiple calls in one turn) when you know there are several files to read. Avoid tiny repeated slices — read a larger window once instead of re-reading several times.".to_string(),
             schema: json!({
                 "type": "object",
                 "properties": {
@@ -180,7 +180,7 @@ fn tool_defs() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "edit",
-            description: "Write or edit a UTF-8 text file within the current workspace. Use this tool for all file modifications including creating new files and editing existing ones. To edit, provide oldString (the exact text to find and replace) with the replacement content. CRLF line endings are automatically normalized so you can use plain \n for oldString even on Windows files. When oldString matches multiple locations, use start_line/end_line to narrow the search scope, or use replaceAll: true. To create or overwrite a file, omit oldString.".to_string(),
+            description: "Write or edit a UTF-8 text file within the current workspace. Use this tool for all file modifications including creating new files and editing existing ones. To edit, provide oldString (the exact text to find and replace) with the replacement content. CRLF line endings are automatically normalized so you can use plain \n for oldString even on Windows files. When oldString matches multiple locations, use start_line/end_line to narrow the search scope, or use replaceAll: true. To create or overwrite a file, omit oldString. The edit FAILS if oldString is not found or matches more than one location — provide more surrounding context to make the match unique. You MUST read the file first before editing it.".to_string(),
             schema: json!({
                 "type": "object",
                 "properties": {
@@ -422,7 +422,14 @@ t::WRITE_FILE => write_file(args, cwd).await,
     };
 
     match result {
-        Ok(value) => json!({ "ok": true, "result": value }).to_string(),
+        Ok(value) => {
+            let (ai, metadata) = split_edit_diff(name, &value);
+            let mut obj = json!({ "ok": true, "result": ai });
+            if !metadata.is_empty() {
+                obj["metadata"] = json!(metadata);
+            }
+            obj.to_string()
+        }
         Err(err) => json!({ "ok": false, "error": err.to_string() }).to_string(),
     }
 }
@@ -503,7 +510,11 @@ pub async fn execute_tool_streaming_with_agent(
         _ => execute_tool_with_agent(agent, name, args, cwd).await,
     };
 
-    result
+    // Unified truncation layer: keep the AI-facing `result` within
+    // MAX_LINES / MAX_BYTES so a huge read/command output cannot
+    // blow up the context. UI-only `metadata` (edit diffs) is left
+    // intact for the TUI renderer.
+    truncate_tool_output(&result)
 }
 
 /// Heuristic: a tool name is treated as an MCP tool when the live
@@ -817,7 +828,7 @@ async fn write_file(args: &str, cwd: &Path) -> Result<String> {
             args.end_line,
         )?;
         tokio::fs::write(&path, &updated).await?;
-        Ok(write_diff_result(&args.path, &original, &updated))
+        Ok(write_diff_result(&args.path, &original, &updated, "Edit applied successfully."))
     } else {
         let original = match tokio::fs::read_to_string(&path).await {
             Ok(text) => text,
@@ -828,18 +839,66 @@ async fn write_file(args: &str, cwd: &Path) -> Result<String> {
             tokio::fs::create_dir_all(parent).await?;
         }
         tokio::fs::write(&path, &args.content).await?;
-        Ok(write_diff_result(&args.path, &original, &args.content))
+        Ok(write_diff_result(&args.path, &original, &args.content, "Wrote file successfully."))
     }
 }
 
-fn write_diff_result(path: &str, old: &str, new: &str) -> String {
+fn write_diff_result(path: &str, old: &str, new: &str, ai_output: &str) -> String {
     json!({
         "kind": "edit_diff",
         "path": path,
         "old": old,
         "new": new,
+        "output": ai_output,
     })
     .to_string()
+}
+
+/// Split a tool's raw result value into `(ai_output, metadata)`.
+///
+/// For `edit`/`write` results (an `edit_diff` JSON carrying an
+/// `output` field), returns `(output, full edit_diff JSON)` so the
+/// AI only sees the short success message while the diff is preserved
+/// as UI-only metadata. For every other tool, returns `(value, "")`.
+fn split_edit_diff(name: &str, value: &str) -> (String, String) {
+    if name != "edit" {
+        return (value.to_string(), String::new());
+    }
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(value) else {
+        return (value.to_string(), String::new());
+    };
+    if v.get("kind").and_then(|k| k.as_str()) != Some("edit_diff") {
+        return (value.to_string(), String::new());
+    }
+    let output = v
+        .get("output")
+        .and_then(|o| o.as_str())
+        .unwrap_or("Edit applied successfully.")
+        .to_string();
+    (output, value.to_string())
+}
+
+/// Extract the `metadata` field from a `{"ok":true,"result":...,"metadata":...}`
+/// envelope produced by `execute_tool_with_agent`. Returns an empty
+/// string when absent (non-edit tools).
+pub fn extract_metadata(envelope: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(envelope)
+        .ok()
+        .and_then(|v| v.get("metadata").and_then(|m| m.as_str()).map(str::to_string))
+        .unwrap_or_default()
+}
+
+/// Re-serialize an `{"ok":...,"result":...,"metadata":...}` envelope
+/// with the `metadata` field removed, so UI-only payload (file diffs)
+/// never reaches the AI context. Non-JSON values are returned unchanged.
+pub fn strip_metadata(envelope: &str) -> String {
+    let Ok(mut v) = serde_json::from_str::<serde_json::Value>(envelope) else {
+        return envelope.to_string();
+    };
+    if let Some(obj) = v.as_object_mut() {
+        obj.remove("metadata");
+    }
+    serde_json::to_string(&v).unwrap_or_else(|_| envelope.to_string())
 }
 
 async fn grep_text(args: &str, cwd: &Path) -> Result<String> {
@@ -1120,7 +1179,7 @@ async fn write_new_file(args: &str, cwd: &Path) -> Result<String> {
         tokio::fs::create_dir_all(parent).await?;
     }
     tokio::fs::write(&path, &args.content).await?;
-    Ok(write_diff_result(&args.file_path, &original, &args.content))
+    Ok(write_diff_result(&args.file_path, &original, &args.content, "Wrote file successfully."))
 }
 
 async fn skill_load(args: &str) -> Result<String> {
@@ -1627,9 +1686,164 @@ fn truncate(mut text: String, limit: usize) -> String {
     text
 }
 
+/// Maximum number of lines a tool's AI-facing output may keep
+/// before being truncated. Matches opencode's `MAX_LINES`.
+pub const TOOL_OUTPUT_MAX_LINES: usize = 2000;
+
+/// Maximum byte size of a tool's AI-facing output before being
+/// truncated. Matches opencode's `MAX_BYTES` (50 KiB).
+pub const TOOL_OUTPUT_MAX_BYTES: usize = 50 * 1024;
+
+/// Counter used to disambiguate truncation files written in the same
+/// millisecond.
+static TRUNCATION_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Directory under the system temp folder where truncated tool
+/// outputs are saved so the AI can re-read them with `read`/`grep`.
+fn truncation_dir() -> std::path::PathBuf {
+    let mut p = std::env::temp_dir();
+    p.push("fish_coding_agent_tool_output");
+    p
+}
+
+/// Persist the full (untruncated) tool output to a temp file and
+/// return the display path. Failures are non-fatal: we fall back to
+/// an inline note so the AI still gets a truncation hint.
+fn save_tool_output(text: &str) -> String {
+    let dir = truncation_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    let seq = TRUNCATION_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let stamp = chrono::Local::now().format("%Y%m%d_%H%M%S").to_string();
+    let file = dir.join(format!("tool_{stamp}_{seq}.txt"));
+    match std::fs::write(&file, text) {
+        Ok(()) => file.display().to_string(),
+        Err(_) => "(temp file write failed)".to_string(),
+    }
+}
+
+/// Truncate a raw tool output string to the line/byte limits. When
+/// it fits, returns it unchanged. When it exceeds, saves the full
+/// text to a temp file and returns a head preview plus a hint that
+/// guides the AI to use `grep` / `read` (with offset/limit) instead
+/// of re-reading the whole thing.
+fn truncate_output_str(text: &str) -> String {
+    let lines: Vec<&str> = text.split('\n').collect();
+    let total_bytes = text.len();
+    if lines.len() <= TOOL_OUTPUT_MAX_LINES && total_bytes <= TOOL_OUTPUT_MAX_BYTES {
+        return text.to_string();
+    }
+
+    let mut out: Vec<&str> = Vec::new();
+    let mut bytes = 0usize;
+    for line in &lines {
+        let size = line.len() + if out.is_empty() { 0 } else { 1 };
+        if out.len() >= TOOL_OUTPUT_MAX_LINES || bytes + size > TOOL_OUTPUT_MAX_BYTES {
+            break;
+        }
+        out.push(line);
+        bytes += size;
+    }
+
+    let removed_lines = lines.len() - out.len();
+    let removed_bytes = total_bytes - bytes;
+    let preview = out.join("\n");
+    let path = save_tool_output(text);
+    let unit = if removed_bytes > 0 && out.len() == TOOL_OUTPUT_MAX_LINES {
+        "lines"
+    } else {
+        "bytes"
+    };
+    let amount = if unit == "lines" {
+        removed_lines
+    } else {
+        removed_bytes
+    };
+    format!(
+        "{preview}\n\n...{amount} {unit} truncated...\n\nThe tool call succeeded but the output was truncated. Full output saved to: {path}\nUse grep to search the full content or read with offset/limit to view specific sections."
+    )
+}
+
+/// Apply the unified truncation layer to a tool result envelope of
+/// the form `{"ok":true,"result":...,"metadata"?...}`. Only the
+/// AI-facing `result` string is truncated; the UI-only `metadata`
+/// field (e.g. `edit_diff`) is left untouched. Non-JSON envelopes
+/// are returned unchanged.
+pub fn truncate_tool_output(envelope: &str) -> String {
+    let Ok(mut v) = serde_json::from_str::<serde_json::Value>(envelope) else {
+        return envelope.to_string();
+    };
+    let Some(obj) = v.as_object_mut() else {
+        return envelope.to_string();
+    };
+    if obj.get("ok").and_then(|b| b.as_bool()) != Some(true) {
+        return envelope.to_string();
+    }
+    if let Some(result) = obj
+        .get("result")
+        .and_then(|r| r.as_str())
+        .map(str::to_string)
+    {
+        let truncated = truncate_output_str(&result);
+        obj.insert("result".to_string(), serde_json::Value::String(truncated));
+    }
+    serde_json::to_string(&v).unwrap_or_else(|_| envelope.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn truncate_tool_output_keeps_small_envelope() {
+        let env = r#"{"ok":true,"result":"small"}"#;
+        assert_eq!(truncate_tool_output(env), env);
+    }
+
+    #[test]
+    fn truncate_tool_output_preserves_metadata_field() {
+        // edit/write envelope: result is short, metadata must survive
+        // untouched so the TUI can still render the diff.
+        let env = r#"{"ok":true,"result":"Edit applied successfully.","metadata":"{\"kind\":\"edit_diff\",\"old\":\"x\",\"new\":\"y\"}"}"#;
+        let out = truncate_tool_output(env);
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(
+            v.get("result").and_then(|r| r.as_str()),
+            Some("Edit applied successfully.")
+        );
+        assert!(
+            v.get("metadata").is_some(),
+            "metadata must be preserved for the TUI"
+        );
+    }
+
+    #[test]
+    fn truncate_tool_output_truncates_large_result() {
+        let big = "x\n".repeat(5000);
+        let env = json!({ "ok": true, "result": big }).to_string();
+        let out = truncate_tool_output(&env);
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let result = v.get("result").and_then(|r| r.as_str()).unwrap();
+        assert!(
+            result.contains("truncated"),
+            "expected truncation marker, got tail: {}",
+            &result[result.len().saturating_sub(200)..]
+        );
+        assert!(
+            result.contains("grep"),
+            "expected grep hint in truncated output"
+        );
+        // The kept body must be under the line limit.
+        assert!(
+            result.lines().count() <= TOOL_OUTPUT_MAX_LINES + 10,
+            "truncated body too large"
+        );
+    }
+
+    #[test]
+    fn truncate_tool_output_passes_through_non_json() {
+        let raw = "not json at all";
+        assert_eq!(truncate_tool_output(raw), raw);
+    }
 
     /// Plan agent must be denied any tool that could mutate the
     /// user's tree, even when the tool name is well-formed.

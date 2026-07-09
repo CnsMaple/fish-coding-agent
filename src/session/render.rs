@@ -1586,7 +1586,7 @@ fn build_edit_diff_rows(
     width: usize,
     bg: Color,
 ) -> Option<Vec<Line<'static>>> {
-    let (path, old, new) = parse_edit_diff(&tool.content)?;
+    let (path, old, new) = parse_edit_diff(&tool.metadata)?;
     let diff = unified_diff_rows(&old, &new);
     let added = diff
         .iter()
@@ -2121,21 +2121,26 @@ mod tool_block_count_tests {
 
     fn make_edit_tool() -> ToolResultBlock {
         // A small but valid write_file_diff payload so the bottom
-        // border is part of the rendered block.
+        // border is part of the rendered block. The diff lives in
+        // `metadata` (UI-only); `content` is the short AI-facing
+        // success message.
         ToolResultBlock {
             name: "edit".to_string(),
             title: "edit".to_string(),
-            content: serde_json::json!({
+            content: "Edit applied successfully.".to_string(),
+            metadata: serde_json::json!({
                 "kind": "edit_diff",
                 "path": "src/demo.py",
                 "old": "alpha\nold_call()\nomega\n",
                 "new": "alpha\nnew_call()\nomega\n",
+                "output": "Edit applied successfully.",
             })
             .to_string(),
             content_offset: 0,
             visible: true,
             running: false,
             call_id: String::new(),
+            pruned: false,
             cached_line_count_visible: None,
             cached_line_count_collapsed: None,
         }
@@ -2150,10 +2155,12 @@ mod tool_block_count_tests {
                 "result": "exit_code: 0\nwall_secs: 0.01\ntimeout_secs: 300\nstdout:\nhi\n\nstderr:\n"
             })
             .to_string(),
+            metadata: String::new(),
             content_offset: 0,
             visible: true,
             running: false,
             call_id: String::new(),
+            pruned: false,
             cached_line_count_visible: None,
             cached_line_count_collapsed: None,
         }
@@ -2530,10 +2537,12 @@ mod tool_block_count_tests {
                 name: "bash".to_string(),
                 title: "Bash".to_string(),
                 content: "ok".to_string(),
+                metadata: String::new(),
                 content_offset: 0,
                 visible: true,
                 running: false,
             call_id: String::new(),
+                pruned: false,
                 cached_line_count_visible: None,
                 cached_line_count_collapsed: None,
             });
@@ -2580,10 +2589,12 @@ mod tool_block_count_tests {
                 name: "bash".to_string(),
                 title: "Bash".to_string(),
                 content: "ok".to_string(),
+                metadata: String::new(),
                 content_offset: 0,
                 visible: true,
                 running: false,
             call_id: String::new(),
+                pruned: false,
                 cached_line_count_visible: None,
                 cached_line_count_collapsed: None,
             });
@@ -2831,10 +2842,12 @@ tool_calls: Vec::new(),
                 "result": "exit_code: 1\nwall_secs: 1.71\ntimeout_secs: 300\nstdout:\n\nstderr:\nGet-ChildItem: bad flag\n"
             })
             .to_string(),
+            metadata: String::new(),
             content_offset: 0,
             visible: true,
             running: false,
             call_id: String::new(),
+            pruned: false,
             cached_line_count_visible: None,
             cached_line_count_collapsed: None,
         };
@@ -2863,10 +2876,12 @@ tool_calls: Vec::new(),
                 "result": "{\"kind\":\"ask\",\"question\":\"theme?\",\"options\":[\"dark\",\"light\"]}"
             })
             .to_string(),
+            metadata: String::new(),
             content_offset: 0,
             visible: true,
             running: false,
             call_id: String::new(),
+            pruned: false,
             cached_line_count_visible: None,
             cached_line_count_collapsed: None,
         };
@@ -2911,10 +2926,12 @@ tool_calls: Vec::new(),
                 "result": "{\"kind\":\"plan\",\"title\":\"test\",\"content\":\"# hello\\n\\nbody\"}"
             })
             .to_string(),
+            metadata: String::new(),
             content_offset: 0,
             visible: true,
             running: false,
             call_id: String::new(),
+            pruned: false,
             cached_line_count_visible: None,
             cached_line_count_collapsed: None,
         };
@@ -2931,17 +2948,20 @@ tool_calls: Vec::new(),
         let tool = ToolResultBlock {
             name: "edit".to_string(),
             title: "edit".to_string(),
-            content: serde_json::json!({
+            content: "Edit applied successfully.".to_string(),
+            metadata: serde_json::json!({
                 "kind": "edit_diff",
                 "path": "src/demo.py",
                 "old": "alpha\n    old_call()\nomega\n",
                 "new": "alpha\n    new_call()\nomega\n",
+                "output": "Edit applied successfully.",
             })
             .to_string(),
             content_offset: 0,
             visible: true,
             running: false,
             call_id: String::new(),
+            pruned: false,
             cached_line_count_visible: None,
             cached_line_count_collapsed: None,
         };
@@ -3230,10 +3250,12 @@ tool_calls: Vec::new(),
             name: "shell_command".to_string(),
             title: "$ echo hello".to_string(),
             content: "ok".to_string(),
+            metadata: String::new(),
             content_offset: 0,
             visible: true,
             running: false,
             call_id: String::new(),
+            pruned: false,
             cached_line_count_visible: None,
             cached_line_count_collapsed: None,
         });

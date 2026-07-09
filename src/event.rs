@@ -68,6 +68,11 @@ pub enum AppMsg {
         name: String,
         title: String,
         content: String,
+        /// UI-only structured payload (e.g. `edit_diff` JSON for
+        /// edit/write). Empty for tools without metadata. Never sent
+        /// to the AI — only stored on `ToolResultBlock.metadata` for
+        /// the TUI renderer.
+        metadata: String,
         /// The tool call id that produced this result.
         call_id: String,
     },
@@ -79,6 +84,7 @@ pub enum AppMsg {
         name: String,
         title: String,
         content: String,
+        metadata: String,
         context: Option<String>,
     },
     /// Final usage arrived for a completed stream.
@@ -882,13 +888,14 @@ fn handle_msg(msg: AppMsg, app: &mut App) {
             name,
             title,
             content,
+            metadata,
             call_id,
         } => {
             if name == "todowrite" {
                 handle_todowrite_result(app, &content);
             }
             open_tool_function_panel(app, &name, &content);
-            app.session.update_last_tool_content(name, title, content, call_id);
+            app.session.update_last_tool_content(name, title, content, call_id, metadata);
         }
         AppMsg::AssistantToolCalls(tool_calls) => {
             if let Some(id) = app.session.streaming_id {
@@ -901,13 +908,14 @@ fn handle_msg(msg: AppMsg, app: &mut App) {
             name,
             title,
             content,
+            metadata,
             context,
         } => {
             if name == "todowrite" {
                 handle_todowrite_result(app, &content);
             }
             open_tool_function_panel(app, &name, &content);
-            app.session.push_tool_result_message(name, title, content);
+            app.session.push_tool_result_message(name, title, content, metadata);
             if let Some(context) = context {
                 app.session.push(crate::session::Message::new(
                     crate::session::Role::User,
@@ -2777,6 +2785,7 @@ pub async fn run_tool_execution(
         return;
     }
     let display = tool_result_display(&result);
+    let metadata = crate::tools::extract_metadata(&result);
     let context = if include_context {
         Some(local_tool_context(&name, &title, &display))
     } else {
@@ -2786,6 +2795,7 @@ pub async fn run_tool_execution(
         name,
         title,
         content: display,
+        metadata,
         call_id: String::new(),
     });
     send_msg(AppMsg::ChatDone { seq });
