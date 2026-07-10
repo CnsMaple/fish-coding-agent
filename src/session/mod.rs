@@ -484,7 +484,16 @@ impl Session {
                         last.closed = true;
                     }
                 }
-                if let Some(tool) = m.tool_results.last_mut() {
+                // Match the streaming block by name, scanning from the
+                // end so the most recent running block with this name
+                // is updated (not blindly `last()`, which may be a
+                // different tool in a multi-call turn).
+                if let Some(pos) = m
+                    .tool_results
+                    .iter()
+                    .rposition(|t| t.name == name && t.running)
+                {
+                    let tool = &mut m.tool_results[pos];
                     tool.content = content;
                     tool.metadata = metadata;
                     tool.running = false;

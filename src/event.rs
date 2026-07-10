@@ -1506,7 +1506,12 @@ async fn handle_key(k: crossterm::event::KeyEvent, app: &mut App) {
             // Progressive cancellation: first Esc → "esc again" hint,
             // second Esc → actually cancel. Falls back to Idle after
             // 2s of no input (checked in the tick handler).
-            if app.inflight.is_some() {
+            // Only applies when focus is on Input — when focus is on
+            // the FunctionPanel or AgentsCheckbox, Esc closes the
+            // active tab / returns focus to Input instead.
+            if app.focus_target == crate::function::FocusTarget::Input
+                && app.inflight.is_some()
+            {
                 match app.cancel_state {
                     CancelState::Idle => {
                         app.cancel_state = CancelState::Confirming(Instant::now());
