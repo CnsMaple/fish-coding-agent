@@ -969,7 +969,12 @@ fn build_thinking_block_rows(
             let shown = preview_lines.min(md_lines.len());
             let skip = md_lines.len().saturating_sub(shown);
             for line in md_lines.iter().skip(skip) {
-                push_md_line(line, &mut rows);
+                // Collapsed state must keep a fixed height: truncate
+                // each markdown line to one box row instead of wrapping
+                // (wrapping would make the block grow as content streams
+                // in).
+                let spans = spans_with_bg(&line.spans, bg);
+                rows.push(box_row_line_spans(spans, width, bg));
             }
             if md_lines.len() >= preview_lines {
                 while rows.len() < preview_lines + 1 {
@@ -1197,7 +1202,7 @@ fn build_streaming_tool_rows(tool: &ToolResultBlock, width: usize, bg: Color) ->
         _ => {
             // For other tools, show a generic "generating..." block
             let mut rows = vec![border_line(width, bg)];
-            rows.extend(box_row_lines("generating tool call…", width, bg));
+            rows.extend(box_row_lines(&format!("generating {} tool call…", tool.name), width, bg));
             rows.push(border_line(width, bg));
             rows
         }
