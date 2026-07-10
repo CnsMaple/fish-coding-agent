@@ -3031,10 +3031,18 @@ async fn handle_plan_key(
     match k.code {
         KeyCode::Enter => {
             state.approved = Some(true);
-            let prompt = format!(
+            let mut prompt = format!(
                 "Plan approved. Please proceed with the following plan:\n\n{}",
                 state.content
             );
+            // If the user typed something into the input buffer before
+            // approving, append it as additional args/instructions.
+            let extra = app.input.buffer.trim().to_string();
+            if !extra.is_empty() {
+                prompt.push_str("\n\nAdditional args from user:\n");
+                prompt.push_str(&extra);
+                app.input.buffer.clear();
+            }
             // send_chat -> send_message pushes the user message into
             // the session; do NOT push it here too, otherwise the
             // message appears twice in the session.
