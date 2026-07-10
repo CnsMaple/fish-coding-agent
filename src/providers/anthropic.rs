@@ -153,6 +153,7 @@ impl Provider for AnthropicProvider {
                         if idx < tool_calls.len() {
                             let _ = tx.send(ChatEvent::ToolArgDelta {
                                 index: idx,
+                                call_id: tool_calls[idx].id.clone(),
                                 name: tool_calls[idx].name.clone(),
                                 args: tool_calls[idx].arguments.clone(),
                             });
@@ -191,6 +192,7 @@ impl Provider for AnthropicProvider {
                         if idx < tool_calls.len() {
                             let _ = tx.send(ChatEvent::ToolArgDelta {
                                 index: idx,
+                                call_id: tool_calls[idx].id.clone(),
                                 name: tool_calls[idx].name.clone(),
                                 args: tool_calls[idx].arguments.clone(),
                             });

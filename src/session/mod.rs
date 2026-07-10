@@ -491,6 +491,9 @@ impl Session {
 
     /// Update the last tool block's content (for streaming: replace placeholder with final content).
     /// If no tool block exists yet (non-streaming path), falls back to appending.
+    /// Matches the block by `call_id` (stable identity for parallel tool
+    /// calls); falls back to the most recent running block with the same
+    /// `name` when `call_id` is empty (legacy / direct-tool-input path).
     pub fn update_last_tool_content(&mut self, name: String, title: String, content: String, call_id: String, metadata: String, failed: bool) {
         if let Some(id) = self.streaming_id {
             if let Some(m) = self.messages.get_mut(id) {
@@ -499,22 +502,27 @@ impl Session {
                         last.closed = true;
                     }
                 }
-                // Match the streaming block by name, scanning from the
-                // end so the most recent running block with this name
-                // is updated (not blindly `last()`, which may be a
-                // different tool in a multi-call turn).
-                if let Some(pos) = m
-                    .tool_results
-                    .iter()
-                    .rposition(|t| t.name == name && t.running)
-                {
+                // Prefer the stable `call_id` so parallel tool calls
+                // with the same name (or interleaved deltas) route
+                // to the correct block. Fall back to the old
+                // name+running heuristic only when no call_id is set.
+                let pos = if !call_id.is_empty() {
+                    m.tool_results.iter().rposition(|t| t.call_id == call_id)
+                } else {
+                    m.tool_results
+                        .iter()
+                        .rposition(|t| t.name == name && t.running)
+                };
+                if let Some(pos) = pos {
                     let tool = &mut m.tool_results[pos];
                     tool.content = content;
                     tool.metadata = metadata;
                     tool.running = false;
                     tool.failed = failed;
                     tool.title = title;
-                    tool.call_id = call_id;
+                    if tool.call_id.is_empty() {
+                        tool.call_id = call_id;
+                    }
                     tool.streaming_input.clear();
                     tool.cached_line_count_visible = None;
                     tool.cached_line_count_collapsed = None;
@@ -564,7 +572,7 @@ impl Session {
         }
     }
 
-    pub fn start_tool_in_last(&mut self, name: String, title: String) {
+    pub fn start_tool_in_last(&mut self, call_id: String, name: String, title: String) {
         if let Some(id) = self.streaming_id {
             if let Some(m) = self.messages.get_mut(id) {
                 if let Some(last) = m.thinking_segments.last_mut() {
@@ -572,19 +580,32 @@ impl Session {
                         last.closed = true;
                     }
                 }
-                // If the last tool block is already running with the
-                // same name (created by ToolInputDelta during streaming),
-                // just update the title instead of creating a duplicate.
-                if let Some(last) = m.tool_results.last() {
-                    if last.running && last.name == name {
-                        let last = m.tool_results.last_mut().unwrap();
-                        last.title = title;
-                        last.cached_line_count_visible = None;
-                        last.cached_line_count_collapsed = None;
-                        m.invalidate_caches();
-                        self.invalidate_layout_cache();
-                        return;
+                // Match an existing running block by the stable
+                // `call_id` (the streaming placeholder created during
+                // ToolInputDelta) so a ToolStarted arriving for a
+                // parallel tool call updates the right block instead
+                // of pushing a duplicate.
+                let pos = if !call_id.is_empty() {
+                    m.tool_results
+                        .iter()
+                        .rposition(|t| t.call_id == call_id)
+                } else {
+                    m.tool_results
+                        .iter()
+                        .rposition(|t| t.running && t.name == name)
+                };
+                if let Some(pos) = pos {
+                    let tool = &mut m.tool_results[pos];
+                    tool.title = title;
+                    tool.running = true;
+                    if tool.call_id.is_empty() {
+                        tool.call_id = call_id;
                     }
+                    tool.cached_line_count_visible = None;
+                    tool.cached_line_count_collapsed = None;
+                    m.invalidate_caches();
+                    self.invalidate_layout_cache();
+                    return;
                 }
                 let content_offset = m.content.len();
                 let visible = name == "plan" || self.expand_new_tool_results;
@@ -596,7 +617,8 @@ impl Session {
                     content_offset,
                     visible,
                     running: true,
-                    failed: false,                    call_id: String::new(),
+                    failed: false,
+                    call_id,
                     pruned: false,
                     streaming_input: String::new(),
                     cached_line_count_visible: None,
@@ -608,10 +630,20 @@ impl Session {
         }
     }
 
-    pub fn append_tool_delta_to_last(&mut self, delta: &str) {
+    pub fn append_tool_delta_to_last(&mut self, call_id: &str, delta: &str) {
         if let Some(id) = self.streaming_id {
             if let Some(m) = self.messages.get_mut(id) {
-                if let Some(tool) = m.tool_results.last_mut() {
+                // Route to the block matching `call_id` (parallel-safe);
+                // fall back to the last running block when call_id is empty.
+                let pos = if !call_id.is_empty() {
+                    m.tool_results.iter().rposition(|t| t.call_id == call_id)
+                } else {
+                    m.tool_results
+                        .iter()
+                        .rposition(|t| t.running)
+                };
+                if let Some(pos) = pos {
+                    let tool = &mut m.tool_results[pos];
                     tool.content.push_str(delta);
                     tool.cached_line_count_visible = None;
                     tool.cached_line_count_collapsed = None;
@@ -628,19 +660,35 @@ impl Session {
     }
 
     /// Update the streaming input (raw accumulated JSON args) on the
-    /// last tool block. If no running block exists with this name,
-    /// creates one first. This is called during LLM streaming so the
-    /// user sees the command/code/edit text appear character by
-    /// character before the tool executes.
-    pub fn update_tool_input_delta(&mut self, name: &str, args: &str) {
+    /// tool block identified by `call_id` (or `index` when `call_id` is
+    /// empty). If no running block exists for this identity, creates one
+    /// first. This is called during LLM streaming so the user sees the
+    /// command/code/edit text appear character by character before the
+    /// tool executes. Routing by `call_id` (rather than "the last block")
+    /// is what makes parallel tool calls render correctly: each tool
+    /// call always updates its own block instead of pushing duplicates.
+    pub fn update_tool_input_delta(&mut self, _index: usize, call_id: &str, name: &str, args: &str) {
         if let Some(id) = self.streaming_id {
             if let Some(m) = self.messages.get_mut(id) {
-                // Check if the last tool block is already running with this name
-                let need_new = match m.tool_results.last() {
-                    Some(last) => !(last.running && last.name == name),
-                    None => true,
+                let pos = if !call_id.is_empty() {
+                    m.tool_results.iter().rposition(|t| t.call_id == call_id)
+                } else {
+                    m.tool_results
+                        .iter()
+                        .rposition(|t| t.running && t.name == name)
                 };
-                if need_new {
+                if let Some(pos) = pos {
+                    let tool = &mut m.tool_results[pos];
+                    tool.streaming_input = args.to_string();
+                    if tool.name.is_empty() {
+                        tool.name = name.to_string();
+                    }
+                    if tool.call_id.is_empty() && !call_id.is_empty() {
+                        tool.call_id = call_id.to_string();
+                    }
+                    tool.cached_line_count_visible = None;
+                    tool.cached_line_count_collapsed = None;
+                } else {
                     if let Some(last) = m.thinking_segments.last_mut() {
                         if !last.closed {
                             last.closed = true;
@@ -656,17 +704,13 @@ impl Session {
                         content_offset,
                         visible,
                         running: true,
-                    failed: false,                        call_id: String::new(),
+                        failed: false,
+                        call_id: call_id.to_string(),
                         pruned: false,
                         streaming_input: args.to_string(),
                         cached_line_count_visible: None,
                         cached_line_count_collapsed: None,
                     });
-                } else {
-                    let tool = m.tool_results.last_mut().unwrap();
-                    tool.streaming_input = args.to_string();
-                    tool.cached_line_count_visible = None;
-                    tool.cached_line_count_collapsed = None;
                 }
                 m.invalidate_caches();
                 if let Ok(mut c) = self.line_cache.lock() {

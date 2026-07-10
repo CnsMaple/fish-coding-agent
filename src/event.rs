@@ -122,19 +122,28 @@ pub enum AppMsg {
     /// Resume the model-output timer (after tool calls).
     ChatTimerResume,
     /// A tool has started executing (creates a placeholder block).
+    /// `call_id` is the stable identity matching the LLM tool call
+    /// so parallel tool execution routes results to the correct block.
     ToolStarted {
+        call_id: String,
         name: String,
         title: String,
     },
-    /// Incremental output from a running tool.
+    /// Incremental output from a running tool. `call_id` routes the
+    /// delta to the correct block during parallel execution.
     ToolDelta {
+        call_id: String,
         content: String,
     },
     /// Streaming tool-call arguments from the LLM. `args` is the
     /// full accumulated JSON arguments string so far. The session
     /// stores this on `ToolResultBlock.streaming_input` so the
     /// renderer can show the command/code/edit text as it arrives.
+    /// `index` is the tool-call slot (OpenAI tool_call index /
+    /// Anthropic content_block index); `call_id` is the stable id.
     ToolInputDelta {
+        index: usize,
+        call_id: String,
         name: String,
         args: String,
     },
@@ -1149,14 +1158,24 @@ fn handle_msg(msg: AppMsg, app: &mut App) {
         AppMsg::ChatTimerResume => {
             app.response_started_at = Some(std::time::Instant::now());
         }
-        AppMsg::ToolStarted { name, title } => {
-            app.session.start_tool_in_last(name, title);
+        AppMsg::ToolStarted {
+            call_id,
+            name,
+            title,
+        } => {
+            app.session.start_tool_in_last(call_id, name, title);
         }
-        AppMsg::ToolDelta { content } => {
-            app.session.append_tool_delta_to_last(&content);
+        AppMsg::ToolDelta { call_id, content } => {
+            app.session.append_tool_delta_to_last(&call_id, &content);
         }
-        AppMsg::ToolInputDelta { name, args } => {
-            app.session.update_tool_input_delta(&name, &args);
+        AppMsg::ToolInputDelta {
+            index,
+            call_id,
+            name,
+            args,
+        } => {
+            app.session
+                .update_tool_input_delta(index, &call_id, &name, &args);
         }
         AppMsg::McpToolsChanged { server } => {
             // The aggregated tool set changed; nudge the next
@@ -2821,10 +2840,11 @@ pub async fn run_tool_execution(
         return;
     }
     send_msg(AppMsg::ToolStarted {
+        call_id: String::new(),
         name: name.clone(),
         title: title.clone(),
     });
-    let result = crate::tools::execute_tool_streaming(&name, &args, &cwd, tx.clone()).await;
+    let result = crate::tools::execute_tool_streaming(&name, &args, &cwd, "", tx.clone()).await;
     if *cancel_rx.borrow() {
         return;
     }

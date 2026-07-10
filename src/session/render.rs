@@ -326,6 +326,14 @@ pub fn build_message_lines(
 
     // Add tool results
     for (ti, tool) in m.tool_results.iter().enumerate() {
+        // Defensive: skip placeholder blocks that never received any
+        // content or streaming input (e.g. duplicate blocks created by
+        // stale provider deltas before call-id routing). Rendering an
+        // empty box here is what produced the cascade of blank bordered
+        // blocks during parallel tool calls.
+        if tool.content.is_empty() && tool.streaming_input.is_empty() {
+            continue;
+        }
         let offset = clamp_char_boundary(raw, tool.content_offset.min(raw.len()));
         items.push(RenderItem {
             offset,
@@ -3303,7 +3311,7 @@ mod tests {
             thinking_segments: Vec::new(),
             thinking_visible: false,
             tool_results: Vec::new(),
-tool_calls: Vec::new(),
+            tool_calls: Vec::new(),
             attachments: Vec::new(),
             display_cursor: usize::MAX,
             ts: chrono::Utc::now(),
@@ -3314,6 +3322,100 @@ tool_calls: Vec::new(),
             content_version: 0,
         });
         s
+    }
+
+    /// Regression: parallel tool calls (e.g. websearch + webfetch) used
+    /// to create a cascade of duplicate empty blocks because
+    /// `update_tool_input_delta` deduplicated by "last block name" only.
+    /// With call_id routing, interleaved deltas for two tools must land
+    /// in exactly two blocks, and final results must fill the matching
+    /// block — never creating empty placeholder blocks.
+    #[test]
+    fn parallel_tool_calls_route_by_call_id_without_duplicates() {
+        let mut s = Session::default();
+        s.push(Message::new(Role::User, "search and fetch"));
+        s.push(Message::new(Role::Assistant, ""));
+        s.streaming_id = Some(1);
+
+        // Interleave streaming deltas for two parallel tool calls.
+        s.update_tool_input_delta(0, "callA", "websearch", r#"{"query":"a"}"#);
+        s.update_tool_input_delta(1, "callB", "webfetch", r#"{"url":"x"}"#);
+        s.update_tool_input_delta(0, "callA", "websearch", r#"{"query":"ab"}"#);
+        s.update_tool_input_delta(1, "callB", "webfetch", r#"{"url":"xy"}"#);
+
+        let m = &s.messages[1];
+        assert_eq!(m.tool_results.len(), 2, "expected exactly 2 blocks, got {}", m.tool_results.len());
+        assert_eq!(m.tool_results[0].call_id, "callA");
+        assert_eq!(m.tool_results[1].call_id, "callB");
+        assert_eq!(m.tool_results[0].streaming_input, r#"{"query":"ab"}"#);
+        assert_eq!(m.tool_results[1].streaming_input, r#"{"url":"xy"}"#);
+
+        // Final results must route to the matching block by call_id.
+        s.update_last_tool_content(
+            "websearch".into(), "search".into(), "result A".into(),
+            "callA".into(), String::new(), false,
+        );
+        s.update_last_tool_content(
+            "webfetch".into(), "fetch".into(), "result B".into(),
+            "callB".into(), String::new(), false,
+        );
+        let m = &s.messages[1];
+        assert_eq!(m.tool_results[0].content, "result A");
+        assert_eq!(m.tool_results[1].content, "result B");
+        assert!(!m.tool_results[0].running);
+        assert!(!m.tool_results[1].running);
+    }
+
+    /// Regression: a leftover empty placeholder block (content and
+    /// streaming_input both empty) must not render as a blank bordered
+    /// box. The render items builder skips such blocks.
+    #[test]
+    fn empty_placeholder_tool_block_is_not_rendered() {
+        use crate::session::ToolResultBlock;
+        let mut s = Session {
+            display: ThinkingDisplay::Show,
+            ..Session::default()
+        };
+        s.push(Message::new(Role::User, "go"));
+        let mut asst = Message::new(Role::Assistant, "thinking…");
+        // A real result block.
+        asst.tool_results.push(ToolResultBlock {
+            name: "websearch".into(),
+            title: "search".into(),
+            content: "real result".into(),
+            metadata: String::new(),
+            content_offset: 0,
+            visible: true,
+            running: false,
+            failed: false,
+            call_id: "real".into(),
+            pruned: false,
+            streaming_input: String::new(),
+            cached_line_count_visible: None,
+            cached_line_count_collapsed: None,
+        });
+        // A stray empty placeholder (the kind the old bug produced).
+        asst.tool_results.push(ToolResultBlock {
+            name: "webfetch".into(),
+            title: String::new(),
+            content: String::new(),
+            metadata: String::new(),
+            content_offset: 0,
+            visible: true,
+            running: true,
+            failed: false,
+            call_id: "stale".into(),
+            pruned: false,
+            streaming_input: String::new(),
+            cached_line_count_visible: None,
+            cached_line_count_collapsed: None,
+        });
+        s.push(asst);
+        let (lines, _t) = build_lines(&s, 100);
+        let text = lines_to_text(&lines);
+        assert!(text.contains("real result"), "real block dropped:\n{text}");
+        // The stray empty block should not produce a titled box header.
+        assert!(!text.contains("webfetch"), "empty placeholder leaked:\n{text}");
     }
 
     #[test]

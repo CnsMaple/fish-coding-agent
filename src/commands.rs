@@ -811,12 +811,13 @@ one call. The user's answer appears as the next chat message.
 
 Load a skill's instructions. Skills provide specialized workflows and domain knowledge.
 
-### webfetch(url, format?)
+### webfetch(url, format?, timeout?)
 
-Fetch a web page and return its content as text, markdown, or HTML. Use for reading \
-documentation, API references, or any public web resource relevant to the task.
+Fetch a web page and return its content as text, markdown, or HTML (default \
+markdown). `timeout` is seconds (max 120). Use for reading documentation, API \
+references, or any public web resource relevant to the task.
 
-### websearch(query, numResults?)
+### websearch(query, numResults?, livecrawl?, type?, contextMaxCharacters?)
 
 Search the web for information. Use when you need up-to-date knowledge beyond your \
 training data, or when the task references technologies or APIs you're unsure about.
@@ -1344,8 +1345,18 @@ pub async fn run_chat_stream(
                 crate::providers::ChatEvent::ContentBlockStart(kind) => {
                     send_msg(crate::event::AppMsg::ChatContentBlockStart(kind));
                 }
-                crate::providers::ChatEvent::ToolArgDelta { name, args, .. } => {
-                    send_msg(crate::event::AppMsg::ToolInputDelta { name, args });
+                crate::providers::ChatEvent::ToolArgDelta {
+                    index,
+                    call_id,
+                    name,
+                    args,
+                } => {
+                    send_msg(crate::event::AppMsg::ToolInputDelta {
+                        index,
+                        call_id,
+                        name,
+                        args,
+                    });
                 }
             }
         }
@@ -1419,17 +1430,11 @@ pub async fn run_chat_stream(
         });
 
         send_msg(crate::event::AppMsg::ChatTimerPause);
+
+        // Doom-loop preflight: detect a tool invoked 3x in a row with
+        // identical args across the whole batch (parallel safety) so a
+        // stuck repetition does not burn tokens on parallel retries.
         for call in &tool_calls {
-            let title = tool_result_title(call);
-            send_msg(crate::event::AppMsg::ToolStarted {
-                name: call.name.clone(),
-                title: title.clone(),
-            });
-            // Doom-loop detection: if the same tool has just been
-            // called twice in a row with identical arguments, this
-            // would be the 3rd identical call. Break the loop and
-            // hand control back to the user instead of burning
-            // tokens on a stuck repetition.
             if is_doom_loop(&doom_history, &call.name, &call.arguments) {
                 send_msg(crate::event::AppMsg::ChatWarn(format!(
                     "doom loop detected: `{}` called 3x with identical args. Pausing for user review.",
@@ -1438,7 +1443,110 @@ pub async fn run_chat_stream(
                 send_msg(crate::event::AppMsg::ChatDone { seq });
                 return;
             }
+        }
+        for call in &tool_calls {
             doom_history.push((call.name.clone(), call.arguments.clone()));
+        }
+
+        // Split tool calls into parallelizable (everything except the
+        // recursive `sub_agent` and the interaction tools `plan`/`ask`)
+        // and serial ones. Parallel tools run concurrently; their
+        // results are collected and pushed in declaration order so the
+        // AI-facing tool messages stay deterministic. `sub_agent` runs
+        // serially (it is itself a nested LLM loop). `plan`/`ask` are
+        // interaction tools: after they run, the loop yields to the user.
+        let is_serial = |name: &str| name == "sub_agent" || name == "plan" || name == "ask";
+
+        // Spawn a task per parallel tool call. Each task owns its own
+        // `tx`/`cancel_rx` clones and routes `ToolStarted`/`ToolDelta`/
+        // `ChatToolResult` to the correct block via `call_id`.
+        let mut parallel_handles: Vec<tokio::task::JoinHandle<(usize, String, String)>> = Vec::new();
+        for (i, call) in tool_calls.iter().enumerate() {
+            if is_serial(&call.name) {
+                continue;
+            }
+            let call = call.clone();
+            let tx = tx.clone();
+            let cancel_rx = cancel_rx.clone();
+            let cwd = cwd.clone();
+            let handle = tokio::spawn(async move {
+                let send = |msg: crate::event::AppMsg| {
+                    if !*cancel_rx.borrow() {
+                        let _ = tx.send(msg);
+                    }
+                };
+                let title = tool_result_title(&call);
+                send(crate::event::AppMsg::ToolStarted {
+                    call_id: call.id.clone(),
+                    name: call.name.clone(),
+                    title: title.clone(),
+                });
+                let result = crate::tools::execute_tool_streaming_with_agent(
+                    agent,
+                    &call.name,
+                    &call.arguments,
+                    &cwd,
+                    &call.id,
+                    tx.clone(),
+                )
+                .await;
+                let ai_result = crate::tools::strip_metadata(&result);
+                let (display, failed) = parse_tool_result_display(&result);
+                let metadata = crate::tools::extract_metadata(&result);
+                send(crate::event::AppMsg::ChatToolResult {
+                    name: call.name.clone(),
+                    title,
+                    content: display,
+                    metadata,
+                    call_id: call.id.clone(),
+                    failed,
+                });
+                (i, call.id.clone(), ai_result)
+            });
+            parallel_handles.push(handle);
+        }
+
+        // Await all parallel tasks. Collect (index, call_id, ai_result)
+        // then push tool messages in declaration order.
+        let mut parallel_results: Vec<(usize, String, String)> = Vec::new();
+        for h in parallel_handles {
+            if *cancel_rx.borrow() {
+                break;
+            }
+            match h.await {
+                Ok(r) => parallel_results.push(r),
+                Err(e) => {
+                    send_msg(crate::event::AppMsg::ChatWarn(format!(
+                        "parallel tool task panicked: {e:#}"
+                    )));
+                }
+            }
+        }
+        parallel_results.sort_by_key(|r| r.0);
+        for (_, call_id, ai_result) in parallel_results {
+            req.messages.push(ChatMessage {
+                role: "tool".to_string(),
+                content: ai_result,
+                content_parts: Vec::new(),
+                tool_call_id: Some(call_id),
+                tool_calls: Vec::new(),
+            });
+        }
+
+        // Serial tools (sub_agent / plan / ask) run one at a time after
+        // the parallel batch. Interaction tools (`plan`/`ask`) stop the
+        // auto-continue loop and hand control to the user.
+        let mut interaction_tool = false;
+        for call in &tool_calls {
+            if !is_serial(&call.name) {
+                continue;
+            }
+            let title = tool_result_title(call);
+            send_msg(crate::event::AppMsg::ToolStarted {
+                call_id: call.id.clone(),
+                name: call.name.clone(),
+                title: title.clone(),
+            });
             let result = if call.name == "sub_agent" {
                 run_sub_agent(
                     &client,
@@ -1458,14 +1566,11 @@ pub async fn run_chat_stream(
                     &call.name,
                     &call.arguments,
                     &cwd,
+                    &call.id,
                     tx.clone(),
                 )
                 .await
             };
-            // The raw `result` envelope may carry a UI-only `metadata`
-            // field (edit_diff JSON for edit/write). Strip it before
-            // the envelope enters the AI context so the model never
-            // sees the full old/new file contents.
             let ai_result = crate::tools::strip_metadata(&result);
             req.messages.push(ChatMessage {
                 role: "tool".to_string(),
@@ -1474,17 +1579,21 @@ pub async fn run_chat_stream(
                 tool_call_id: Some(call.id.clone()),
                 tool_calls: Vec::new(),
             });
-            let (display_text, failed) = parse_tool_result_display(&result);
+            let (display, failed) = parse_tool_result_display(&result);
             let metadata = crate::tools::extract_metadata(&result);
             send_msg(crate::event::AppMsg::ChatToolResult {
                 name: call.name.clone(),
                 title,
-                content: display_text,
+                content: display,
                 metadata,
                 call_id: call.id.clone(),
                 failed,
             });
+            if call.name == "plan" || call.name == "ask" {
+                interaction_tool = true;
+            }
         }
+
         // Always persist tool calls to the session so the
         // conversation context (assistant tool_calls + tool
         // results) can be reconstructed for follow-up turns.
@@ -1503,10 +1612,7 @@ pub async fn run_chat_stream(
         // respond. The plan agent surfaces the question in the
         // session; the user types the answer in the input
         // prompt and the conversation resumes.
-        let has_interaction_tool = tool_calls
-            .iter()
-            .any(|c| c.name == "plan" || c.name == "ask");
-        if has_interaction_tool {
+        if interaction_tool {
             send_msg(crate::event::AppMsg::ChatDone { seq });
             return;
         }
@@ -1550,6 +1656,7 @@ async fn run_sub_agent(
     }
 
     let _ = tx.send(crate::event::AppMsg::ToolDelta {
+        call_id: String::new(),
         content: format!("[sub_agent:{}] starting…\n", sub.as_str()),
     });
 
@@ -1638,6 +1745,7 @@ async fn run_sub_agent(
                 }
                 let delay = retry_delays[(stream_retries - 1) as usize];
                 let _ = tx.send(crate::event::AppMsg::ToolDelta {
+                    call_id: String::new(),
                     content: format!(
                         "[sub_agent:{}] stream retry {stream_retries}/3 ({delay}s): {e:#}\n",
                         sub.as_str()
@@ -1660,6 +1768,7 @@ async fn run_sub_agent(
                         }
                         let delay = retry_delays[(stream_retries - 1) as usize];
                         let _ = tx.send(crate::event::AppMsg::ToolDelta {
+                            call_id: String::new(),
                             content: format!(
                                 "[sub_agent:{}] stream retry {stream_retries}/3 ({delay}s): {e:#}\n",
                                 sub.as_str()
@@ -1676,6 +1785,7 @@ async fn run_sub_agent(
                         }
                         let delay = retry_delays[(stream_retries - 1) as usize];
                         let _ = tx.send(crate::event::AppMsg::ToolDelta {
+                            call_id: String::new(),
                             content: format!(
                                 "[sub_agent:{}] stream retry {stream_retries}/3 ({delay}s): {e:#}\n",
                                 sub.as_str()
@@ -1692,6 +1802,7 @@ async fn run_sub_agent(
 
         if tool_calls.is_empty() {
             let _ = tx.send(crate::event::AppMsg::ToolDelta {
+                call_id: String::new(),
                 content: format!("[sub_agent:{}] done ({steps} steps)\n", sub.as_str(), steps = step + 1),
             });
             return json!({"ok": true, "result": text}).to_string();
@@ -1721,6 +1832,7 @@ async fn run_sub_agent(
             }
 
             let _ = tx.send(crate::event::AppMsg::ToolDelta {
+                call_id: String::new(),
                 content: format!("[sub_agent:{}] step {step}: {tool}\n", sub.as_str(), step = step + 1, tool = tool_result_title(tc)),
             });
 

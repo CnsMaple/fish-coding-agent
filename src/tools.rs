@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
 use chrono::Datelike;
+use futures_util::StreamExt;
 use glob::Pattern;
 use regex::Regex;
 use serde::Deserialize;
@@ -344,12 +345,13 @@ fn tool_defs() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "webfetch",
-            description: "Fetches content from a specified URL and returns it in the requested format.\n\nUsage notes:\n- The URL must be a fully-formed valid URL\n- HTTP URLs will be automatically upgraded to HTTPS\n- Format options: \"markdown\" (default), \"text\", or \"html\"\n- This tool is read-only and does not modify any files\n- Results may be summarized if the content is very large".to_string(),
+            description: "Fetch content from an HTTP or HTTPS URL and return it as text, markdown, or HTML. Markdown is the default.\n\nUse a more targeted tool when one is available. This tool is read-only. Large text results may be replaced with a preview while the complete output is retained in managed storage.".to_string(),
             schema: json!({
                 "type": "object",
                 "properties": {
-                    "url": { "type": "string", "description": "The URL to fetch content from" },
-                    "format": { "type": "string", "enum": ["text", "markdown", "html"], "description": "The format to return the content in (text, markdown, or html). Defaults to markdown." }
+                    "url": { "type": "string", "description": "The HTTP or HTTPS URL to fetch content from" },
+                    "format": { "type": "string", "enum": ["text", "markdown", "html"], "description": "The format to return the content in. Defaults to markdown." },
+                    "timeout": { "type": "integer", "minimum": 1, "maximum": 120, "description": "Optional timeout in seconds (maximum: 120)" }
                 },
                 "required": ["url"],
                 "additionalProperties": false
@@ -357,12 +359,15 @@ fn tool_defs() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "websearch",
-            description: "Search the web for information. Provides up-to-date information for current events and recent data. Use this tool for accessing information beyond knowledge cutoff.\n\nUsage notes:\n- Supports configurable result counts\n- Returns the content from the most relevant websites\n- Searches are performed automatically within a single API call".to_string(),
+            description: format!("Search the web using the session's web search provider - performs real-time web searches and can scrape content from specific URLs\n\nProvides up-to-date information for current events and recent data\nSupports configurable result counts and returns the content from the most relevant websites\nUse this tool for accessing information beyond knowledge cutoff\nSearches are performed automatically within a single API call\n\nUsage notes:\n  - Supports live crawling modes when available: 'fallback' (backup if cached unavailable) or 'preferred' (prioritize live crawling)\n  - Search types when available: 'auto' (balanced), 'fast' (quick results), 'deep' (comprehensive search)\n  - Configurable context length for optimal LLM integration\n  - Domain filtering and advanced search options available\n\nThe current year is {year}. You MUST use this year when searching for recent information or current events\n- Example: If the current year is {year} and the user asks for \"latest AI news\", search for \"AI news {year}\", NOT \"AI news {prev}\"", year = chrono::Utc::now().year(), prev = chrono::Utc::now().year() - 1),
             schema: json!({
                 "type": "object",
                 "properties": {
-                    "query": { "type": "string", "description": "The search query" },
-                    "numResults": { "type": "integer", "minimum": 1, "maximum": 20, "description": "Number of search results to return (default 8)" }
+                    "query": { "type": "string", "description": "Websearch query" },
+                    "numResults": { "type": "integer", "minimum": 1, "maximum": 20, "description": "Number of search results to return (default: 8, maximum: 20)" },
+                    "livecrawl": { "type": "string", "enum": ["fallback", "preferred"], "description": "Live crawl mode - 'fallback': use live crawling as backup if cached content unavailable, 'preferred': prioritize live crawling (default: 'fallback')" },
+                    "type": { "type": "string", "enum": ["auto", "fast", "deep"], "description": "Search type - 'auto': balanced search (default), 'fast': quick results, 'deep': comprehensive search" },
+                    "contextMaxCharacters": { "type": "integer", "minimum": 1, "maximum": 50000, "description": "Maximum characters for context string optimized for models (default: 10000, maximum: 50000)" }
                 },
                 "required": ["query"],
                 "additionalProperties": false
@@ -439,10 +444,12 @@ t::WRITE_FILE => write_file(args, cwd).await,
 /// Execute a tool with streaming output support.
 /// For shell/python commands, output is streamed via ToolDelta messages.
 /// For other tools, falls back to non-streaming execution.
+/// `call_id` routes ToolDelta to the correct block during parallel execution.
 pub async fn execute_tool_streaming(
     name: &str,
     args: &str,
     cwd: &Path,
+    call_id: &str,
     tx: UnboundedSender<AppMsg>,
 ) -> String {
     execute_tool_streaming_with_agent(
@@ -450,6 +457,7 @@ pub async fn execute_tool_streaming(
         name,
         args,
         cwd,
+        call_id,
         tx,
     )
     .await
@@ -460,6 +468,7 @@ pub async fn execute_tool_streaming_with_agent(
     name: &str,
     args: &str,
     cwd: &Path,
+    call_id: &str,
     tx: UnboundedSender<AppMsg>,
 ) -> String {
     use crate::permission::{tool as t, Action};
@@ -490,7 +499,10 @@ pub async fn execute_tool_streaming_with_agent(
             };
             return match svc.call_tool(name, arguments).await {
                 Ok(rendered) => {
-                    let _ = tx.send(AppMsg::ToolDelta { content: rendered.clone() });
+                    let _ = tx.send(AppMsg::ToolDelta {
+                        call_id: call_id.to_string(),
+                        content: rendered.clone(),
+                    });
                     json!({ "ok": true, "result": rendered }).to_string()
                 }
                 Err(e) => json!({ "ok": false, "error": format!("mcp error: {e}") }).to_string(),
@@ -503,10 +515,10 @@ pub async fn execute_tool_streaming_with_agent(
         .to_string();
     }
     let result = match name {
-        t::SHELL_COMMAND | "command" => run_command_streaming(args, cwd, tx)
+        t::SHELL_COMMAND | "command" => run_command_streaming(args, cwd, call_id, tx)
             .await
             .unwrap_or_else(|e| json!({ "ok": false, "error": e.to_string() }).to_string()),
-        t::PYTHON_COMMAND => run_python_streaming(args, cwd, tx)
+        t::PYTHON_COMMAND => run_python_streaming(args, cwd, call_id, tx)
             .await
             .unwrap_or_else(|e| json!({ "ok": false, "error": e.to_string() }).to_string()),
         _ => execute_tool_with_agent(agent, name, args, cwd).await,
@@ -533,6 +545,7 @@ fn is_mcp_tool_name(name: &str) -> bool {
 async fn run_command_streaming(
     args: &str,
     cwd: &Path,
+    call_id: &str,
     tx: UnboundedSender<AppMsg>,
 ) -> Result<String> {
     let cmd_args: CommandArgs = serde_json::from_str(args)?;
@@ -543,7 +556,7 @@ async fn run_command_streaming(
     let timeout_secs = cmd_args.timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS);
     let output = tokio::time::timeout(
         Duration::from_secs(timeout_secs),
-        run_shell_streaming(&cmd_args.command, cwd, tx, timeout_secs),
+        run_shell_streaming(&cmd_args.command, cwd, call_id, tx, timeout_secs),
     )
     .await
     .map_err(|_| anyhow!("command timed out after {timeout_secs}s"))??;
@@ -554,6 +567,7 @@ async fn run_command_streaming(
 async fn run_python_streaming(
     args: &str,
     cwd: &Path,
+    call_id: &str,
     tx: UnboundedSender<AppMsg>,
 ) -> Result<String> {
     let py_args: PythonArgs = serde_json::from_str(args)?;
@@ -563,7 +577,7 @@ async fn run_python_streaming(
     let timeout_secs = py_args.timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS);
     let output = tokio::time::timeout(
         Duration::from_secs(timeout_secs),
-        run_python_streaming_inner(&py_args.code, cwd, tx, timeout_secs),
+        run_python_streaming_inner(&py_args.code, cwd, call_id, tx, timeout_secs),
     )
     .await
     .map_err(|_| anyhow!("python command timed out after {timeout_secs}s"))??;
@@ -579,6 +593,7 @@ async fn run_python_streaming(
 async fn run_shell_streaming(
     command: &str,
     cwd: &Path,
+    call_id: &str,
     tx: UnboundedSender<AppMsg>,
     timeout_secs: u64,
 ) -> Result<String> {
@@ -594,6 +609,7 @@ $env:PYTHONIOENCODING='utf-8'; ";
             shell,
             &["-NoLogo", "-NoProfile", "-Command", &full_cmd],
             cwd,
+            call_id,
             tx,
             timeout_secs,
         )
@@ -603,32 +619,33 @@ $env:PYTHONIOENCODING='utf-8'; ";
     #[cfg(not(windows))]
     {
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "sh".to_string());
-        run_shell_streaming_impl(&shell, &["-lc", command], cwd, tx, timeout_secs).await
+        run_shell_streaming_impl(&shell, &["-lc", command], cwd, call_id, tx, timeout_secs).await
     }
 }
 
 async fn run_python_streaming_inner(
     code: &str,
     cwd: &Path,
+    call_id: &str,
     tx: UnboundedSender<AppMsg>,
     timeout_secs: u64,
 ) -> Result<String> {
     #[cfg(windows)]
     {
-        match run_shell_streaming_impl("python", &["-X", "utf8", "-c", code], cwd, tx.clone(), timeout_secs).await
+        match run_shell_streaming_impl("python", &["-X", "utf8", "-c", code], cwd, call_id, tx.clone(), timeout_secs).await
         {
             Ok(output) => Ok(output),
             Err(_) => {
-                run_shell_streaming_impl("py", &["-3", "-X", "utf8", "-c", code], cwd, tx, timeout_secs).await
+                run_shell_streaming_impl("py", &["-3", "-X", "utf8", "-c", code], cwd, call_id, tx, timeout_secs).await
             }
         }
     }
 
     #[cfg(not(windows))]
     {
-        match run_shell_streaming_impl("python3", &["-c", code], cwd, tx.clone(), timeout_secs).await {
+        match run_shell_streaming_impl("python3", &["-c", code], cwd, call_id, tx.clone(), timeout_secs).await {
             Ok(output) => Ok(output),
-            Err(_) => run_shell_streaming_impl("python", &["-c", code], cwd, tx, timeout_secs).await,
+            Err(_) => run_shell_streaming_impl("python", &["-c", code], cwd, call_id, tx, timeout_secs).await,
         }
     }
 }
@@ -640,6 +657,7 @@ async fn run_shell_streaming_impl(
     program: &str,
     args: &[&str],
     cwd: &Path,
+    call_id: &str,
     tx: UnboundedSender<AppMsg>,
     timeout_secs: u64,
 ) -> Result<String> {
@@ -662,6 +680,7 @@ async fn run_shell_streaming_impl(
     // Take stdout/stderr handles
     let stdout_reader = child.stdout.take().map(tokio::io::BufReader::new);
     let stderr_reader = child.stderr.take().map(tokio::io::BufReader::new);
+    let call_id = call_id.to_string();
 
     // Read stdout and stderr concurrently
     let stdout_task = async {
@@ -676,6 +695,7 @@ async fn run_shell_streaming_impl(
                         buf.push_str(&line);
                         let clean = strip_ansi(&line);
                         let _ = tx.send(AppMsg::ToolDelta {
+                            call_id: call_id.clone(),
                             content: clean,
                         });
                     }
@@ -698,6 +718,7 @@ async fn run_shell_streaming_impl(
                         buf.push_str(&line);
                         let clean = strip_ansi(&line);
                         let _ = tx.send(AppMsg::ToolDelta {
+                            call_id: call_id.clone(),
                             content: format!("{tag}{clean}"),
                         });
                     }
@@ -795,13 +816,19 @@ struct SkillArgs {
 struct WebFetchArgs {
     url: String,
     format: Option<String>,
+    timeout: Option<u32>,
 }
 
 #[derive(Deserialize)]
 struct WebSearchArgs {
     query: String,
-    #[serde(rename = "numResults")]
-    num_results: Option<usize>,
+    #[serde(rename = "numResults", default)]
+    num_results: Option<u32>,
+    livecrawl: Option<String>,
+    #[serde(rename = "type", default)]
+    search_type: Option<String>,
+    #[serde(rename = "contextMaxCharacters", default)]
+    context_max_chars: Option<u32>,
 }
 
 #[allow(dead_code)]
@@ -1245,6 +1272,38 @@ async fn skill_load(args: &str) -> Result<String> {
     Ok(out)
 }
 
+const WEBFETCH_MAX_BYTES: usize = 5 * 1024 * 1024;
+const WEBFETCH_DEFAULT_TIMEOUT: u64 = 30;
+const WEBFETCH_MAX_TIMEOUT: u64 = 120;
+const BROWSER_UA: &str =
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36";
+
+fn webfetch_accept_header(format: &str) -> &'static str {
+    match format {
+        "markdown" => "text/markdown;q=1.0, text/x-markdown;q=0.9, text/plain;q=0.8, text/html;q=0.7, */*;q=0.1",
+        "text" => "text/plain;q=1.0, text/markdown;q=0.9, text/html;q=0.8, */*;q=0.1",
+        "html" => "text/html;q=1.0, application/xhtml+xml;q=0.9, text/plain;q=0.8, text/markdown;q=0.7, */*;q=0.1",
+        _ => "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+    }
+}
+
+fn is_image_mime(mime: &str) -> bool {
+    mime.starts_with("image/")
+        && mime != "image/svg+xml"
+        && mime != "image/vnd.fastbidsheet"
+}
+
+fn is_textual_mime(mime: &str) -> bool {
+    mime.is_empty()
+        || mime.starts_with("text/")
+        || mime == "application/json"
+        || mime.ends_with("+json")
+        || mime == "application/xml"
+        || mime.ends_with("+xml")
+        || mime == "application/javascript"
+        || mime == "application/x-javascript"
+}
+
 async fn webfetch(args: &str) -> Result<String> {
     let args: WebFetchArgs = serde_json::from_str(args)?;
     let url = args.url.trim();
@@ -1262,24 +1321,89 @@ async fn webfetch(args: &str) -> Result<String> {
     if !["text", "markdown", "html"].contains(&format) {
         return Err(anyhow!("format must be text, markdown, or html"));
     }
+    let timeout_secs = args
+        .timeout
+        .map(|t| t as u64)
+        .unwrap_or(WEBFETCH_DEFAULT_TIMEOUT)
+        .clamp(1, WEBFETCH_MAX_TIMEOUT);
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36")
+        .timeout(Duration::from_secs(timeout_secs))
+        .redirect(reqwest::redirect::Policy::limited(3))
         .build()?;
-    let resp = client.get(&url).send().await?;
+
+    let do_request = |ua: &str| {
+        client
+            .get(&url)
+            .header("User-Agent", ua)
+            .header("Accept", webfetch_accept_header(format))
+            .header("Accept-Language", "en-US,en;q=0.9")
+    };
+
+    let mut resp = do_request(BROWSER_UA).send().await?;
+    // Cloudflare bot detection: retry once with an honest UA on a 403 challenge.
+    if resp.status() == reqwest::StatusCode::FORBIDDEN {
+        if let Some(v) = resp.headers().get("cf-mitigated") {
+            if v.to_str().unwrap_or("") == "challenge" {
+                resp = do_request("opencode").send().await?;
+            }
+        }
+    }
     let status = resp.status();
     if !status.is_success() {
         return Err(anyhow!("HTTP {status}"));
     }
-    let body = resp.text().await?;
-    if body.len() > 5 * 1024 * 1024 {
-        return Err(anyhow!("Response too large (exceeds 5MB limit)"));
+
+    // Content-length preflight (advisory; real guard is the streaming cap below).
+    if let Some(cl) = resp.headers().get(reqwest::header::CONTENT_LENGTH) {
+        if let Ok(s) = cl.to_str() {
+            if let Ok(n) = s.parse::<usize>() {
+                if n > WEBFETCH_MAX_BYTES {
+                    return Err(anyhow!(
+                        "Response too large (content-length {n} exceeds {} byte limit)",
+                        WEBFETCH_MAX_BYTES
+                    ));
+                }
+            }
+        }
     }
-    match format {
-        "html" => Ok(body),
-        "text" => Ok(html_to_text(&body)),
-        _ => Ok(html_to_markdown(&body)),
+
+    let content_type = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let mime = content_type.split(';').next().unwrap_or("").trim().to_lowercase();
+
+    if is_image_mime(&mime) {
+        return Err(anyhow!("Unsupported fetched image content type: {mime}"));
     }
+    if !is_textual_mime(&mime) {
+        return Err(anyhow!("Unsupported fetched file content type: {mime}"));
+    }
+
+    // Stream-cap the decompressed body so compression bombs and slow drips
+    // cannot exhaust memory (reqwest auto-decompresses gzip/brotli/zstd/deflate).
+    let mut buf: Vec<u8> = Vec::new();
+    let mut stream = resp.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        buf.extend_from_slice(&chunk);
+        if buf.len() > WEBFETCH_MAX_BYTES {
+            return Err(anyhow!(
+                "Response too large (exceeds {} byte limit)",
+                WEBFETCH_MAX_BYTES
+            ));
+        }
+    }
+    let body = String::from_utf8_lossy(&buf).into_owned();
+
+    let out = match format {
+        "html" => body,
+        "text" => html_to_text(&body),
+        _ => html_to_markdown(&body),
+    };
+    Ok(format!("{} ({})\n{}", url, content_type, out))
 }
 
 fn html_to_text(html: &str) -> String {
@@ -1287,57 +1411,155 @@ fn html_to_text(html: &str) -> String {
 }
 
 fn html_to_markdown(html: &str) -> String {
-    let text = html2text::from_read(html.as_bytes(), 0);
+    let text = html2text::from_read(html.as_bytes(), 80);
     if text == html || text.trim().is_empty() {
         return html.to_string();
     }
     text
 }
 
+const EXA_URL: &str = "https://mcp.exa.ai/mcp";
+const PARALLEL_URL: &str = "https://search.parallel.ai/mcp";
+const WEBSEARCH_MAX_BYTES: usize = 256 * 1024;
+const WEBSEARCH_NO_RESULTS: &str = "No search results found. Please try a different query.";
+
+fn websearch_provider() -> &'static str {
+    match std::env::var("OPENCODE_WEBSEARCH_PROVIDER")
+        .ok()
+        .as_deref()
+        .map(str::trim)
+    {
+        Some("parallel") => "parallel",
+        _ => "exa",
+    }
+}
+
+/// Extracts the first `text` field from an MCP `tools/call` result envelope,
+/// which may arrive as a single JSON object or as SSE `data:` lines.
+fn parse_mcp_text(body: &str) -> Option<String> {
+    let extract = |s: &str| -> Option<String> {
+        let v: serde_json::Value = serde_json::from_str(s).ok()?;
+        v.get("result")?
+            .get("content")?
+            .as_array()?
+            .iter()
+            .find_map(|c| c.get("text")?.as_str().map(|t| t.to_string()))
+    };
+    let trimmed = body.trim();
+    if trimmed.starts_with('{') {
+        if let Some(t) = extract(trimmed) {
+            return Some(t);
+        }
+    }
+    for line in body.lines() {
+        if let Some(rest) = line.trim().strip_prefix("data: ") {
+            if let Some(t) = extract(rest.trim()) {
+                return Some(t);
+            }
+        }
+    }
+    None
+}
+
 async fn websearch(args: &str) -> Result<String> {
     let args: WebSearchArgs = serde_json::from_str(args)?;
-    let query = args.query.trim();
+    let query = args.query.trim().to_string();
     if query.is_empty() {
         return Err(anyhow!("query is empty"));
     }
-    let num_results = args.num_results.unwrap_or(8).clamp(1, 20);
     let year = chrono::Utc::now().year();
+    let provider = websearch_provider();
+    let num_results = args.num_results.unwrap_or(8).clamp(1, 20);
+    let livecrawl = args.livecrawl.as_deref().unwrap_or("fallback");
+    let search_type = args.search_type.as_deref().unwrap_or("auto");
+    let context_max_chars = args.context_max_chars.unwrap_or(10000).clamp(1, 50000);
+
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(25))
         .build()?;
+
+    let (url, tool_name, arguments, extra_headers): (&str, &str, serde_json::Value, Vec<(&str, String)>) =
+        match provider {
+            "parallel" => {
+                let mut h: Vec<(&str, String)> =
+                    vec![("User-Agent", "opencode".to_string())];
+                if let Ok(k) = std::env::var("PARALLEL_API_KEY") {
+                    h.push(("Authorization", format!("Bearer {k}")));
+                }
+                (
+                    PARALLEL_URL,
+                    "web_search",
+                    serde_json::json!({
+                        "objective": query,
+                        "search_queries": [query],
+                    }),
+                    h,
+                )
+            }
+            _ => {
+                let h: Vec<(&str, String)> = vec![];
+                (
+                    EXA_URL,
+                    "web_search_exa",
+                    serde_json::json!({
+                        "query": query,
+                        "type": search_type,
+                        "numResults": num_results,
+                        "livecrawl": livecrawl,
+                        "contextMaxCharacters": context_max_chars,
+                    }),
+                    h,
+                )
+            }
+        };
+
     let body = serde_json::json!({
-        "method": "web_search_exa",
-        "params": {
-            "query": query,
-            "numResults": num_results,
-            "type": "auto",
-            "contextMaxCharacters": 10000
-        }
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": { "name": tool_name, "arguments": arguments }
     });
-    let resp = client
-        .post("https://mcp.exa.ai/api")
+
+    let mut req = client
+        .post(url)
+        .header("Accept", "application/json, text/event-stream")
         .header("Content-Type", "application/json")
-        .json(&body)
-        .send()
-        .await?;
+        .json(&body);
+    for (k, v) in &extra_headers {
+        req = req.header(*k, v);
+    }
+    let resp = req.send().await?;
     let status = resp.status();
-    let body = resp.text().await?;
     if !status.is_success() {
-        return Err(anyhow!("search failed (HTTP {status}): {body}"));
+        let text = resp.text().await.unwrap_or_default();
+        return Err(anyhow!("search failed (HTTP {status}): {text}"));
     }
-    let v: serde_json::Value = serde_json::from_str(&body)?;
-    let text = v
-        .get("result")
-        .and_then(|r| r.get("content"))
-        .and_then(|c| c.as_array())
-        .and_then(|arr| arr.first())
-        .and_then(|c| c.get("text"))
-        .and_then(|t| t.as_str())
-        .unwrap_or(&body);
+
+    // Stream-cap the response so an oversized result cannot exhaust memory.
+    let mut buf: Vec<u8> = Vec::new();
+    let mut stream = resp.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        buf.extend_from_slice(&chunk);
+        if buf.len() > WEBSEARCH_MAX_BYTES {
+            return Err(anyhow!(
+                "search response too large (exceeds {} byte limit)",
+                WEBSEARCH_MAX_BYTES
+            ));
+        }
+    }
+    let resp_body = String::from_utf8_lossy(&buf).into_owned();
+
+    let text = match parse_mcp_text(&resp_body) {
+        Some(t) => t,
+        None => return Ok(WEBSEARCH_NO_RESULTS.to_string()),
+    };
     if text.trim().is_empty() {
-        return Ok("No search results found. Please try a different query.".to_string());
+        return Ok(WEBSEARCH_NO_RESULTS.to_string());
     }
-    Ok(format!("Search results for \"{query}\" ({year}):\n\n{text}"))
+    Ok(format!(
+        "Search results for \"{query}\" ({year}):\n\n{text}"
+    ))
 }
 
 async fn run_command(args: &str, cwd: &Path) -> Result<String> {

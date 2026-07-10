@@ -177,15 +177,20 @@ impl Provider for OpenAiProvider {
                     let _ = tx.send(ChatEvent::ContentBlockStart("tool_use".to_string()));
                 }
                 last_block_kind = Some("tool_use");
-                merge_tool_call_deltas(&mut tool_calls, calls);
+                let changed = merge_tool_call_deltas(&mut tool_calls, calls);
                 // Emit streaming tool arg deltas so the UI can show
-                // command/code text as it arrives from the LLM.
-                for (idx, tc) in tool_calls.iter().enumerate() {
-                    if !tc.name.is_empty() {
+                // command/code text as it arrives from the LLM. Only
+                // emit for the slots that actually changed in this
+                // delta (not every slot on every delta — otherwise
+                // parallel tool calls cause the session to create
+                // duplicate placeholder blocks).
+                for idx in changed {
+                    if idx < tool_calls.len() && !tool_calls[idx].name.is_empty() {
                         let _ = tx.send(ChatEvent::ToolArgDelta {
                             index: idx,
-                            name: tc.name.clone(),
-                            args: tc.arguments.clone(),
+                            call_id: tool_calls[idx].id.clone(),
+                            name: tool_calls[idx].name.clone(),
+                            args: tool_calls[idx].arguments.clone(),
                         });
                     }
                 }
@@ -276,7 +281,17 @@ pub(crate) fn image_to_base64(path: &std::path::Path) -> String {
     }
 }
 
-fn merge_tool_call_deltas(tool_calls: &mut Vec<ToolCall>, deltas: &[serde_json::Value]) {
+/// Merge OpenAI streaming `tool_calls` deltas into the accumulated
+/// `tool_calls` vector. Returns the indices of slots that were created
+/// or updated in this delta, so callers can emit `ToolArgDelta` only
+/// for changed slots (emitting for every slot on every delta would
+/// make the session create duplicate placeholder blocks for parallel
+/// tool calls).
+fn merge_tool_call_deltas(
+    tool_calls: &mut Vec<ToolCall>,
+    deltas: &[serde_json::Value],
+) -> Vec<usize> {
+    let mut changed = Vec::new();
     for delta in deltas {
         let idx = delta
             .get("index")
@@ -302,7 +317,9 @@ fn merge_tool_call_deltas(tool_calls: &mut Vec<ToolCall>, deltas: &[serde_json::
         {
             call.arguments.push_str(args);
         }
+        changed.push(idx);
     }
+    changed
 }
 
 fn parse_openai_usage(v: &serde_json::Value) -> Option<Usage> {

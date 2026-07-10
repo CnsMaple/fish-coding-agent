@@ -34,10 +34,12 @@ pub enum ChatEvent {
     /// Incremental tool-call arguments delta. Emitted during the LLM
     /// stream as the provider accumulates partial JSON fragments for
     /// a tool call. `index` identifies the tool call slot,
-    /// `name` is the tool name, `args` is the full accumulated
+    /// `call_id` is the stable tool-call id (available from the first
+    /// delta), `name` is the tool name, `args` is the full accumulated
     /// arguments string so far (may be partial/invalid JSON).
     ToolArgDelta {
         index: usize,
+        call_id: String,
         name: String,
         args: String,
     },
@@ -66,9 +68,18 @@ impl ChatEvent {
             ChatEvent::ContentBlockStart(kind) => {
                 crate::event::AppMsg::ChatContentBlockStart(kind)
             }
-            ChatEvent::ToolArgDelta { name, args, .. } => {
-                crate::event::AppMsg::ToolInputDelta { name, args }
-            }
+            ChatEvent::ToolArgDelta {
+                index,
+                call_id,
+                name,
+                args,
+                ..
+            } => crate::event::AppMsg::ToolInputDelta {
+                index,
+                call_id,
+                name,
+                args,
+            },
             ChatEvent::Debug(s) => crate::event::AppMsg::ChatDebug(s),
             ChatEvent::ToolResult {
                 name,
