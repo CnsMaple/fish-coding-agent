@@ -1600,6 +1600,10 @@ pub struct InflightHandle {
     /// `App::current_request_seq` and ignores mismatches. See the
     /// field-level comment on `App::current_request_seq`.
     pub seq: u64,
+    /// Wall-clock time when this inflight was armed, used by the TUI
+    /// to show an incrementing `[12s]` elapsed indicator next to the
+    /// "esc to interrupt" hint.
+    pub started_at: std::time::Instant,
 }
 
 impl App {

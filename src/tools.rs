@@ -191,7 +191,7 @@ fn tool_defs() -> Vec<ToolDef> {
                     "start_line": { "type": "integer", "minimum": 1, "description": "Optional 1-based line to start searching for oldString. Must be used with end_line." },
                     "end_line": { "type": "integer", "minimum": 1, "description": "Optional 1-based line to stop searching for oldString, inclusive. Must be used with start_line." }
                 },
-                "required": ["path", "content"],
+                "required": ["path"],
                 "additionalProperties": false
             }),
         },
@@ -731,7 +731,7 @@ struct ReadArgs {
 #[derive(Deserialize)]
 struct WriteArgs {
     path: String,
-    content: String,
+    content: Option<String>,
     #[serde(rename = "oldString")]
     old_string: Option<String>,
     #[serde(rename = "replaceAll")]
@@ -819,10 +819,11 @@ async fn write_file(args: &str, cwd: &Path) -> Result<String> {
             return Err(anyhow!("oldString must not be empty"));
         }
         let original = tokio::fs::read_to_string(&path).await?;
+        let content = args.content.as_deref().unwrap_or("");
         let updated = replace_string(
             &original,
             old_string,
-            &args.content,
+            content,
             args.replace_all.unwrap_or(false),
             args.start_line,
             args.end_line,
@@ -830,6 +831,7 @@ async fn write_file(args: &str, cwd: &Path) -> Result<String> {
         tokio::fs::write(&path, &updated).await?;
         Ok(write_diff_result(&args.path, &original, &updated, "Edit applied successfully."))
     } else {
+        let content = args.content.as_ref().ok_or_else(|| anyhow!("content is required when oldString is omitted"))?;
         let original = match tokio::fs::read_to_string(&path).await {
             Ok(text) => text,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
@@ -838,8 +840,8 @@ async fn write_file(args: &str, cwd: &Path) -> Result<String> {
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
-        tokio::fs::write(&path, &args.content).await?;
-        Ok(write_diff_result(&args.path, &original, &args.content, "Wrote file successfully."))
+        tokio::fs::write(&path, content).await?;
+        Ok(write_diff_result(&args.path, &original, content, "Wrote file successfully."))
     }
 }
 

@@ -492,7 +492,7 @@ mod tests {
             content_offset: 0,
             visible: true,
             running: false,
-            call_id: String::new(),
+            failed: false,            call_id: String::new(),
             pruned: false,
             streaming_input: String::new(), cached_line_count_visible: None,
             cached_line_count_collapsed: None,

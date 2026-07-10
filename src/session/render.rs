@@ -265,6 +265,10 @@ pub fn build_message_lines(
             /// after it) when both items share the same content
             /// offset.
             tool_results_len_at_open: usize,
+            /// Elapsed time for this thinking segment, computed
+            /// from `started_at`/`ended_at`. `None` when timing
+            /// info is unavailable (e.g. legacy sessions).
+            duration: Option<std::time::Duration>,
         },
         Tool(usize), // index into m.tool_results
     }
@@ -282,12 +286,38 @@ pub fn build_message_lines(
         if has_thinking_content && !matches!(session.display, ThinkingDisplay::Hide) {
             for seg in &segments {
                 let offset = clamp_char_boundary(raw, seg.offset.min(raw.len()));
+                let duration = match (seg.started_at, seg.ended_at) {
+                    (Some(start), Some(end)) => {
+                        let d = end.signed_duration_since(start);
+                        if d.num_milliseconds() >= 0 {
+                            Some(std::time::Duration::from_millis(
+                                d.num_milliseconds().max(0) as u64,
+                            ))
+                        } else {
+                            None
+                        }
+                    }
+                    (Some(start), None) => {
+                        // Still streaming — use elapsed since start
+                        let now = chrono::Utc::now();
+                        let d = now.signed_duration_since(start);
+                        if d.num_milliseconds() >= 0 {
+                            Some(std::time::Duration::from_millis(
+                                d.num_milliseconds().max(0) as u64,
+                            ))
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                };
                 items.push(RenderItem {
                     offset,
                     kind: RenderItemKind::Thinking {
                         content: seg.content.clone(),
                         closed: seg.closed,
                         tool_results_len_at_open: seg.tool_results_len_at_open,
+                        duration,
                     },
                 });
             }
@@ -373,7 +403,7 @@ pub fn build_message_lines(
 
         match item.kind {
             RenderItemKind::Thinking {
-                content, closed, ..
+                content, closed, duration, ..
             } => {
                 let visible = match session.display {
                     ThinkingDisplay::Show => m.thinking_visible,
@@ -393,6 +423,7 @@ pub fn build_message_lines(
                     session.tool_preview_lines,
                     width,
                     bg,
+                    duration,
                 );
                 push_block_rows(&mut msg_lines, rows);
                 msg_lines.push(Line::from(""));
@@ -685,6 +716,7 @@ pub fn thinking_block_line_count(
         preview_lines,
         width,
         active_colors().thinking_done_bg,
+        None,
     )
     .len()
 }
@@ -865,11 +897,12 @@ fn block_colors_for_tool(tool: &ToolResultBlock) -> (Color, Option<Color>) {
     if tool.running {
         return (colors.tool_pending_bg, None);
     }
-    let failed = match tool.name.as_str() {
-        "shell_command" | "command" => command_failed(&tool.content),
-        "python_command" => python_command_failed(&tool.content),
-        _ => false,
-    };
+    let failed = tool.failed
+        || match tool.name.as_str() {
+            "shell_command" | "command" => command_failed(&tool.content),
+            "python_command" => python_command_failed(&tool.content),
+            _ => false,
+        };
     if failed {
         (colors.tool_error_bg, Some(colors.tool_error_fg))
     } else {
@@ -918,6 +951,8 @@ pub fn get_thinking_segments(m: &super::Message) -> Vec<ThinkingSegment> {
             tool_results_len_at_open: 0,
             cached_line_count_expanded: None,
             cached_line_count_collapsed: None,
+            started_at: None,
+            ended_at: None,
         }];
     }
     vec![]
@@ -929,6 +964,7 @@ fn build_thinking_block_rows(
     preview_lines: usize,
     width: usize,
     bg: Color,
+    duration: Option<std::time::Duration>,
 ) -> Vec<Line<'static>> {
     let width = width.max(4);
     let mut rows = Vec::new();
@@ -980,7 +1016,14 @@ fn build_thinking_block_rows(
             }
         }
     }
-    rows.push(border_line(width, bg));
+    let time_label = duration
+        .map(|d| format!("[{}]", format_duration(d)))
+        .unwrap_or_default();
+    if time_label.is_empty() {
+        rows.push(border_line(width, bg));
+    } else {
+        rows.push(border_line_with_right_label(width, &time_label, bg));
+    }
     rows
 }
 
@@ -1833,6 +1876,40 @@ fn border_with_label_str(width: usize, label: &str) -> String {
     )
 }
 
+/// Format a `Duration` as an incrementing timer string:
+/// - < 60s → `12s`
+/// - < 1h  → `2m12s`
+/// - ≥ 1h  → `1h2m3s`
+fn format_duration(d: std::time::Duration) -> String {
+    let total_secs = d.as_secs();
+    let h = total_secs / 3600;
+    let m = (total_secs % 3600) / 60;
+    let s = total_secs % 60;
+    if h > 0 {
+        format!("{h}h{m}m{s}s")
+    } else if m > 0 {
+        format!("{m}m{s}s")
+    } else {
+        format!("{s}s")
+    }
+}
+
+/// Bottom border line with a right-aligned label, mirroring the
+/// tool block's footer-in-border style. The label sits flush
+/// against the right `+`, separated from the left dashes.
+fn border_line_with_right_label(width: usize, label: &str, bg: Color) -> Line<'static> {
+    if label.is_empty() || width <= 4 {
+        return border_line(width, bg);
+    }
+    let label_width = visible_width(label);
+    let inner = width.saturating_sub(2 + label_width);
+    if inner < 3 {
+        return border_line(width, bg);
+    }
+    let line_str = format!("+{}{}+", "-".repeat(inner), label);
+    Line::from(Span::styled(line_str, dim_bg_style(bg)))
+}
+
 fn build_python_command_rows(
     tool: &ToolResultBlock,
     visible: bool,
@@ -2455,6 +2532,8 @@ mod content_line_count_tests {
             tool_results_len_at_open: 0,
             cached_line_count_expanded: None,
             cached_line_count_collapsed: None,
+            started_at: None,
+            ended_at: None,
         });
         asst.thinking_visible = true;
         s.push(asst);
@@ -2556,7 +2635,7 @@ mod tool_block_count_tests {
             content_offset: 0,
             visible: true,
             running: false,
-            call_id: String::new(),
+            failed: false,            call_id: String::new(),
             pruned: false,
             streaming_input: String::new(), cached_line_count_visible: None,
             cached_line_count_collapsed: None,
@@ -2576,7 +2655,7 @@ mod tool_block_count_tests {
             content_offset: 0,
             visible: true,
             running: false,
-            call_id: String::new(),
+            failed: false,            call_id: String::new(),
             pruned: false,
             streaming_input: String::new(), cached_line_count_visible: None,
             cached_line_count_collapsed: None,
@@ -2664,6 +2743,8 @@ mod tool_block_count_tests {
             tool_results_len_at_open: 0,
             cached_line_count_expanded: None,
             cached_line_count_collapsed: None,
+            started_at: None,
+            ended_at: None,
         }];
         s.messages[1].thinking_visible = true;
         let width = 80u16;
@@ -2879,6 +2960,8 @@ mod tool_block_count_tests {
             tool_results_len_at_open: 1,
             cached_line_count_expanded: None,
             cached_line_count_collapsed: None,
+            started_at: None,
+            ended_at: None,
         }];
         asst.thinking_visible = true;
         asst.tool_results.push(make_edit_tool());
@@ -2917,6 +3000,8 @@ mod tool_block_count_tests {
                 tool_results_len_at_open: 0,
                 cached_line_count_expanded: None,
                 cached_line_count_collapsed: None,
+            started_at: None,
+            ended_at: None,
             });
         s.messages[1] = asst;
         assert_eq!(s.messages[1].thinking_segments.len(), 1);
@@ -2958,7 +3043,7 @@ mod tool_block_count_tests {
                 content_offset: 0,
                 visible: true,
                 running: false,
-            call_id: String::new(),
+            failed: false,            call_id: String::new(),
                 pruned: false,
                 streaming_input: String::new(), cached_line_count_visible: None,
                 cached_line_count_collapsed: None,
@@ -3010,7 +3095,7 @@ mod tool_block_count_tests {
                 content_offset: 0,
                 visible: true,
                 running: false,
-            call_id: String::new(),
+            failed: false,            call_id: String::new(),
                 pruned: false,
                 streaming_input: String::new(), cached_line_count_visible: None,
                 cached_line_count_collapsed: None,
@@ -3263,7 +3348,7 @@ tool_calls: Vec::new(),
             content_offset: 0,
             visible: true,
             running: false,
-            call_id: String::new(),
+            failed: false,            call_id: String::new(),
             pruned: false,
             streaming_input: String::new(), cached_line_count_visible: None,
             cached_line_count_collapsed: None,
@@ -3297,7 +3382,7 @@ tool_calls: Vec::new(),
             content_offset: 0,
             visible: true,
             running: false,
-            call_id: String::new(),
+            failed: false,            call_id: String::new(),
             pruned: false,
             streaming_input: String::new(), cached_line_count_visible: None,
             cached_line_count_collapsed: None,
@@ -3347,7 +3432,7 @@ tool_calls: Vec::new(),
             content_offset: 0,
             visible: true,
             running: false,
-            call_id: String::new(),
+            failed: false,            call_id: String::new(),
             pruned: false,
             streaming_input: String::new(), cached_line_count_visible: None,
             cached_line_count_collapsed: None,
@@ -3377,7 +3462,7 @@ tool_calls: Vec::new(),
             content_offset: 0,
             visible: true,
             running: false,
-            call_id: String::new(),
+            failed: false,            call_id: String::new(),
             pruned: false,
             streaming_input: String::new(), cached_line_count_visible: None,
             cached_line_count_collapsed: None,
@@ -3671,7 +3756,7 @@ tool_calls: Vec::new(),
             content_offset: 0,
             visible: true,
             running: false,
-            call_id: String::new(),
+            failed: false,            call_id: String::new(),
             pruned: false,
             streaming_input: String::new(), cached_line_count_visible: None,
             cached_line_count_collapsed: None,
@@ -4176,6 +4261,7 @@ mod border_fix_tests {
                 10,
                 width,
                 Color::Reset,
+                None,
             );
             assert!(rows.len() > 2, "expected more than 2 rows for width {width}");
 
@@ -4292,7 +4378,7 @@ mod border_fix_tests {
                 content_offset: 0,
                 visible: true,
                 running: false,
-                call_id: String::new(),
+            failed: false,                call_id: String::new(),
                 pruned: false,
                 streaming_input: String::new(), cached_line_count_visible: None,
                 cached_line_count_collapsed: None,

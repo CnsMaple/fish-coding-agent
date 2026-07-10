@@ -80,6 +80,7 @@ impl ChatEvent {
                 content,
                 metadata: String::new(),
                 call_id: String::new(),
+                failed: false,
             },
             ChatEvent::ToolCalls(_) => crate::event::AppMsg::ChatDone { seq },
             ChatEvent::Usage(u) => crate::event::AppMsg::ChatUsage { seq, usage: u },

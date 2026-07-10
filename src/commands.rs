@@ -479,6 +479,7 @@ pub fn compact_now(app: &mut App, _arg: &str) {
         cancel: cancel_tx,
         label: format!("compact:{active_id}:{model}"),
         seq: app.current_request_seq,
+        started_at: std::time::Instant::now(),
     });
     app.cancel_state = crate::function::CancelState::Idle;
     tokio::spawn(run_compaction_stream(
@@ -1171,6 +1172,7 @@ pub fn send_message(app: &mut App, user_msg: Message) {
         cancel: cancel_tx,
         label: format!("chat:{active_id}:{model}"),
         seq,
+        started_at: std::time::Instant::now(),
     });
     app.cancel_state = crate::function::CancelState::Idle;
 
@@ -1325,6 +1327,7 @@ pub async fn run_chat_stream(
                         content,
                         metadata: String::new(),
                         call_id: String::new(),
+                        failed: false,
                     });
                 }
                 crate::providers::ChatEvent::ToolCalls(calls) => {
@@ -1471,7 +1474,7 @@ pub async fn run_chat_stream(
                 tool_call_id: Some(call.id.clone()),
                 tool_calls: Vec::new(),
             });
-            let display_text = parse_tool_result_display(&result);
+            let (display_text, failed) = parse_tool_result_display(&result);
             let metadata = crate::tools::extract_metadata(&result);
             send_msg(crate::event::AppMsg::ChatToolResult {
                 name: call.name.clone(),
@@ -1479,6 +1482,7 @@ pub async fn run_chat_stream(
                 content: display_text,
                 metadata,
                 call_id: call.id.clone(),
+                failed,
             });
         }
         // Always persist tool calls to the session so the
@@ -1946,21 +1950,27 @@ fn is_doom_loop(history: &[(String, String)], name: &str, args: &str) -> bool {
 
 /// Extract the human-readable display content from a tool result JSON string.
 /// Strips the `{"ok":true,"result":"..."}` wrapper to show just the inner content.
-fn parse_tool_result_display(result: &str) -> String {
+fn parse_tool_result_display(result: &str) -> (String, bool) {
     if let Ok(val) = serde_json::from_str::<serde_json::Value>(result) {
         if val.get("ok").and_then(|v| v.as_bool()) == Some(true) {
-            val.get("result")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string()
+            (
+                val.get("result")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                false,
+            )
         } else {
-            val.get("error")
-                .and_then(|v| v.as_str())
-                .unwrap_or(result)
-                .to_string()
+            (
+                val.get("error")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(result)
+                    .to_string(),
+                true,
+            )
         }
     } else {
-        result.to_string()
+        (result.to_string(), false)
     }
 }
 

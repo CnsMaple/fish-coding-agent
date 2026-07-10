@@ -328,12 +328,25 @@ fn render_cwd(area: Rect, buf: &mut Buffer, app: &App) {
     };
 
     if app.inflight.is_some() {
+        let elapsed = app
+            .inflight
+            .as_ref()
+            .map(|h| h.started_at.elapsed())
+            .unwrap_or(std::time::Duration::ZERO);
+        let secs = elapsed.as_secs();
+        let timer = if secs >= 3600 {
+            format!("{}h{}m{}s", secs / 3600, (secs % 3600) / 60, secs % 60)
+        } else if secs >= 60 {
+            format!("{}m{}s", secs / 60, secs % 60)
+        } else {
+            format!("{}s", secs)
+        };
         let hint = match app.cancel_state {
             CancelState::Idle => {
-                format!("{} esc to interrupt", crate::input::spinner_prompt().trim())
+                format!("{} esc to interrupt [{timer}]", crate::input::spinner_prompt().trim())
             }
             CancelState::Confirming(_) => {
-                format!("{} esc again", crate::input::spinner_prompt().trim())
+                format!("{} esc again [{timer}]", crate::input::spinner_prompt().trim())
             }
         };
         let hint_w = UnicodeWidthStr::width(hint.as_str());

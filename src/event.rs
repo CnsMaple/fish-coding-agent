@@ -75,6 +75,8 @@ pub enum AppMsg {
         metadata: String,
         /// The tool call id that produced this result.
         call_id: String,
+        /// `true` when the tool returned `{"ok": false, ...}`.
+        failed: bool,
     },
     /// Tool calls emitted by the assistant. Stored in the session so
     /// the conversation context can be reconstructed for follow-up
@@ -86,6 +88,7 @@ pub enum AppMsg {
         content: String,
         metadata: String,
         context: Option<String>,
+        failed: bool,
     },
     /// Final usage arrived for a completed stream.
     ChatUsage { seq: u64, usage: crate::providers::Usage },
@@ -898,12 +901,13 @@ fn handle_msg(msg: AppMsg, app: &mut App) {
             content,
             metadata,
             call_id,
+            failed,
         } => {
             if name == "todowrite" {
                 handle_todowrite_result(app, &content);
             }
             open_tool_function_panel(app, &name, &content);
-            app.session.update_last_tool_content(name, title, content, call_id, metadata);
+            app.session.update_last_tool_content(name, title, content, call_id, metadata, failed);
         }
         AppMsg::AssistantToolCalls(tool_calls) => {
             if let Some(id) = app.session.streaming_id {
@@ -918,12 +922,13 @@ fn handle_msg(msg: AppMsg, app: &mut App) {
             content,
             metadata,
             context,
+            failed,
         } => {
             if name == "todowrite" {
                 handle_todowrite_result(app, &content);
             }
             open_tool_function_panel(app, &name, &content);
-            app.session.push_tool_result_message(name, title, content, metadata);
+            app.session.push_tool_result_message(name, title, content, metadata, failed);
             if let Some(context) = context {
                 app.session.push(crate::session::Message::new(
                     crate::session::Role::User,
@@ -2740,6 +2745,7 @@ fn submit_direct_tool_input(app: &mut App, raw: &str) -> bool {
             cancel: cancel_tx,
             label: format!("tool:{n}"),
             seq,
+            started_at: std::time::Instant::now(),
         });
         app.cancel_state = CancelState::Idle;
         app.pending_request = Some(crate::function::PendingRequest::Tool(
@@ -2801,6 +2807,7 @@ pub async fn run_tool_execution(
         return;
     }
     let display = tool_result_display(&result);
+    let failed = tool_result_failed(&result);
     let metadata = crate::tools::extract_metadata(&result);
     let context = if include_context {
         Some(local_tool_context(&name, &title, &display))
@@ -2813,6 +2820,7 @@ pub async fn run_tool_execution(
         content: display,
         metadata,
         call_id: String::new(),
+        failed,
     });
     send_msg(AppMsg::ChatDone { seq });
     if let Some(ctx) = context {
@@ -2836,6 +2844,14 @@ fn tool_result_display(result: &str) -> String {
     } else {
         result.to_string()
     }
+}
+
+fn tool_result_failed(result: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(result)
+        .ok()
+        .and_then(|v| v.get("ok").and_then(|o| o.as_bool()))
+        .map(|ok| !ok)
+        .unwrap_or(false)
 }
 
 fn local_tool_context(name: &str, title: &str, content: &str) -> String {
@@ -7911,6 +7927,7 @@ mod tests {
             cancel: cancel_tx,
             label: "test:new".to_string(),
             seq: 5,
+            started_at: std::time::Instant::now(),
         });
 
         handle_msg(
@@ -7935,6 +7952,7 @@ mod tests {
             cancel: cancel_tx,
             label: "test:new".to_string(),
             seq: 5,
+            started_at: std::time::Instant::now(),
         });
 
         handle_msg(
@@ -7964,6 +7982,7 @@ mod tests {
             cancel: cancel_tx,
             label: "test:current".to_string(),
             seq: 7,
+            started_at: std::time::Instant::now(),
         });
 
         handle_msg(AppMsg::ChatDone { seq: 7 }, &mut app);

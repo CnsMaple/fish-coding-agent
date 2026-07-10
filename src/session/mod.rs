@@ -67,6 +67,16 @@ pub struct ThinkingSegment {
     /// Cached rendered line count for the collapsed (single toggle) line.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cached_line_count_collapsed: Option<u32>,
+    /// Wall-clock timestamp when this thinking segment started
+    /// streaming. Used by the TUI to show `[12s]` elapsed time on
+    /// the bottom border of the thinking block.
+    #[serde(default)]
+    pub started_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Wall-clock timestamp when this thinking segment was closed
+    /// (via `begin_thinking_segment` or auto-close). When `None`
+    /// the segment is still streaming.
+    #[serde(default)]
+    pub ended_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -117,6 +127,11 @@ pub struct ToolResultBlock {
     /// Cached rendered line count for the collapsed preview form.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cached_line_count_collapsed: Option<u32>,
+    /// `true` when the tool returned `{"ok": false, ...}`. Drives
+    /// the error background color in the TUI regardless of tool
+    /// type (not just shell/python commands).
+    #[serde(default)]
+    pub failed: bool,
 }
 
 impl ThinkingSegment {
@@ -476,7 +491,7 @@ impl Session {
 
     /// Update the last tool block's content (for streaming: replace placeholder with final content).
     /// If no tool block exists yet (non-streaming path), falls back to appending.
-    pub fn update_last_tool_content(&mut self, name: String, title: String, content: String, call_id: String, metadata: String) {
+    pub fn update_last_tool_content(&mut self, name: String, title: String, content: String, call_id: String, metadata: String, failed: bool) {
         if let Some(id) = self.streaming_id {
             if let Some(m) = self.messages.get_mut(id) {
                 if let Some(last) = m.thinking_segments.last_mut() {
@@ -497,6 +512,7 @@ impl Session {
                     tool.content = content;
                     tool.metadata = metadata;
                     tool.running = false;
+                    tool.failed = failed;
                     tool.title = title;
                     tool.call_id = call_id;
                     tool.streaming_input.clear();
@@ -514,10 +530,10 @@ impl Session {
             }
         }
         // Fallback: no existing block → append as normal
-        self.append_tool_to_last(name, title, content, metadata);
+        self.append_tool_to_last(name, title, content, metadata, failed);
     }
 
-    pub fn append_tool_to_last(&mut self, name: String, title: String, content: String, metadata: String) {
+    pub fn append_tool_to_last(&mut self, name: String, title: String, content: String, metadata: String, failed: bool) {
         if let Some(id) = self.streaming_id {
             if let Some(m) = self.messages.get_mut(id) {
                 if let Some(last) = m.thinking_segments.last_mut() {
@@ -535,6 +551,7 @@ impl Session {
                     content_offset,
                     visible,
                     running: false,
+                    failed,
                     call_id: String::new(),
                     pruned: false,
                     streaming_input: String::new(),
@@ -579,7 +596,7 @@ impl Session {
                     content_offset,
                     visible,
                     running: true,
-                    call_id: String::new(),
+                    failed: false,                    call_id: String::new(),
                     pruned: false,
                     streaming_input: String::new(),
                     cached_line_count_visible: None,
@@ -639,7 +656,7 @@ impl Session {
                         content_offset,
                         visible,
                         running: true,
-                        call_id: String::new(),
+                    failed: false,                        call_id: String::new(),
                         pruned: false,
                         streaming_input: args.to_string(),
                         cached_line_count_visible: None,
@@ -662,7 +679,7 @@ impl Session {
         }
     }
 
-    pub fn push_tool_result_message(&mut self, name: String, title: String, content: String, metadata: String) {
+    pub fn push_tool_result_message(&mut self, name: String, title: String, content: String, metadata: String, failed: bool) {
         let visible = name == "plan" || self.expand_new_tool_results;
         let msg = Message {
             role: Role::Assistant,
@@ -678,6 +695,7 @@ impl Session {
                 content_offset: 0,
                 visible,
                 running: false,
+                failed,
                 call_id: String::new(),
                 pruned: false,
                 streaming_input: String::new(),
@@ -781,6 +799,8 @@ impl Session {
                         tool_results_len_at_open: tool_results_len,
                         cached_line_count_expanded: None,
                         cached_line_count_collapsed: None,
+                        started_at: Some(chrono::Utc::now()),
+                        ended_at: None,
                     });
                 }
                 m.invalidate_caches();
@@ -812,6 +832,7 @@ impl Session {
                         m.thinking_segments.pop();
                     } else if !last.closed {
                         last.closed = true;
+                        last.ended_at = Some(chrono::Utc::now());
                     }
                 }
             }
