@@ -641,7 +641,7 @@ format!("[!{}] | ", app.pending_events),
                 if local_end < chunk_len {
                     spans.push(Span::raw(chunk[local_end..].to_string()));
                 }
-            } else if app.inflight.is_none() && cursor >= chunk_abs_start && cursor <= chunk_abs_end
+            } else if cursor >= chunk_abs_start && cursor <= chunk_abs_end
             {
                 let local = cursor - chunk_abs_start;
                 if local > 0 {
@@ -673,7 +673,7 @@ format!("[!{}] | ", app.pending_events),
     }
 
     // Cursor position: find which visual_line the cursor is on
-    if app.inflight.is_none() {
+    {
         let mut cursor_vis = 0usize;
         let mut cursor_col = 0u16;
         let mut found = false;
@@ -727,8 +727,6 @@ format!("[!{}] | ", app.pending_events),
         } else {
             app.input_cursor_screen = None;
         }
-    } else {
-        app.input_cursor_screen = None;
     }
 }
 
