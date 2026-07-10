@@ -494,7 +494,7 @@ mod tests {
             running: false,
             call_id: String::new(),
             pruned: false,
-            cached_line_count_visible: None,
+            streaming_input: String::new(), cached_line_count_visible: None,
             cached_line_count_collapsed: None,
         }
     }

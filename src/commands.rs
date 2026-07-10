@@ -1341,6 +1341,9 @@ pub async fn run_chat_stream(
                 crate::providers::ChatEvent::ContentBlockStart(kind) => {
                     send_msg(crate::event::AppMsg::ChatContentBlockStart(kind));
                 }
+                crate::providers::ChatEvent::ToolArgDelta { name, args, .. } => {
+                    send_msg(crate::event::AppMsg::ToolInputDelta { name, args });
+                }
             }
         }
 
@@ -1959,6 +1962,93 @@ fn parse_tool_result_display(result: &str) -> String {
     } else {
         result.to_string()
     }
+}
+
+/// Extract a string field from potentially-partial JSON.
+/// First tries `serde_json::from_str`. If that fails (because the
+/// JSON is incomplete), falls back to a heuristic scanner that
+/// finds `"key": "value` and extracts the partial value with
+/// escape-sequence handling.
+///
+/// Returns `Some(value)` if the field is found (partial or complete),
+/// `None` if the field is not present in the JSON at all.
+pub fn extract_partial_json_field(args: &str, key: &str) -> Option<String> {
+    // Fast path: complete JSON
+    if let Ok(val) = serde_json::from_str::<serde_json::Value>(args) {
+        return val.get(key).and_then(|v| v.as_str()).map(|s| s.to_string());
+    }
+    // Heuristic: scan for `"key": "` and extract the partial string value
+    let needle = format!("\"{key}\"");
+    let mut search_from = 0;
+    while let Some(pos) = args[search_from..].find(&needle) {
+        let abs_pos = search_from + pos;
+        let after_key = abs_pos + needle.len();
+        // Skip whitespace and look for `:`
+        let rest = &args[after_key..];
+        let trimmed = rest.trim_start();
+        let colon_offset = rest.len() - trimmed.len();
+        if !trimmed.starts_with(':') {
+            search_from = abs_pos + 1;
+            continue;
+        }
+        let after_colon = &rest[colon_offset + 1..];
+        let trimmed2 = after_colon.trim_start();
+        let ws2 = after_colon.len() - trimmed2.len();
+        if !trimmed2.starts_with('"') {
+            search_from = abs_pos + 1;
+            continue;
+        }
+        // Found `"key": "` — extract the string value
+        let value_start_abs = after_key + colon_offset + 1 + ws2 + 1;
+        let raw = &args[value_start_abs..];
+        return Some(unescape_partial_json_string(raw));
+    }
+    None
+}
+
+/// Unescape a partial JSON string value (the text after the opening
+/// `"`). Handles `\"`, `\\`, `\n`, `\t`, `\r`, `\/`, `\uXXXX`. Stops
+/// at the first unescaped `"` (which would be the closing quote).
+fn unescape_partial_json_string(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut chars = raw.chars().peekable();
+    let mut escaped = false;
+    while let Some(ch) = chars.next() {
+        if escaped {
+            match ch {
+                '"' => out.push('"'),
+                '\\' => out.push('\\'),
+                '/' => out.push('/'),
+                'n' => out.push('\n'),
+                't' => out.push('\t'),
+                'r' => out.push('\r'),
+                'b' => out.push('\u{0008}'),
+                'f' => out.push('\u{000C}'),
+                'u' => {
+                    let hex: String = chars.by_ref().take(4).collect();
+                    if let Ok(code) = u32::from_str_radix(&hex, 16) {
+                        if let Some(c) = char::from_u32(code) {
+                            out.push(c);
+                        }
+                    }
+                }
+                _ => {
+                    // Unknown escape — keep as-is
+                    out.push('\\');
+                    out.push(ch);
+                }
+            }
+            escaped = false;
+        } else if ch == '\\' {
+            escaped = true;
+        } else if ch == '"' {
+            // Closing quote — value is complete
+            break;
+        } else {
+            out.push(ch);
+        }
+    }
+    out
 }
 
 fn tool_result_title(call: &ToolCall) -> String {

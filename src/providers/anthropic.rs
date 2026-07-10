@@ -145,6 +145,18 @@ impl Provider for AnthropicProvider {
                         .unwrap_or("");
                     if block_type == "tool_use" {
                         merge_tool_use_start(&mut tool_calls, &v);
+                        // Emit initial ToolArgDelta so the tool block
+                        // appears immediately in the UI.
+                        let idx = v.get("index").and_then(|v| v.as_u64()).unwrap_or(
+                            tool_calls.len().saturating_sub(1) as u64,
+                        ) as usize;
+                        if idx < tool_calls.len() {
+                            let _ = tx.send(ChatEvent::ToolArgDelta {
+                                index: idx,
+                                name: tool_calls[idx].name.clone(),
+                                args: tool_calls[idx].arguments.clone(),
+                            });
+                        }
                     }
                     // Notify the session so it can close off the
                     // in-flight thinking segment. This is the
@@ -173,6 +185,16 @@ impl Provider for AnthropicProvider {
                     if let Some(partial) = v.pointer("/delta/partial_json").and_then(|p| p.as_str())
                     {
                         merge_tool_use_delta(&mut tool_calls, &v, partial);
+                        // Emit streaming tool arg delta so the UI can show
+                        // the command/code text as it arrives.
+                        let idx = v.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                        if idx < tool_calls.len() {
+                            let _ = tx.send(ChatEvent::ToolArgDelta {
+                                index: idx,
+                                name: tool_calls[idx].name.clone(),
+                                args: tool_calls[idx].arguments.clone(),
+                            });
+                        }
                     }
                 }
                 "message_delta" => {

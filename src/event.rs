@@ -127,6 +127,14 @@ pub enum AppMsg {
     ToolDelta {
         content: String,
     },
+    /// Streaming tool-call arguments from the LLM. `args` is the
+    /// full accumulated JSON arguments string so far. The session
+    /// stores this on `ToolResultBlock.streaming_input` so the
+    /// renderer can show the command/code/edit text as it arrives.
+    ToolInputDelta {
+        name: String,
+        args: String,
+    },
     /// MCP tool list changed for a single server (added, removed,
     /// or server went up/down). Triggers re-aggregation of the
     /// `openai_tool_specs` / `anthropic_tool_specs` view and an
@@ -1141,6 +1149,9 @@ fn handle_msg(msg: AppMsg, app: &mut App) {
         }
         AppMsg::ToolDelta { content } => {
             app.session.append_tool_delta_to_last(&content);
+        }
+        AppMsg::ToolInputDelta { name, args } => {
+            app.session.update_tool_input_delta(&name, &args);
         }
         AppMsg::McpToolsChanged { server } => {
             // The aggregated tool set changed; nudge the next

@@ -178,6 +178,17 @@ impl Provider for OpenAiProvider {
                 }
                 last_block_kind = Some("tool_use");
                 merge_tool_call_deltas(&mut tool_calls, calls);
+                // Emit streaming tool arg deltas so the UI can show
+                // command/code text as it arrives from the LLM.
+                for (idx, tc) in tool_calls.iter().enumerate() {
+                    if !tc.name.is_empty() {
+                        let _ = tx.send(ChatEvent::ToolArgDelta {
+                            index: idx,
+                            name: tc.name.clone(),
+                            args: tc.arguments.clone(),
+                        });
+                    }
+                }
             }
             if let Some(u) = v.get("usage") {
                 if let Some(parsed) = parse_openai_usage(u) {

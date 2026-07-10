@@ -103,6 +103,14 @@ pub struct ToolResultBlock {
     /// swapped. Matches opencode's `part.state.time.compacted`.
     #[serde(default)]
     pub pruned: bool,
+    /// Raw accumulated JSON arguments string from the LLM stream.
+    /// While `running` is true and this is non-empty, the renderer
+    /// shows a streaming preview (command text / code / diff) by
+    /// extracting fields from this partial JSON. Cleared when
+    /// `ChatToolResult` arrives (the final `title`/`content`/
+    /// `metadata` take over).
+    #[serde(default)]
+    pub streaming_input: String,
     /// Cached rendered line count for the expanded tool block.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cached_line_count_visible: Option<u32>,
@@ -482,6 +490,7 @@ impl Session {
                     tool.running = false;
                     tool.title = title;
                     tool.call_id = call_id;
+                    tool.streaming_input.clear();
                     tool.cached_line_count_visible = None;
                     tool.cached_line_count_collapsed = None;
                     m.invalidate_caches();
@@ -519,6 +528,7 @@ impl Session {
                     running: false,
                     call_id: String::new(),
                     pruned: false,
+                    streaming_input: String::new(),
                     cached_line_count_visible: None,
                     cached_line_count_collapsed: None,
                 });
@@ -536,6 +546,20 @@ impl Session {
                         last.closed = true;
                     }
                 }
+                // If the last tool block is already running with the
+                // same name (created by ToolInputDelta during streaming),
+                // just update the title instead of creating a duplicate.
+                if let Some(last) = m.tool_results.last() {
+                    if last.running && last.name == name {
+                        let last = m.tool_results.last_mut().unwrap();
+                        last.title = title;
+                        last.cached_line_count_visible = None;
+                        last.cached_line_count_collapsed = None;
+                        m.invalidate_caches();
+                        self.invalidate_layout_cache();
+                        return;
+                    }
+                }
                 let content_offset = m.content.len();
                 let visible = name == "plan" || self.expand_new_tool_results;
                 m.tool_results.push(ToolResultBlock {
@@ -548,6 +572,7 @@ impl Session {
                     running: true,
                     call_id: String::new(),
                     pruned: false,
+                    streaming_input: String::new(),
                     cached_line_count_visible: None,
                     cached_line_count_collapsed: None,
                 });
@@ -576,6 +601,58 @@ impl Session {
         }
     }
 
+    /// Update the streaming input (raw accumulated JSON args) on the
+    /// last tool block. If no running block exists with this name,
+    /// creates one first. This is called during LLM streaming so the
+    /// user sees the command/code/edit text appear character by
+    /// character before the tool executes.
+    pub fn update_tool_input_delta(&mut self, name: &str, args: &str) {
+        if let Some(id) = self.streaming_id {
+            if let Some(m) = self.messages.get_mut(id) {
+                // Check if the last tool block is already running with this name
+                let need_new = match m.tool_results.last() {
+                    Some(last) => !(last.running && last.name == name),
+                    None => true,
+                };
+                if need_new {
+                    if let Some(last) = m.thinking_segments.last_mut() {
+                        if !last.closed {
+                            last.closed = true;
+                        }
+                    }
+                    let content_offset = m.content.len();
+                    let visible = name == "plan" || self.expand_new_tool_results;
+                    m.tool_results.push(ToolResultBlock {
+                        name: name.to_string(),
+                        title: String::new(),
+                        content: String::new(),
+                        metadata: String::new(),
+                        content_offset,
+                        visible,
+                        running: true,
+                        call_id: String::new(),
+                        pruned: false,
+                        streaming_input: args.to_string(),
+                        cached_line_count_visible: None,
+                        cached_line_count_collapsed: None,
+                    });
+                } else {
+                    let tool = m.tool_results.last_mut().unwrap();
+                    tool.streaming_input = args.to_string();
+                    tool.cached_line_count_visible = None;
+                    tool.cached_line_count_collapsed = None;
+                }
+                m.invalidate_caches();
+                if let Ok(mut c) = self.line_cache.lock() {
+                    if id < c.len() {
+                        c[id] = None;
+                    }
+                }
+                self.invalidate_layout_cache();
+            }
+        }
+    }
+
     pub fn push_tool_result_message(&mut self, name: String, title: String, content: String, metadata: String) {
         let visible = name == "plan" || self.expand_new_tool_results;
         let msg = Message {
@@ -594,6 +671,7 @@ impl Session {
                 running: false,
                 call_id: String::new(),
                 pruned: false,
+                streaming_input: String::new(),
                 cached_line_count_visible: None,
                 cached_line_count_collapsed: None,
             }],
@@ -735,9 +813,11 @@ impl Session {
         if let Some(id) = self.streaming_id {
             if let Some(m) = self.messages.get_mut(id) {
                 m.streaming = false;
-                // Mark any still-running tools as finished.
+                // Mark any still-running tools as finished and clear
+                // streaming input (the final content/title takes over).
                 for t in &mut m.tool_results {
                     t.running = false;
+                    t.streaming_input.clear();
                 }
                 // Strip text-based tool call JSON fallback lines from
                 // content so they don't appear in the rendered chat.

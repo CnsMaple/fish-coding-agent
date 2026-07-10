@@ -31,6 +31,16 @@ pub enum ChatEvent {
     /// next `ThinkingDelta` lands in a fresh block. The string is
     /// the block kind ("thinking", "text", "tool_use", ...).
     ContentBlockStart(String),
+    /// Incremental tool-call arguments delta. Emitted during the LLM
+    /// stream as the provider accumulates partial JSON fragments for
+    /// a tool call. `index` identifies the tool call slot,
+    /// `name` is the tool name, `args` is the full accumulated
+    /// arguments string so far (may be partial/invalid JSON).
+    ToolArgDelta {
+        index: usize,
+        name: String,
+        args: String,
+    },
     Debug(String),
     ToolResult {
         name: String,
@@ -55,6 +65,9 @@ impl ChatEvent {
             ChatEvent::ThinkingDelta(s) => crate::event::AppMsg::ChatThinkingDelta(s),
             ChatEvent::ContentBlockStart(kind) => {
                 crate::event::AppMsg::ChatContentBlockStart(kind)
+            }
+            ChatEvent::ToolArgDelta { name, args, .. } => {
+                crate::event::AppMsg::ToolInputDelta { name, args }
             }
             ChatEvent::Debug(s) => crate::event::AppMsg::ChatDebug(s),
             ChatEvent::ToolResult {
