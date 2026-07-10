@@ -13,7 +13,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::event::AppMsg;
 use crate::mcp::McpRegistry;
 
-const COMMAND_TIMEOUT_SECS: u64 = 300;
+const DEFAULT_TIMEOUT_SECS: u64 = 300;
 const COMMAND_OUTPUT_LIMIT: usize = 16_000;
 const READ_OUTPUT_LIMIT: usize = 32_000;
 
@@ -201,7 +201,7 @@ fn tool_defs() -> Vec<ToolDef> {
                 let shell = shell_description();
                 let guidance = shell_guidance();
                 format!(
-                    "Execute a shell command in the current workspace using {shell} and return stdout/stderr. Timeout is 300 seconds.\n\n{guidance}",
+                    "Execute a shell command in the current workspace using {shell} and return stdout/stderr. Default timeout is 300 seconds; pass `timeout_secs` to override.\n\n{guidance}",
                     shell = shell,
                     guidance = guidance,
                 )
@@ -209,7 +209,8 @@ fn tool_defs() -> Vec<ToolDef> {
             schema: json!({
                 "type": "object",
                 "properties": {
-                    "command": { "type": "string", "description": "Command line to execute. Use && to chain commands that must all succeed, ; to chain commands where failures are acceptable. Quote paths with spaces." }
+                    "command": { "type": "string", "description": "Command line to execute. Use && to chain commands that must all succeed, ; to chain commands where failures are acceptable. Quote paths with spaces." },
+                    "timeout_secs": { "type": "integer", "minimum": 1, "default": 300, "description": "Timeout in seconds. Default 300." }
                 },
                 "required": ["command"],
                 "additionalProperties": false
@@ -217,11 +218,12 @@ fn tool_defs() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "python_command",
-            description: "Run Python code in the current workspace and return stdout/stderr. Use this for exact file inspection, small scripts, and deterministic local analysis. Timeout is 300 seconds.".to_string(),
+            description: "Run Python code in the current workspace and return stdout/stderr. Use this for exact file inspection, small scripts, and deterministic local analysis. Default timeout is 300 seconds; pass `timeout_secs` to override.".to_string(),
             schema: json!({
                 "type": "object",
                 "properties": {
-                    "code": { "type": "string", "description": "Python source code to execute." }
+                    "code": { "type": "string", "description": "Python source code to execute." },
+                    "timeout_secs": { "type": "integer", "minimum": 1, "default": 300, "description": "Timeout in seconds. Default 300." }
                 },
                 "required": ["code"],
                 "additionalProperties": false
@@ -538,12 +540,13 @@ async fn run_command_streaming(
         return Err(anyhow!("command is empty"));
     }
 
+    let timeout_secs = cmd_args.timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS);
     let output = tokio::time::timeout(
-        Duration::from_secs(COMMAND_TIMEOUT_SECS),
-        run_shell_streaming(&cmd_args.command, cwd, tx),
+        Duration::from_secs(timeout_secs),
+        run_shell_streaming(&cmd_args.command, cwd, tx, timeout_secs),
     )
     .await
-    .map_err(|_| anyhow!("command timed out after {COMMAND_TIMEOUT_SECS}s"))??;
+    .map_err(|_| anyhow!("command timed out after {timeout_secs}s"))??;
 
     Ok(truncate(output, COMMAND_OUTPUT_LIMIT))
 }
@@ -557,12 +560,13 @@ async fn run_python_streaming(
     if py_args.code.trim().is_empty() {
         return Err(anyhow!("python code is empty"));
     }
+    let timeout_secs = py_args.timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS);
     let output = tokio::time::timeout(
-        Duration::from_secs(COMMAND_TIMEOUT_SECS),
-        run_python_streaming_inner(&py_args.code, cwd, tx),
+        Duration::from_secs(timeout_secs),
+        run_python_streaming_inner(&py_args.code, cwd, tx, timeout_secs),
     )
     .await
-    .map_err(|_| anyhow!("python command timed out after {COMMAND_TIMEOUT_SECS}s"))??;
+    .map_err(|_| anyhow!("python command timed out after {timeout_secs}s"))??;
 
     Ok(json!({
         "kind": "python_command_result",
@@ -576,6 +580,7 @@ async fn run_shell_streaming(
     command: &str,
     cwd: &Path,
     tx: UnboundedSender<AppMsg>,
+    timeout_secs: u64,
 ) -> Result<String> {
     #[cfg(windows)]
     {
@@ -590,6 +595,7 @@ $env:PYTHONIOENCODING='utf-8'; ";
             &["-NoLogo", "-NoProfile", "-Command", &full_cmd],
             cwd,
             tx,
+            timeout_secs,
         )
         .await
     }
@@ -597,7 +603,7 @@ $env:PYTHONIOENCODING='utf-8'; ";
     #[cfg(not(windows))]
     {
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "sh".to_string());
-        run_shell_streaming_impl(&shell, &["-lc", command], cwd, tx).await
+        run_shell_streaming_impl(&shell, &["-lc", command], cwd, tx, timeout_secs).await
     }
 }
 
@@ -605,23 +611,24 @@ async fn run_python_streaming_inner(
     code: &str,
     cwd: &Path,
     tx: UnboundedSender<AppMsg>,
+    timeout_secs: u64,
 ) -> Result<String> {
     #[cfg(windows)]
     {
-        match run_shell_streaming_impl("python", &["-X", "utf8", "-c", code], cwd, tx.clone()).await
+        match run_shell_streaming_impl("python", &["-X", "utf8", "-c", code], cwd, tx.clone(), timeout_secs).await
         {
             Ok(output) => Ok(output),
             Err(_) => {
-                run_shell_streaming_impl("py", &["-3", "-X", "utf8", "-c", code], cwd, tx).await
+                run_shell_streaming_impl("py", &["-3", "-X", "utf8", "-c", code], cwd, tx, timeout_secs).await
             }
         }
     }
 
     #[cfg(not(windows))]
     {
-        match run_shell_streaming_impl("python3", &["-c", code], cwd, tx.clone()).await {
+        match run_shell_streaming_impl("python3", &["-c", code], cwd, tx.clone(), timeout_secs).await {
             Ok(output) => Ok(output),
-            Err(_) => run_shell_streaming_impl("python", &["-c", code], cwd, tx).await,
+            Err(_) => run_shell_streaming_impl("python", &["-c", code], cwd, tx, timeout_secs).await,
         }
     }
 }
@@ -634,6 +641,7 @@ async fn run_shell_streaming_impl(
     args: &[&str],
     cwd: &Path,
     tx: UnboundedSender<AppMsg>,
+    timeout_secs: u64,
 ) -> Result<String> {
     use std::process::Stdio;
     use tokio::io::AsyncBufReadExt;
@@ -715,7 +723,7 @@ async fn run_shell_streaming_impl(
             .map(|c| c.to_string())
             .unwrap_or_else(|| "terminated".to_string()),
         started.elapsed().as_secs_f64(),
-        COMMAND_TIMEOUT_SECS,
+        timeout_secs,
         stdout,
         stderr
     ))
@@ -743,11 +751,15 @@ struct WriteArgs {
 #[derive(Deserialize)]
 struct CommandArgs {
     command: String,
+    #[serde(default)]
+    timeout_secs: Option<u64>,
 }
 
 #[derive(Deserialize)]
 struct PythonArgs {
     code: String,
+    #[serde(default)]
+    timeout_secs: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -1334,12 +1346,13 @@ async fn run_command(args: &str, cwd: &Path) -> Result<String> {
         return Err(anyhow!("command is empty"));
     }
 
+    let timeout_secs = args.timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS);
     let output = tokio::time::timeout(
-        Duration::from_secs(COMMAND_TIMEOUT_SECS),
-        run_shell_command(&args.command, cwd),
+        Duration::from_secs(timeout_secs),
+        run_shell_command(&args.command, cwd, timeout_secs),
     )
     .await
-    .map_err(|_| anyhow!("command timed out after {COMMAND_TIMEOUT_SECS}s"))??;
+    .map_err(|_| anyhow!("command timed out after {timeout_secs}s"))??;
 
     Ok(truncate(output, COMMAND_OUTPUT_LIMIT))
 }
@@ -1349,12 +1362,13 @@ async fn run_python_command(args: &str, cwd: &Path) -> Result<String> {
     if args.code.trim().is_empty() {
         return Err(anyhow!("python code is empty"));
     }
+    let timeout_secs = args.timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS);
     let output = tokio::time::timeout(
-        Duration::from_secs(COMMAND_TIMEOUT_SECS),
-        run_python(&args.code, cwd),
+        Duration::from_secs(timeout_secs),
+        run_python(&args.code, cwd, timeout_secs),
     )
     .await
-    .map_err(|_| anyhow!("python command timed out after {COMMAND_TIMEOUT_SECS}s"))??;
+    .map_err(|_| anyhow!("python command timed out after {timeout_secs}s"))??;
     Ok(json!({
         "kind": "python_command_result",
         "code": args.code,
@@ -1363,25 +1377,25 @@ async fn run_python_command(args: &str, cwd: &Path) -> Result<String> {
     .to_string())
 }
 
-async fn run_python(code: &str, cwd: &Path) -> Result<String> {
+async fn run_python(code: &str, cwd: &Path, timeout_secs: u64) -> Result<String> {
     #[cfg(windows)]
     {
-        match run_shell("python", &["-X", "utf8", "-c", code], cwd).await {
+        match run_shell("python", &["-X", "utf8", "-c", code], cwd, timeout_secs).await {
             Ok(output) => Ok(output),
-            Err(_) => run_shell("py", &["-3", "-X", "utf8", "-c", code], cwd).await,
+            Err(_) => run_shell("py", &["-3", "-X", "utf8", "-c", code], cwd, timeout_secs).await,
         }
     }
 
     #[cfg(not(windows))]
     {
-        match run_shell("python3", &["-c", code], cwd).await {
+        match run_shell("python3", &["-c", code], cwd, timeout_secs).await {
             Ok(output) => Ok(output),
-            Err(_) => run_shell("python", &["-c", code], cwd).await,
+            Err(_) => run_shell("python", &["-c", code], cwd, timeout_secs).await,
         }
     }
 }
 
-async fn run_shell_command(command: &str, cwd: &Path) -> Result<String> {
+async fn run_shell_command(command: &str, cwd: &Path, timeout_secs: u64) -> Result<String> {
     #[cfg(windows)]
     {
         let utf8_preamble = "\
@@ -1394,6 +1408,7 @@ $env:PYTHONIOENCODING='utf-8'; ";
             shell,
             &["-NoLogo", "-NoProfile", "-Command", &full_cmd],
             cwd,
+            timeout_secs,
         )
         .await;
     }
@@ -1401,7 +1416,7 @@ $env:PYTHONIOENCODING='utf-8'; ";
     #[cfg(not(windows))]
     {
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "sh".to_string());
-        run_shell(&shell, &["-lc", command], cwd).await
+        run_shell(&shell, &["-lc", command], cwd, timeout_secs).await
     }
 }
 
@@ -1471,7 +1486,7 @@ fn windows_shell_program() -> &'static str {
     })
 }
 
-async fn run_shell(program: &str, args: &[&str], cwd: &Path) -> Result<String> {
+async fn run_shell(program: &str, args: &[&str], cwd: &Path, timeout_secs: u64) -> Result<String> {
     let started = Instant::now();
     let output = tokio::process::Command::new(program)
         .args(args)
@@ -1492,7 +1507,7 @@ async fn run_shell(program: &str, args: &[&str], cwd: &Path) -> Result<String> {
             .map(|c| c.to_string())
             .unwrap_or_else(|| "terminated".to_string()),
         started.elapsed().as_secs_f64(),
-        COMMAND_TIMEOUT_SECS,
+        timeout_secs,
         stdout,
         stderr
     ))

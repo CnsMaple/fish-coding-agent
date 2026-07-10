@@ -1535,33 +1535,19 @@ fn build_shell_command_rows(
         } else {
             rows.extend(body_rows);
         }
-        if !footer.is_empty() {
-            rows.extend(box_row_lines(footer, width, bg));
-        }
     } else {
         let (preview, skipped) = collapsed_output_lines(output, preview_lines, width, bg);
         rows.extend(preview);
-        match (skipped, footer.is_empty()) {
-            (n, false) if n > 0 => {
-                // Ctrl+O hint on the left, footer on the right — same row.
-                rows.push(box_row_line_two(
-                    &format!("[Ctrl+O to collapse/expand {n} lines]"),
-                    footer,
-                    width,
-                    bg,
-                ));
-            }
-            (0, false) => {
-                rows.extend(box_row_lines(footer, width, bg));
-            }
-            (n, true) if n > 0 => {
-                rows.push(ctrl_o_hint_line(n, width, bg));
-            }
-            _ => {}
+        if skipped > 0 {
+            rows.push(ctrl_o_hint_line(skipped, width, bg));
         }
     }
 
-    rows.push(border_line(width, bg));
+    if footer.is_empty() {
+        rows.push(border_line(width, bg));
+    } else {
+        rows.push(border_line_with_right_label(width, footer, bg));
+    }
     rows
 }
 
@@ -1677,6 +1663,7 @@ fn ctrl_o_hint_line(skipped: usize, width: usize, bg: Color) -> Line<'static> {
 /// like a `box_row_line`. When the chunks would overflow the
 /// available inner width, both are shown full-width stacked on
 /// separate rows by the caller.
+#[allow(dead_code)]
 fn box_row_line_two(left: &str, right: &str, width: usize, bg: Color) -> Line<'static> {
     let max_content = width.saturating_sub(4);
     let right = strip_control_chars(right);
@@ -1955,9 +1942,10 @@ fn build_python_command_rows(
         }
     }
     if !footer.is_empty() {
-        rows.extend(box_row_lines(&footer, width, bg));
+        rows.push(border_line_with_right_label(width, &footer, bg));
+    } else {
+        rows.push(border_line(width, bg));
     }
-    rows.push(border_line(width, bg));
     Some(rows)
 }
 
@@ -2265,7 +2253,14 @@ fn command_display_content(content: &str) -> (String, String) {
         output.push_str(&format!("[exit_code: {exit_code}]"));
     }
 
-    (output, format!("[Wall: {wall}s | Timeout: {timeout}s]"))
+    (output, format_wall_timeout_label(wall, timeout))
+}
+
+fn format_wall_timeout_label(wall: &str, timeout: &str) -> String {
+    let wall_secs = wall.parse::<f64>().map(|f| f.round() as u64).unwrap_or(0);
+    let wall_dur = std::time::Duration::from_secs(wall_secs);
+    let timeout_dur = std::time::Duration::from_secs(timeout.parse::<u64>().unwrap_or(300));
+    format!("[{}|{}]", format_duration(wall_dur), format_duration(timeout_dur))
 }
 
 fn value_after_prefix<'a>(content: &'a str, prefix: &str) -> Option<&'a str> {
@@ -2596,7 +2591,7 @@ mod tool_block_count_tests {
     //! phantom "role prefix" line that is never rendered. For
     //! messages with one or more blocks the count was off by 1 per
     //! block — typically cutting the bottom border of a long
-    //! `write_file` diff (or the last `Wall: ...` row of a long shell
+    //! `write_file` diff (or the last `[wall|timeout]` row of a long shell
     //! command) off the viewport.
 
     use super::*;
