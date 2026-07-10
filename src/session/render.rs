@@ -1006,14 +1006,16 @@ fn build_thinking_block_rows(
             // keep only the last `preview_lines` body rows + a Ctrl+O
             // hint when content overflows. No padding when content is
             // shorter — the collapsed height matches the content.
+            let mut body: Vec<Line<'static>> = Vec::new();
             for line in md_lines.iter() {
-                push_md_line(line, &mut rows);
+                push_md_line(line, &mut body);
             }
-            if rows.len() > preview_lines {
-                let skip = rows.len() - preview_lines;
-                rows = rows.split_off(skip);
-                rows.push(ctrl_o_hint_line(skip, width, bg));
+            if body.len() > preview_lines {
+                let skip = body.len() - preview_lines;
+                body = body.split_off(skip);
+                body.push(ctrl_o_hint_line(skip, width, bg));
             }
+            rows.extend(body);
         }
     }
     let time_label = duration
