@@ -101,12 +101,14 @@ impl InputState {
     }
 
     pub fn insert_char(&mut self, c: char) {
+        self.snap_cursor();
         let idx = self.cursor;
         self.buffer.insert(idx, c);
         self.cursor = idx + c.len_utf8();
     }
 
     pub fn insert_str(&mut self, s: &str) {
+        self.snap_cursor();
         let idx = self.cursor;
         self.buffer.insert_str(idx, s);
         self.cursor = idx + s.len();
@@ -263,6 +265,20 @@ impl InputState {
             }
         }
         false
+    }
+
+    /// Snap the cursor to a valid char boundary, clamped to
+    /// `[0, buffer.len()]`. If the cursor is already valid, it is
+    /// left unchanged; otherwise it is moved backward to the
+    /// nearest preceding char boundary.
+    pub fn snap_cursor(&mut self) {
+        if self.cursor > self.buffer.len() {
+            self.cursor = self.buffer.len();
+            return;
+        }
+        while self.cursor > 0 && !self.buffer.is_char_boundary(self.cursor) {
+            self.cursor -= 1;
+        }
     }
 
     /// Extend selection to the left by one character (Shift+Left).

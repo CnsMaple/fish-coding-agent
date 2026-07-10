@@ -2221,6 +2221,10 @@ fn renumber_image_markers(app: &mut App) {
     let mut new_buf = buf.clone();
     let mut block_idx = 1usize;
     let mut search_start = 0usize;
+    // Track cumulative byte delta for markers that appear before the
+    // cursor, so we can adjust the cursor after the buffer is replaced.
+    let cursor = app.input.cursor;
+    let mut delta_before_cursor = 0i64;
     loop {
         let remaining = &new_buf[search_start..];
         let Some(marker_start) = remaining.find("[image #") else {
@@ -2238,11 +2242,29 @@ fn renumber_image_markers(app: &mut App) {
         }
         let old_len = 8 + bracket_end + 1; // "[image #N]" length
         let new_marker = format!("[image #{block_idx}]");
+        let new_len = new_marker.len();
+        if abs_start < cursor {
+            delta_before_cursor += (new_len as i64) - (old_len as i64);
+        }
         new_buf.replace_range(abs_start..abs_start + old_len, &new_marker);
-        search_start = abs_start + new_marker.len();
+        search_start = abs_start + new_len;
         block_idx += 1;
     }
     app.input.buffer = new_buf;
+    if delta_before_cursor != 0 {
+        let adjusted = (cursor as i64 + delta_before_cursor).max(0) as usize;
+        // Clamp to buffer len and snap to nearest char boundary.
+        let adjusted = adjusted.min(app.input.buffer.len());
+        if !app.input.buffer.is_char_boundary(adjusted) {
+            let mut p = adjusted;
+            while p > 0 && !app.input.buffer.is_char_boundary(p) {
+                p -= 1;
+            }
+            app.input.cursor = p;
+        } else {
+            app.input.cursor = adjusted;
+        }
+    }
 }
 
 /// Replace `[image #K]` markers in `raw` with the corresponding
@@ -3063,6 +3085,7 @@ async fn handle_plan_key(
                 prompt.push_str("\n\nAdditional args from user:\n");
                 prompt.push_str(&extra);
                 app.input.buffer.clear();
+                app.input.cursor = 0;
             }
             // send_chat -> send_message pushes the user message into
             // the session; do NOT push it here too, otherwise the
