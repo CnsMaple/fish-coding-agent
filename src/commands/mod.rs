@@ -813,6 +813,20 @@ Ask the user a clarifying question. Use when the task is ambiguous, a tradeoff n
 a decision, or you're blocked on missing information. Batch independent questions into \
 one call. The user's answer appears as the next chat message.
 
+### todowrite(todos)
+
+Create and maintain a structured task list for the current coding session. Tracks \
+progress, organizes multi-step work, and surfaces status to the user.
+
+Mandatory usage rules:
+1. Every turn: before finishing your response, call `todowrite` once with the full \
+current list so the user sees up-to-date status. Do not skip a turn.
+2. Update on completion: the moment a single todo item is done (or its status \
+changes), immediately call `todowrite` with the updated full list.
+3. Clear when all done: when every item is `completed`, call `todowrite` with an \
+empty `todos` array `[]` to clear the list; the todo tab closes automatically.
+4. Always send ALL items (existing + new/changed) in each call — never send a diff.
+
 ### skill(name)
 
 Load a skill's instructions. Skills provide specialized workflows and domain knowledge.
