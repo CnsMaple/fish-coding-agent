@@ -38,6 +38,7 @@ pub(super) struct ReadArgs {
 #[derive(Deserialize)]
 pub(super) struct WriteArgs {
     pub(super) path: String,
+    #[serde(alias = "newString")]
     pub(super) content: Option<String>,
     #[serde(rename = "oldString")]
     pub(super) old_string: Option<String>,

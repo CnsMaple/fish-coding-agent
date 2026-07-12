@@ -1082,9 +1082,53 @@ impl Session {
         let mut n: u32 = 0;
         let mut offsets = Vec::with_capacity(self.messages.len() + 1);
         offsets.push(0); // line_offsets[0] = 0
-        for m in &mut self.messages {
-            // Content lines (post-markdown rendered count, cached by width).
-            let content_lines = render_cached_content_lines(m, width);
+
+        // Snapshot valid `content_line_count` values from the render
+        // cache (`message_lines_cache`) before borrowing `&mut
+        // self.messages`. When a cache entry is valid (same
+        // content_version, width, display_cursor, content_len), the
+        // `build_message_lines` call that wrote it already computed
+        // the content-only line count — so we can skip the full
+        // markdown re-parse that `render_cached_content_lines` would
+        // otherwise do. This eliminates the dominant streaming-time
+        // CPU hotspot: each frame no longer parses the growing
+        // message twice (once for counting, once for rendering).
+        let cached_content_counts: Vec<Option<u32>> = {
+            let lru = self.message_lines_cache.lock().unwrap();
+            self.messages
+                .iter()
+                .enumerate()
+                .map(|(i, m)| {
+                    lru.get(&i).and_then(|c| {
+                        if c.content_version == m.content_version
+                            && c.width == width
+                            && c.display_cursor == m.display_cursor
+                            && c.content_len == m.content.len()
+                        {
+                            Some(c.content_line_count)
+                        } else {
+                            None
+                        }
+                    })
+                })
+                .collect()
+        };
+
+        for (msg_idx, m) in self.messages.iter_mut().enumerate() {
+            // Fast path: use the render cache's content_line_count if
+            // the entry is valid. Write it to `cached_content_line_count`
+            // so `read_cached_content_count_at` (used by `ui::render`
+            // for toggle-row tracking) also hits the fast path.
+            let content_lines = if let Some(count) = cached_content_counts[msg_idx] {
+                m.cached_content_line_count = Some(crate::session::CachedLineCount {
+                    width,
+                    count,
+                    content_len: m.content.len(),
+                });
+                count
+            } else {
+                render_cached_content_lines(m, width)
+            };
             n += content_lines;
 
             // Attachment blocks.

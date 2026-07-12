@@ -16,12 +16,10 @@ pub(super) async fn write_file(args: &str, cwd: &Path) -> Result<String> {
             return Err(anyhow!("oldString must not be empty"));
         }
         let original = tokio::fs::read_to_string(&path).await?;
-        let content = match args.content.as_deref() {
-            Some(c) => c,
-            None => return Err(anyhow!(
-                "content is required when oldString is provided (got null)"
-            )),
-        };
+        // When oldString is provided, a missing/null content means
+        // "delete the matched text" — treat it as an empty string
+        // instead of erroring.
+        let content = args.content.as_deref().unwrap_or("");
         let updated = replace_string(
             &original,
             old_string,

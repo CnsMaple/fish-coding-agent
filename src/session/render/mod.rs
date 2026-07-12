@@ -52,6 +52,12 @@ pub struct CachedMessageLines {
     /// cache hit. The viewport renderer slices the Arc instead of
     /// copying the underlying Vec.
     pub lines: Arc<Vec<Line<'static>>>,
+    /// Number of content-only display lines (excluding thinking/tool
+    /// block rows, spacers, user-bg padding, leading gap). Written by
+    /// `build_message_lines` so `render_cached_content_lines` can
+    /// skip the full markdown re-parse that `content_line_count_segmented`
+    /// would otherwise do.
+    pub content_line_count: u32,
 }
 
 pub fn render(
@@ -98,7 +104,7 @@ pub fn render(
         vec![]
     };
 
-    let p = Paragraph::new(visible.clone()).style(Style::reset());
+    let p = Paragraph::new(visible).style(Style::reset());
     p.render(area, buf);
 }
 
@@ -244,6 +250,7 @@ pub fn build_message_lines(
     }
 
     let mut msg_lines: Vec<Line<'static>> = Vec::new();
+    let mut content_line_count: u32 = 0;
     if let Some(skill_ref) = &m.skill_ref {
         let rows = build_skill_block_rows(skill_ref, width);
         push_block_rows(&mut msg_lines, rows);
@@ -417,11 +424,13 @@ pub fn build_message_lines(
 
         // Render content before this item
         if offset > cursor {
+            let before = msg_lines.len();
             render_content_segment(
                 &strip_legacy_markers(&raw[cursor..offset]),
                 width,
                 &mut msg_lines,
             );
+            content_line_count += (msg_lines.len() - before) as u32;
             cursor = offset;
         }
 
@@ -477,7 +486,9 @@ pub fn build_message_lines(
         }
     }
     // Render remaining content
+    let before = msg_lines.len();
     render_content_segment(&strip_legacy_markers(&raw[cursor..]), width, &mut msg_lines);
+    content_line_count += (msg_lines.len() - before) as u32;
 
     if m.role == Role::User {
         let user_bg = active_colors().user_bg;
@@ -523,6 +534,7 @@ pub fn build_message_lines(
                 display_cursor: m.display_cursor,
                 content_len: m.content.len(),
                 lines: Arc::clone(&lines),
+                content_line_count,
             },
         );
         lines

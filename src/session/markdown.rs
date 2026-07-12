@@ -9,8 +9,33 @@ use syntect::highlighting::{FontStyle, Style as SyntectStyle, ThemeSet};
 use syntect::parsing::SyntaxSet;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-/// Inline style applier: takes raw text and returns a styled `Span`.
-type InlineStyleFn = Box<dyn Fn(&str) -> Span<'static>>;
+/// Inline style kind pushed on the style stack. Using an enum instead
+/// of `Box<dyn Fn>` avoids a heap allocation on every `Start(Tag::*)`
+/// event — during streaming this fires for every bold/italic/heading
+/// token in the growing message, 60 times per second.
+#[derive(Clone, Copy)]
+enum InlineStyle {
+    Bold,
+    Italic,
+    Underlined,
+    Strikethrough,
+}
+
+impl InlineStyle {
+    /// The full style for this inline style kind, mirroring the
+    /// previous `Box<dyn Fn>` closures exactly (including `Theme::base()`
+    /// and any combined modifiers like DIM+ITALIC for emphasis).
+    fn style(self) -> Style {
+        match self {
+            InlineStyle::Bold => Theme::bold(),
+            InlineStyle::Italic => Theme::dim().add_modifier(Modifier::ITALIC),
+            InlineStyle::Underlined => Theme::underlined(),
+            InlineStyle::Strikethrough => {
+                Theme::dim().add_modifier(Modifier::CROSSED_OUT)
+            }
+        }
+    }
+}
 
 /// Raw-Markdown table → formatted table block renderer.
 /// Works on any pipe-delimited block regardless of line endings,
@@ -47,6 +72,27 @@ pub fn render(text: &str) -> Vec<Line<'static>> {
 }
 
 pub fn render_with_width(text: &str, width: usize) -> Vec<Line<'static>> {
+    // Fast path: if the text has no \r, no zero-width/invisible chars,
+    // and no table-like lines, skip the cleaning + preprocess pass
+    // entirely and parse the original string directly. This avoids
+    // a full String allocation + char-by-char filter on every call,
+    // which matters during streaming (60 fps re-renders).
+    let has_cr = text.contains('\r');
+    let has_invisible = text.contains(|c: char| {
+        matches!(
+            c,
+            '\u{200B}' | '\u{200C}' | '\u{200D}' | '\u{FEFF}'
+                | '\u{00AD}' | '\u{2060}' | '\u{2061}' | '\u{2062}'
+                | '\u{2063}' | '\u{2064}'
+        )
+    });
+    if !has_cr && !has_invisible && !text.lines().any(|l| {
+        let t = l.trim();
+        t.starts_with('|') && t.ends_with('|')
+    }) {
+        return MdRenderer::new(width).render(text);
+    }
+
     let mut cleaned = text.to_string();
     // 1. Normalize line endings.
     if cleaned.contains('\r') {
@@ -80,7 +126,7 @@ struct MdRenderer {
     out: Vec<Line<'static>>,
     /// Inline style stack — pushed on `Start(Tag::Emphasis)` etc., popped
     /// on `End`.
-    style_stack: Vec<InlineStyleFn>,
+    style_stack: Vec<InlineStyle>,
     table: Option<TableState>,
     code_block: Option<CodeBlockState>,
     list_stack: Vec<ListState>,
@@ -135,15 +181,13 @@ impl MdRenderer {
 
     fn text_span(&self, t: &str) -> Span<'static> {
         if self.style_stack.is_empty() {
-            Span::raw(t.to_string())
-        } else {
-            let s = t.to_string();
-            let mut base = Span::raw(s.clone());
-            for f in &self.style_stack {
-                base = f(&s);
-            }
-            base
+            return Span::raw(t.to_string());
         }
+        let mut style = Style::default();
+        for &s in &self.style_stack {
+            style = style.patch(s.style());
+        }
+        Span::styled(t.to_string(), style)
     }
 
     fn push_text(&mut self, t: &str) {
@@ -320,25 +364,16 @@ impl MdRenderer {
                 Event::SoftBreak | Event::HardBreak => self.push_table_break(),
                 Event::Start(tag) => match tag {
                     Tag::Heading { .. } => {
-                        self.style_stack
-                            .push(Box::new(|s| Span::styled(s.to_string(), Theme::bold())));
+                        self.style_stack.push(InlineStyle::Bold);
                     }
                     Tag::Emphasis => {
-                        self.style_stack.push(Box::new(|s| {
-                            Span::styled(
-                                s.to_string(),
-                                Theme::dim().add_modifier(ratatui::style::Modifier::ITALIC),
-                            )
-                        }));
+                        self.style_stack.push(InlineStyle::Italic);
                     }
                     Tag::Strong => {
-                        self.style_stack
-                            .push(Box::new(|s| Span::styled(s.to_string(), Theme::bold())));
+                        self.style_stack.push(InlineStyle::Bold);
                     }
                     Tag::Link { .. } => {
-                        self.style_stack.push(Box::new(|s| {
-                            Span::styled(s.to_string(), Theme::underlined())
-                        }));
+                        self.style_stack.push(InlineStyle::Underlined);
                     }
                     Tag::BlockQuote(_) => {
                         self.flush_line();
@@ -393,12 +428,7 @@ impl MdRenderer {
                         self.in_table_cell = true;
                     }
                     Tag::Strikethrough => {
-                        self.style_stack.push(Box::new(|s| {
-                            Span::styled(
-                                s.to_string(),
-                                Theme::dim().add_modifier(Modifier::CROSSED_OUT),
-                            )
-                        }));
+                        self.style_stack.push(InlineStyle::Strikethrough);
                     }
                     _ => {}
                 },
