@@ -266,7 +266,7 @@ pub(super) fn tool_defs() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "todowrite",
-            description: "Create and maintain a structured task list for the current coding session. Tracks progress, organizes multi-step work, and surfaces status to the user.".to_string(),
+            description: "Create and maintain a structured task list for the current coding session. Tracks progress, organizes multi-step work, and surfaces status to the user.\n\nMandatory usage rules:\n1. Every turn: before finishing your response, call `todowrite` once with the full current list so the user sees up-to-date status. Do not skip a turn.\n2. Update on completion: the moment a single todo item is done (or its status changes), immediately call `todowrite` with the updated full list.\n3. Clear when all done: when every item is `completed`, call `todowrite` with an empty `todos` array `[]` to clear the list; the todo tab closes automatically.\n4. Always send ALL items (existing + new/changed) in each call — never send a diff.".to_string(),
             schema: json!({
                 "type": "object",
                 "properties": {
@@ -280,7 +280,7 @@ pub(super) fn tool_defs() -> Vec<ToolDef> {
                             },
                             "required": ["content", "status"]
                         },
-                        "description": "Full list of todo items to replace the current task list. Each call must send ALL items (existing + new/changed), not just the diff."
+                        "description": "Full list of todo items to replace the current task list. Each call must send ALL items (existing + new/changed), not just the diff. Pass an empty array to clear the list when all tasks are completed."
                     }
                 },
                 "required": ["todos"],

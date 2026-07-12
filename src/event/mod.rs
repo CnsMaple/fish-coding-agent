@@ -613,6 +613,7 @@ fn handle_todowrite_result(app: &mut App, content: &str) {
     if kind != "todowrite" {
         return;
     }
+    let action = value.get("action").and_then(|v| v.as_str()).unwrap_or("");
     let Some(todos) = value.get("todos").and_then(|v| v.as_array()) else {
         return;
     };
@@ -630,7 +631,11 @@ fn handle_todowrite_result(app: &mut App, content: &str) {
         .collect();
     app.session.todo_items = new_items;
     app.session.invalidate_layout_cache();
-    app.open_todo_tab();
+    if app.session.todo_items.is_empty() || action == "clear" {
+        app.close_todo_tab();
+    } else {
+        app.open_todo_tab();
+    }
 }
 
 /// Refresh the MCP status summary displayed in the status bar.
@@ -1983,6 +1988,9 @@ pub fn cycle_sidebar_forward(app: &mut App) {
 fn submit_input(app: &mut App) {
     // Hide the agents splash area once the user sends input.
     app.agents_visible = false;
+    // Sending a prompt always returns focus to the input — never
+    // let the function panel steal focus on submit.
+    app.focus_target = crate::function::FocusTarget::Input;
     // Snap the chat viewport to the tail before we push any new
     // messages. If the user scrolled up to look at older content,
     // we want their just-submitted message to be visible (so they

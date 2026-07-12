@@ -873,6 +873,23 @@ impl App {
         }
     }
 
+    /// Remove the todo tab (if present) and hide the panel when no
+    /// other non-trivial tabs remain. Used when the todo list is cleared.
+    pub fn close_todo_tab(&mut self) {
+        let todo_idx = self
+            .function
+            .tabs
+            .iter()
+            .position(|t| matches!(t, SidebarTab::Todo(_)));
+        if let Some(idx) = todo_idx {
+            self.function.tabs.remove(idx);
+            if self.function.active >= self.function.tabs.len() {
+                self.function.active = self.function.tabs.len().saturating_sub(1);
+            }
+        }
+        self.maybe_hide_panel();
+    }
+
     /// Append one question's merged-list lines to the pending ask
     /// snapshot. The snapshot is consumed by `flush_ask_snapshot`
     /// when the assistant turn finishes (`ChatDone`).
@@ -975,10 +992,9 @@ impl App {
         self.pending_events = 0;
     }
 
-    /// Show the function panel and move focus to it.
+    /// Show the function panel without stealing focus from the input.
     pub fn show_panel(&mut self) {
         self.function_visible = true;
-        self.focus_target = FocusTarget::FunctionPanel;
     }
 
     /// Ensure the Completion sidebar tab reflects the current input buffer.
