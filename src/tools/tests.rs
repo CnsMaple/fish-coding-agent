@@ -102,6 +102,34 @@ async fn build_mode_allows_write_file() {
 }
 
 #[tokio::test]
+async fn write_file_old_string_without_content_errors() {
+    let dir = std::env::temp_dir().join("fish-coding-agent-no-content-test");
+    let _ = std::fs::create_dir_all(&dir);
+    let target = dir.join("no_content.txt");
+    std::fs::write(&target, "line1
+line2
+").unwrap();
+    // oldString provided but content is missing (null) — should error
+    let args = serde_json::json!({
+        "path": "no_content.txt",
+        "oldString": "line1
+"
+    }).to_string();
+    let result =
+        execute_tool_with_agent(crate::permission::Agent::Build, "edit", &args, &dir)
+            .await;
+    let v: serde_json::Value = serde_json::from_str(&result).unwrap();
+    assert_eq!(v.get("ok").and_then(|s| s.as_bool()), Some(false));
+    let err = v.get("error").and_then(|s| s.as_str()).unwrap_or("");
+    assert!(err.contains("content is required"), "got: {err}");
+    // File must be untouched
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "line1
+line2
+");
+    let _ = std::fs::remove_file(&target);
+}
+
+#[tokio::test]
 async fn plan_tool_payload_contains_kind() {
     let result = execute_tool_with_agent(
         crate::permission::Agent::Plan,

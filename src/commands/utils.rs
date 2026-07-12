@@ -19,22 +19,22 @@ pub(super) fn is_doom_loop(history: &[(String, String)], name: &str, args: &str)
 /// Strips the `{"ok":true,"result":"..."}` wrapper to show just the inner content.
 pub(super) fn parse_tool_result_display(result: &str) -> (String, bool) {
     if let Ok(val) = serde_json::from_str::<serde_json::Value>(result) {
-        if val.get("ok").and_then(|v| v.as_bool()) == Some(true) {
-            (
+        match val.get("ok").and_then(|v| v.as_bool()) {
+            Some(true) => (
                 val.get("result")
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string(),
                 false,
-            )
-        } else {
-            (
+            ),
+            Some(false) => (
                 val.get("error")
                     .and_then(|v| v.as_str())
                     .unwrap_or(result)
                     .to_string(),
                 true,
-            )
+            ),
+            None => (result.to_string(), false),
         }
     } else {
         (result.to_string(), false)
