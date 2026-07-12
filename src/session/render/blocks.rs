@@ -308,6 +308,17 @@ pub(super) fn build_tool_block_rows(
         }
     } else if tool.name == "ask" {
         vec![]
+    } else if tool.name == "plan" || tool.name == "sub_agent" {
+        let (output, footer) = tool_display_content(tool);
+        build_markdown_block_rows(
+            &tool.title,
+            &output,
+            &footer,
+            visible,
+            preview_lines,
+            width,
+            bg,
+        )
     } else {
         let (output, footer) = tool_display_content(tool);
         let title_highlighted = tool.name == "shell_command" || tool.name == "command";
@@ -712,6 +723,63 @@ pub(super) fn build_output_block_rows(
         if skipped > 0 {
             rows.push(ctrl_o_hint_line(skipped, width, bg));
         }
+    }
+
+    rows.push(border_line(width, bg));
+    rows
+}
+
+/// Render a tool result block whose body is Markdown (plan, sub_agent).
+/// Mirrors `build_output_block_rows` but parses the body through the
+/// Markdown renderer so headings, lists, code blocks, tables, etc.
+/// are styled the same way as assistant message content and thinking
+/// blocks.
+#[allow(clippy::too_many_arguments)]
+fn build_markdown_block_rows(
+    title: &str,
+    body: &str,
+    footer: &str,
+    visible: bool,
+    preview_lines: usize,
+    width: usize,
+    bg: Color,
+) -> Vec<Line<'static>> {
+    let width = width.max(4);
+    let mut rows = Vec::new();
+    rows.push(border_with_label_line(width, title, bg));
+    let inner_w = width.saturating_sub(4).max(1);
+
+    let md_lines = crate::session::markdown::render_with_width(body, inner_w);
+    let mut body_rows: Vec<Line<'static>> = Vec::new();
+    for line in &md_lines {
+        if line.width() <= inner_w {
+            let spans = spans_with_bg(&line.spans, bg);
+            body_rows.push(box_row_line_spans(spans, width, bg));
+        } else {
+            let combined: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            for w in &wrap_line(&combined, inner_w) {
+                let spans = spans_with_bg(&[Span::raw(w.clone())], bg);
+                body_rows.push(box_row_line_spans(spans, width, bg));
+            }
+        }
+    }
+
+    if visible {
+        if body_rows.is_empty() {
+            rows.extend(box_row_lines("[no output]", width, bg));
+        } else {
+            rows.extend(body_rows);
+        }
+        if !footer.is_empty() {
+            rows.extend(box_row_lines(footer, width, bg));
+        }
+    } else {
+        if body_rows.len() > preview_lines {
+            let skip = body_rows.len() - preview_lines;
+            body_rows = body_rows.split_off(skip);
+            body_rows.push(ctrl_o_hint_line(skip, width, bg));
+        }
+        rows.extend(body_rows);
     }
 
     rows.push(border_line(width, bg));
