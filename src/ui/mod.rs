@@ -12,6 +12,8 @@ use unicode_width::UnicodeWidthStr;
 pub mod border_type;
 pub mod function_panel;
 pub mod picker_widget;
+pub mod tab_widget;
+pub mod trait_impls;
 
 /// Height of the standalone cwd line that sits below the input block.
 const CWD_HEIGHT: u16 = 1;
@@ -27,13 +29,15 @@ pub fn render(f: &mut Frame, app: &mut App) {
         constraints.push(Constraint::Length(agents_height));
     }
     constraints.push(Constraint::Min(0));
+
     if app.function_visible {
         let remaining = area.height.saturating_sub(input_height + CWD_HEIGHT + agents_height);
         let pct_height = (remaining as f64 * 0.20) as u16;
         let panel_height = app.function.tabs.get(app.function.active)
-            .map_or(4, |t| t.panel_height(pct_height));
+            .map_or(4, |t| t.panel_height(pct_height, app));
         constraints.push(Constraint::Length(panel_height));
     }
+
     constraints.push(Constraint::Length(input_height));
     constraints.push(Constraint::Length(CWD_HEIGHT));
     let chunks = Layout::default()

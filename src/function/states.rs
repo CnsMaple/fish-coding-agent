@@ -124,51 +124,178 @@ pub enum FocusTarget {
 }
 
 impl SidebarTab {
-    /// Minimum panel height (including borders) required for this tab's
-    /// content to render without clipping.
-    pub fn min_panel_height(&self) -> u16 {
+    /// Number of content lines this tab needs to display, given the
+    /// current app state. Used to compute a dynamic panel height that
+    /// shrinks to fit the content and expands up to the 20% cap.
+    pub fn content_lines(&self, app: &crate::function::App) -> usize {
         match self {
             Self::PastePreview(s) => {
-                if s.image.is_some() {
-                    5
-                } else if let Some(ref text) = s.text {
-                    let n = text.lines().count().min(5) as u16;
-                    (n + 1 + 2).min(8)
+                if s.image.is_some() { 2 }
+                else if let Some(ref text) = s.text { text.lines().count().min(5) }
+                else { 1 }
+            }
+            Self::Notifications => {
+                if app.notifications.searching {
+                    app.notifications.filtered_indices().len()
                 } else {
-                    4
+                    app.notifications.items.len()
                 }
             }
-            Self::Notifications => 5,
-            Self::Completion(_) => 3,
-            Self::Settings(_) => 5,
-            Self::ModelPicker(_) => 5,
-            Self::ProviderPicker(_) => 5,
-            Self::ThinkingPicker(_) => 4,
-            Self::TimelinePicker(_) => 5,
-            Self::SessionPicker(_) => 5,
-            Self::SessionRename(_) => 4,
-            Self::Plan(_) => 6,
-            Self::Ask(_) => 5,
-            Self::Todo(_) => 5,
-            Self::Hotkey => 3,
+            Self::Completion(s) => s.candidates.len(),
+            Self::Settings(s) => settings_body_lines(s, &app.config).len(),
+            Self::ModelPicker(s) => {
+                if s.fetching || s.fetch_error.is_some() || s.models.is_empty() {
+                    1
+                } else {
+                    s.filtered.len().max(1)
+                }
+            }
+            Self::ProviderPicker(s) => {
+                if s.entries.is_empty() || s.filtered.is_empty() { 1 } else { s.filtered.len() }
+            }
+            Self::ThinkingPicker(s) => {
+                if s.filtered.is_empty() { 1 } else { s.filtered.len() }
+            }
+            Self::TimelinePicker(s) => {
+                if s.entries.is_empty() || s.filtered.is_empty() { 1 } else { s.filtered.len() }
+            }
+            Self::SessionPicker(s) => {
+                if s.entries.is_empty() || s.filtered.is_empty() { 1 } else { s.filtered.len() }
+            }
+            Self::SessionRename(_) => 1,
+            Self::Plan(_) => 3,
+            Self::Ask(s) => {
+                use crate::function::AskPhase;
+                match s.phase {
+                    AskPhase::Asking => {
+                        let active = s.active.min(s.items.len().saturating_sub(1));
+                        s.items.get(active).map(|it| 1 + it.options.len() + 1).unwrap_or(1)
+                    }
+                    AskPhase::Reviewing => s.items.len() * 2,
+                }
+            }
+            Self::Todo(_) => app.session.todo_items.len().max(1),
+            Self::Hotkey => 17,
         }
     }
 
-    /// Actual panel height for this tab: for `PastePreview`, the exact
-    /// content height (capped at the percentage); for other tabs, the
-    /// percentage height (never below the minimum).
-    pub fn panel_height(&self, pct_height: u16) -> u16 {
+    /// True when the tab has a search/filter input row.
+    pub fn has_search(&self) -> bool {
+        matches!(
+            self,
+            Self::Notifications | Self::ModelPicker(_)
+            | Self::ProviderPicker(_)
+            | Self::ThinkingPicker(_)
+            | Self::TimelinePicker(_)
+            | Self::SessionPicker(_)
+        )
+    }
+
+    /// Footer hint text. Empty string means no hint row.
+    /// Tabs with dynamic hints return a placeholder " " so the
+    /// layout reserves a hint row; their `render_hint` override
+    /// draws the actual content.
+    pub fn hint(&self) -> &'static str {
         match self {
-            Self::PastePreview(s) => {
-                let content_lines = if s.image.is_some() { 2 }
-                    else if let Some(ref text) = s.text { text.lines().count().min(5) as u16 }
-                    else { 1 };
-                (content_lines + 1 + 2).min(pct_height)
-            }
-            _ => pct_height.max(self.min_panel_height()),
+            Self::Notifications => " ",
+            Self::ModelPicker(_) => " Enter: select | Ctrl+R: refresh | Ctrl+M: manual | Ctrl+E: edit | Esc: close ",
+            Self::ProviderPicker(_) => " Enter: pick | Up/Down: nav | type to filter | Ctrl+E: edit | Esc: close ",
+            Self::ThinkingPicker(_) => "",
+            Self::TimelinePicker(_) => " Enter: jump to message | Up/Down: nav | Ctrl+E: edit | Esc: close ",
+            Self::SessionPicker(_) => " ",
+            Self::SessionRename(_) => " Enter: save | Ctrl+E: edit | Esc: close ",
+            Self::Plan(_) => " Enter: approve | R: reject | S: save | Esc: close ",
+            Self::Ask(_) => " ",
+            Self::Todo(_) => " ",
+            Self::Hotkey => "",
+            Self::PastePreview(_) => " Enter: paste | Esc: cancel ",
+            Self::Completion(_) => "",
+            Self::Settings(_) => " ",
         }
     }
+
+    /// Fixed overhead lines for this tab: 2 (top+bottom border) + search
+    /// row (0 or 1) + hint row (0 or 1).
+    pub fn overhead(&self) -> u16 {
+        let mut oh = 2u16;
+        if self.has_search() { oh += 1; }
+        if !self.hint().is_empty() { oh += 1; }
+        oh
+    }
+
+    /// Dynamic panel height: `min(content_lines + overhead, pct_height)`,
+    /// clamped to an absolute minimum of 4 (2 borders + 1 content + 1 hint).
+    pub fn panel_height(&self, pct_height: u16, app: &crate::function::App) -> u16 {
+        let content = self.content_lines(app) as u16;
+        let h = content.saturating_add(self.overhead());
+        h.min(pct_height).max(4)
+    }
 }
+
+/// Compute the number of body lines for the settings tab — mirrors the
+/// `body_lines.len()` calculation in `render_settings`.
+pub fn settings_body_lines(
+    s: &SettingsState,
+    cfg: &crate::config::Config,
+) -> Vec<ratatui::text::Line<'static>> {
+    use crate::function::SettingsLevel;
+    let mut lines: Vec<ratatui::text::Line<'static>> = Vec::new();
+    match &s.level {
+        SettingsLevel::TopLevel => {
+            for _ in 0..8 { lines.push(ratatui::text::Line::raw("")); }
+        }
+        SettingsLevel::ProviderList => {
+            lines.push(ratatui::text::Line::raw(""));
+            for _ in cfg.configured_provider_ids() {
+                lines.push(ratatui::text::Line::raw(""));
+            }
+        }
+        SettingsLevel::NewProviderKind => {
+            for _ in 0..s.new_provider.filtered.len() {
+                lines.push(ratatui::text::Line::raw(""));
+            }
+            if s.new_provider.filtered.is_empty() {
+                lines.push(ratatui::text::Line::raw(""));
+            }
+        }
+        SettingsLevel::ExistingActions(_) => {
+            lines.push(ratatui::text::Line::raw(""));
+            lines.push(ratatui::text::Line::raw(""));
+        }
+        SettingsLevel::ConfigForm(form) => {
+            for _ in form.active_fields() {
+                lines.push(ratatui::text::Line::raw(""));
+            }
+            if form.form_error.is_some() {
+                lines.push(ratatui::text::Line::raw(""));
+                lines.push(ratatui::text::Line::raw(""));
+            }
+        }
+        SettingsLevel::ThinkingDisplayList
+        | SettingsLevel::ToolResultDisplayList => {
+            for _ in 0..3 { lines.push(ratatui::text::Line::raw("")); }
+        }
+        SettingsLevel::EnterBehaviorList
+        | SettingsLevel::BorderTypeList
+        | SettingsLevel::AutoCompact => {
+            for _ in 0..2 { lines.push(ratatui::text::Line::raw("")); }
+        }
+        SettingsLevel::ThemeList => {
+            for _ in 0..crate::theme::ThemeVariant::all().len() {
+                lines.push(ratatui::text::Line::raw(""));
+            }
+        }
+        SettingsLevel::ToolPreviewLines => {
+            lines.push(ratatui::text::Line::raw(""));
+        }
+    }
+    if s.load_error.is_some() {
+        lines.push(ratatui::text::Line::raw(""));
+        lines.push(ratatui::text::Line::raw(""));
+    }
+    lines
+}
+
 // =====================================================================
 // Settings: hierarchical navigation (no more double-tab).
 // =====================================================================

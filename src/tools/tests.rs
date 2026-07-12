@@ -286,3 +286,58 @@ fn replace_string_multi_match_shows_context_crlf() {
     assert!(msg.contains("match 1 at line 1"));
     assert!(msg.contains("match 2 at line 4"));
 }
+
+
+// ── Fuzzy (trailing whitespace tolerant) matching tests ──
+
+#[test]
+fn replace_string_exact_match_preserves_trailing_ws() {
+    // File has trailing spaces, oldString doesn't — exact match succeeds,
+    // trailing spaces on the line are preserved (not part of oldString).
+    let input = "line1   \nline2   \nline3\n";
+    let result = replace_string(input, "line2", "new", false, None, None).unwrap();
+    assert_eq!(result, "line1   \nnew   \nline3\n");
+}
+
+#[test]
+fn replace_string_fuzzy_trailing_ws_in_old_string() {
+    // oldString has trailing spaces, file doesn't — exact match fails,
+    // fuzzy fallback strips trailing ws and matches.
+    let input = "line1\nline2\nline3\n";
+    let result = replace_string(input, "line2   ", "new", false, None, None).unwrap();
+    assert_eq!(result, "line1\nnew\nline3\n");
+}
+
+#[test]
+fn replace_string_fuzzy_multiline() {
+    // Multi-line oldString with trailing ws differences.
+    let input = "a   \nb   \nc\nd\n";
+    let result = replace_string(input, "a\nb\n", "X\nY\n", false, None, None).unwrap();
+    assert_eq!(result, "X\nY\nc\nd\n");
+}
+
+#[test]
+fn replace_string_fuzzy_no_false_positive() {
+    // When oldString genuinely doesn't exist, fuzzy shouldn't invent a match.
+    let input = "line1\nline2\n";
+    assert!(replace_string(input, "nonexistent", "X", false, None, None).is_err());
+}
+
+#[test]
+fn replace_string_bare_cr_normalization() {
+    // Bare \r (old Mac) is normalized to \n for matching, and stays
+    // as \n in the output (not restored to \r).
+    let input = "line1\rline2\rline3\r";
+    let result = replace_string(input, "line2", "new", false, None, None).unwrap();
+    assert_eq!(result, "line1\nnew\nline3\n");
+}
+
+#[test]
+fn replace_string_fuzzy_crlf_with_trailing_ws() {
+    // CRLF file with trailing spaces on line2, LF oldString.
+    // oldString "line2\n" doesn't match "line2   \n" (after CRLF
+    // normalization) so exact match fails. Fuzzy strips trailing ws.
+    let input = "line1   \r\nline2   \r\nline3\r\n";
+    let result = replace_string(input, "line2\n", "new\n", false, None, None).unwrap();
+    assert_eq!(result, "line1   \r\nnew\r\nline3\r\n");
+}

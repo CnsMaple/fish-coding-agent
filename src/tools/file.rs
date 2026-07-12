@@ -42,6 +42,24 @@ pub(super) async fn write_file(args: &str, cwd: &Path) -> Result<String> {
     }
 }
 
+pub(super) async fn write_new_file(args: &str, cwd: &Path) -> Result<String> {
+    let args: WriteNewArgs = serde_json::from_str(args)?;
+    if args.path.trim().is_empty() {
+        return Err(anyhow!("path is empty"));
+    }
+    let path = resolve_workspace_path(cwd, &args.path)?;
+    let original = match tokio::fs::read_to_string(&path).await {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(err) => return Err(err.into()),
+    };
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    tokio::fs::write(&path, &args.content).await?;
+    Ok(write_diff_result(&args.path, &original, &args.content, "Wrote file successfully."))
+}
+
 fn write_diff_result(path: &str, old: &str, new: &str, ai_output: &str) -> String {
     json!({
         "kind": "edit_diff",
@@ -363,23 +381,7 @@ fn collect_glob_matches(
     Ok(())
 }
 
-pub(super) async fn write_new_file(args: &str, cwd: &Path) -> Result<String> {
-    let args: WriteNewArgs = serde_json::from_str(args)?;
-    if args.file_path.trim().is_empty() {
-        return Err(anyhow!("filePath is empty"));
-    }
-    let path = resolve_workspace_path(cwd, &args.file_path)?;
-    let original = match tokio::fs::read_to_string(&path).await {
-        Ok(text) => text,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(err) => return Err(err.into()),
-    };
-    if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
-    tokio::fs::write(&path, &args.content).await?;
-    Ok(write_diff_result(&args.file_path, &original, &args.content, "Wrote file successfully."))
-}
+
 
 pub(super) async fn skill_load(args: &str) -> Result<String> {
     let args: SkillArgs = serde_json::from_str(args)?;

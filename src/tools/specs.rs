@@ -163,7 +163,7 @@ pub(super) fn tool_defs() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "edit",
-            description: "Write or edit a UTF-8 text file within the current workspace. Use this tool for all file modifications including creating new files and editing existing ones. To edit, provide oldString (the exact text to find and replace) with the replacement content. CRLF line endings are automatically normalized so you can use plain \n for oldString even on Windows files. When oldString matches multiple locations, use start_line/end_line to narrow the search scope, or use replaceAll: true. To create or overwrite a file, omit oldString. The edit FAILS if oldString is not found or matches more than one location — provide more surrounding context to make the match unique. You MUST read the file first before editing it.".to_string(),
+            description: "Write or edit a UTF-8 text file within the current workspace. Use this tool for all file modifications including creating new files and editing existing ones. To edit, provide oldString (the exact text to find and replace) with the replacement content. CRLF line endings are automatically normalized so you can use plain \n for oldString even on Windows files. When oldString matches multiple locations, use start_line/end_line to narrow the search scope, or use replaceAll: true. If exact match fails, a fuzzy fallback strips trailing whitespace from each line and retries — useful when editors added/removed trailing spaces. To create or overwrite a file, omit oldString. The edit FAILS if oldString is not found or matches more than one location — provide more surrounding context to make the match unique. You MUST read the file first before editing it.".to_string(),
             schema: json!({
                 "type": "object",
                 "properties": {
@@ -300,19 +300,7 @@ pub(super) fn tool_defs() -> Vec<ToolDef> {
                 "additionalProperties": false
             }),
         },
-        ToolDef {
-            name: "write",
-            description: "Writes a file to the local filesystem.\n\nUsage:\n- This tool will overwrite the existing file if there is one at the provided path.\n- If this is an existing file, you MUST use the Read tool first to read the file's contents.\n- ALWAYS prefer editing existing files in the codebase. NEVER write new files unless explicitly required.\n- NEVER proactively create documentation files (*.md) or README files. Only create documentation files if explicitly requested by the User.\n- Only use emojis if the user explicitly requests it. Avoid writing emojis to files unless asked.".to_string(),
-            schema: json!({
-                "type": "object",
-                "properties": {
-                    "filePath": { "type": "string", "description": "The absolute path to the file to write (must be absolute, not relative)." },
-                    "content": { "type": "string", "description": "The content to write to the file." }
-                },
-                "required": ["filePath", "content"],
-                "additionalProperties": false
-            }),
-        },
+
         ToolDef {
             name: "skill",
             description: "Load a specialized skill when the task at hand matches one of the skills listed in the system prompt.\n\nUse this tool to inject the skill's instructions and resources into current conversation. The output may contain detailed workflow guidance as well as references to scripts, files, etc in the same directory as the skill.\n\nThe skill name must match one of the skills listed in your system prompt.".to_string(),

@@ -223,19 +223,7 @@ if call.name == "read" {
             }
         }
     }
-    if call.name == "write" {
-        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&call.arguments) {
-            if let Some(file_path) = val.get("filePath").and_then(|v| v.as_str()) {
-                let p = file_path.trim();
-                let display = if p.len() > 50 {
-                    format!("…{}", &p[p.len() - 50..])
-                } else {
-                    p.to_string()
-                };
-                return format!("write [{}]", display);
-            }
-        }
-    }
+
     if call.name == "todowrite" {
         if let Ok(val) = serde_json::from_str::<serde_json::Value>(&call.arguments) {
             if let Some(todos) = val.get("todos").and_then(|v| v.as_array()) {

@@ -766,9 +766,7 @@ in that case provide a larger `oldString` with more surrounding context to make 
 unique, or set `replaceAll` to replace every occurrence. You MUST read the file first \
 before editing it. ALWAYS prefer editing existing files over creating new ones.
 
-### write(filePath, content)
 
-Create or overwrite a file at the given absolute path. Avoid this tool when `edit` \
 would suffice — prefer surgical edits over full rewrites.
 
 ### shell_command(command)
