@@ -11,6 +11,7 @@ use tokio::time::interval;
 use crate::app::App;
 use crate::function::AppMode;
 use crate::function::CancelState;
+use crate::ui::screen_y_to_doc_line;
 
 mod paste;
 mod pickers;
@@ -248,6 +249,34 @@ where
     const DRAW_INTERVAL: Duration = Duration::from_millis(16);
 
     loop {
+        // Edge auto-scroll during an active drag selection.
+        if app.tui_auto_scroll_dir != 0
+            && app.tui_selection.as_ref().is_some_and(|s| s.active)
+        {
+            if let Some(area) = app.session_area {
+                let width = area.width as usize;
+                let total = app.session.count_all_lines_with_width(width);
+                let inner_h = area.height as u32;
+                let max_scroll = total.saturating_sub(inner_h);
+                let dir = app.tui_auto_scroll_dir;
+                let step = 3u32;
+                let new_scroll = if dir < 0 {
+                    app.session.scroll.saturating_add(step).min(max_scroll)
+                } else {
+                    app.session.scroll.saturating_sub(step)
+                };
+                app.set_scroll_anchored(new_scroll);
+                if let Some(sel) = app.tui_selection.as_mut() {
+                    let edge_y = if dir < 0 {
+                        area.top()
+                    } else {
+                        area.bottom().saturating_sub(1)
+                    };
+                    sel.doc_end = screen_y_to_doc_line(edge_y, &area, new_scroll, total);
+                }
+                needs_draw = true;
+            }
+        }
         // Throttled draw: at most once per DRAW_INTERVAL.
         if needs_draw && last_draw.elapsed() >= DRAW_INTERVAL {
             if let Err(e) = terminal.draw(|f| crate::ui::render(f, app)) {
@@ -1840,6 +1869,7 @@ match m.kind {
             app.tui_selection = None;
             app.selected_text = None;
             app.tui_drag_start = Some((m.column, m.row));
+            app.tui_auto_scroll_dir = 0;
             app.input.clear_selection();
             if let Ok(mut d) = DRAG.lock() {
                 d.active = false;
@@ -1863,10 +1893,26 @@ match m.kind {
             // also how a click-only event stays invisible.
             if let Some(start) = app.tui_drag_start {
                 if app.tui_selection.is_none() {
-                    app.tui_selection = Some(crate::function::Selection::new(start));
+                    if let Some(area) = app.session_area {
+                        let width = area.width as usize;
+                        let total = app.session.count_all_lines_with_width(width);
+                        let doc_start = screen_y_to_doc_line(start.1, &area, app.session.scroll, total);
+                        app.tui_selection = Some(crate::function::Selection::new(doc_start));
+                    }
                 }
                 if let Some(sel) = app.tui_selection.as_mut() {
-                    sel.end = (m.column, m.row);
+                    if let Some(area) = app.session_area {
+                        let width = area.width as usize;
+                        let total = app.session.count_all_lines_with_width(width);
+                        sel.doc_end = screen_y_to_doc_line(m.row, &area, app.session.scroll, total);
+                        if m.row <= area.top().saturating_add(2) {
+                            app.tui_auto_scroll_dir = -1;
+                        } else if m.row.saturating_add(3) >= area.bottom() {
+                            app.tui_auto_scroll_dir = 1;
+                        } else {
+                            app.tui_auto_scroll_dir = 0;
+                        }
+                    }
                 }
             }
             if in_prompt_row {
@@ -1897,6 +1943,7 @@ match m.kind {
             // A click (Down + Up with no Drag) ends here: no selection
             // was ever created, so nothing to finalize.
             app.tui_drag_start = None;
+            app.tui_auto_scroll_dir = 0;
             if let Some(sel) = app.tui_selection.as_mut() {
                 sel.active = false;
             }
@@ -1905,15 +1952,11 @@ match m.kind {
             }
         }
         MouseEventKind::Moved => {
-            if app.tui_drag_start.is_some()
-                || app.tui_selection.is_some_and(|s| s.active)
-            {
-                app.tui_selection = None;
-                app.selected_text = None;
-                app.tui_drag_start = None;
-                if let Ok(mut d) = DRAG.lock() {
-                    d.active = false;
-                }
+            // Do not cancel a TUI selection or in-progress drag on
+            // Moved. A finalized selection persists; an in-progress
+            // drag continues. Only the input-area drag lock is released.
+            if let Ok(mut d) = DRAG.lock() {
+                d.active = false;
             }
         }
         _ => {}

@@ -96,6 +96,9 @@ pub struct App {
     /// Lets us avoid creating a single-cell "selection" for an
     /// ordinary click with no drag movement.
     pub tui_drag_start: Option<(u16, u16)>,
+    /// Edge auto-scroll direction during an active drag selection.
+    /// -1 = scroll up, 1 = scroll down, 0 = none.
+    pub tui_auto_scroll_dir: i32,
     /// Timestamp of the last mouse event. Used to detect stale drags
     /// when the mouse leaves and re-enters the terminal.
     pub last_mouse_event: Option<Instant>,
@@ -189,39 +192,26 @@ pub struct App {
 }
 
 /// Mouse-driven text selection spanning the full TUI. Coordinates are
-/// 0-based (column, row) screen cells.
+/// document-global line indices (0-based from the top of the session).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Selection {
-    pub start: (u16, u16),
-    pub end: (u16, u16),
+    pub doc_start: usize,
+    pub doc_end: usize,
     pub active: bool,
 }
 
 impl Selection {
-    pub fn new(start: (u16, u16)) -> Self {
+    pub fn new(doc_line: usize) -> Self {
         Self {
-            start,
-            end: start,
+            doc_start: doc_line,
+            doc_end: doc_line,
             active: true,
         }
     }
 
-    /// Normalized bounding box: top-left to bottom-right (inclusive).
-    /// The selection rectangle always covers the full bounding box even
-    /// when the drag went diagonally — we treat any cell inside the box
-    /// as highlighted, which matches how GUI text selection is usually
-    /// drawn.
-    pub fn rect(&self) -> ((u16, u16), (u16, u16)) {
-        let x_min = self.start.0.min(self.end.0);
-        let y_min = self.start.1.min(self.end.1);
-        let x_max = self.start.0.max(self.end.0);
-        let y_max = self.start.1.max(self.end.1);
-        ((x_min, y_min), (x_max, y_max))
-    }
-
     pub fn clear(&mut self) {
-        self.start = (0, 0);
-        self.end = (0, 0);
+        self.doc_start = 0;
+        self.doc_end = 0;
         self.active = false;
     }
 }
@@ -304,6 +294,7 @@ impl App {
             tui_selection: None,
             selected_text: None,
             tui_drag_start: None,
+            tui_auto_scroll_dir: 0,
             last_mouse_event: None,
             input_cursor_screen: None,
             focus_target: FocusTarget::Input,

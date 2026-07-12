@@ -34,6 +34,9 @@ pub enum ContentPart {
 pub struct CachedLineCount {
     pub width: u16,
     pub count: u32,
+    /// Byte length of `Message::content` when this count was computed.
+    /// Used for fast incremental line-count estimation during streaming.
+    pub content_len: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -301,6 +304,25 @@ impl Message {
             t.cached_line_count_collapsed = None;
         }
     }
+
+    /// Invalidate render caches but keep `cached_content_line_count`.
+    /// Used during streaming appends: the render output changes (so
+    /// `content_version` must bump and block caches must clear), but
+    /// the content line count stays approximately the same (at most
+    /// 1 frame stale) — `compute_total_lines` will use the cached count
+    /// and `build_message_lines` will update it naturally when it
+    /// re-renders. This avoids a full markdown re-parse on every delta.
+    pub fn invalidate_render_caches(&mut self) {
+        self.bump_version();
+        for seg in &mut self.thinking_segments {
+            seg.cached_line_count_expanded = None;
+            seg.cached_line_count_collapsed = None;
+        }
+        for t in &mut self.tool_results {
+            t.cached_line_count_visible = None;
+            t.cached_line_count_collapsed = None;
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -476,7 +498,7 @@ impl Session {
                     }
                 }
                 m.line_count = m.content.split('\n').count().max(1) as u32;
-                m.invalidate_caches();
+                m.invalidate_render_caches();
                 if let Ok(mut c) = self.line_cache.lock() {
                     if id < c.len() {
                         c[id] = None;
@@ -526,7 +548,7 @@ impl Session {
                     tool.streaming_input.clear();
                     tool.cached_line_count_visible = None;
                     tool.cached_line_count_collapsed = None;
-                    m.invalidate_caches();
+                    m.invalidate_render_caches();
                     if let Ok(mut c) = self.line_cache.lock() {
                         if id < c.len() {
                             c[id] = None;
@@ -566,7 +588,7 @@ impl Session {
                     cached_line_count_visible: None,
                     cached_line_count_collapsed: None,
                 });
-                m.invalidate_caches();
+                m.invalidate_render_caches();
                 self.invalidate_layout_cache();
             }
         }
@@ -603,7 +625,7 @@ impl Session {
                     }
                     tool.cached_line_count_visible = None;
                     tool.cached_line_count_collapsed = None;
-                    m.invalidate_caches();
+                    m.invalidate_render_caches();
                     self.invalidate_layout_cache();
                     return;
                 }
@@ -624,7 +646,7 @@ impl Session {
                     cached_line_count_visible: None,
                     cached_line_count_collapsed: None,
                 });
-                m.invalidate_caches();
+                m.invalidate_render_caches();
                 self.invalidate_layout_cache();
             }
         }
@@ -647,7 +669,7 @@ impl Session {
                     tool.content.push_str(delta);
                     tool.cached_line_count_visible = None;
                     tool.cached_line_count_collapsed = None;
-                    m.invalidate_caches();
+                    m.invalidate_render_caches();
                     if let Ok(mut c) = self.line_cache.lock() {
                         if id < c.len() {
                             c[id] = None;
@@ -712,7 +734,7 @@ impl Session {
                         cached_line_count_collapsed: None,
                     });
                 }
-                m.invalidate_caches();
+                m.invalidate_render_caches();
                 if let Ok(mut c) = self.line_cache.lock() {
                     if id < c.len() {
                         c[id] = None;
@@ -847,7 +869,7 @@ impl Session {
                         ended_at: None,
                     });
                 }
-                m.invalidate_caches();
+                m.invalidate_render_caches();
                 self.invalidate_layout_cache();
             }
         }
@@ -1308,7 +1330,7 @@ impl Session {
 /// across frames.
 fn render_cached_content_lines(m: &mut Message, width: u16) -> u32 {
     if let Some(c) = m.cached_content_line_count {
-        if c.width == width {
+        if c.width == width && m.content.len() == c.content_len {
             return c.count;
         }
     }
@@ -1319,7 +1341,11 @@ fn render_cached_content_lines(m: &mut Message, width: u16) -> u32 {
         &segments,
         &m.tool_results,
     );
-    m.cached_content_line_count = Some(CachedLineCount { width, count: n });
+    m.cached_content_line_count = Some(CachedLineCount {
+        width,
+        count: n,
+        content_len: m.content.len(),
+    });
     n
 }
 

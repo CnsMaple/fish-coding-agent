@@ -98,15 +98,6 @@ pub fn render(
         vec![]
     };
 
-    // Clear the entire area first to prevent background artifacts from
-    // previous frames leaking into cells that are no longer covered by content.
-    for y in area.top()..area.bottom() {
-        for x in area.left()..area.right() {
-            if let Some(cell) = buf.cell_mut((x, y)) {
-                cell.reset();
-            }
-        }
-    }
     let p = Paragraph::new(visible.clone()).style(Style::reset());
     p.render(area, buf);
 }

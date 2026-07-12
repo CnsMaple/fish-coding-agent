@@ -27,11 +27,12 @@ pub(super) fn render_content_segment(text: &str, width: usize, out: &mut Vec<Lin
     if text.is_empty() {
         return;
     }
-    let text = crate::session::strip_text_tool_calls(text);
+    let text = strip_legacy_markers(text);
+    let text = crate::session::strip_text_tool_calls(&text);
     if text.trim().is_empty() {
         return;
     }
-    let inner_w = width.saturating_sub(4);
+    let inner_w = width.saturating_sub(4).max(1);
     let md_lines = crate::session::markdown::render_with_width(&text, inner_w);
     for line in md_lines {
         // Wrap each rendered line to inner_w so the user-block padding
@@ -217,7 +218,6 @@ pub fn content_line_count_segmented(
     // same offset, matching `build_message_lines`.
     items.sort_by(|a, b| a.offset.cmp(&b.offset));
 
-    let inner_w = width.saturating_sub(4).max(1);
     let mut cursor = 0usize;
     let mut total: u32 = 0;
 
@@ -227,12 +227,12 @@ pub fn content_line_count_segmented(
             continue;
         }
         if offset > cursor {
-            total += count_md_segment(&raw[cursor..offset], inner_w);
+            total += count_md_segment(&raw[cursor..offset], width);
             cursor = offset;
         }
     }
     if cursor < raw.len() {
-        total += count_md_segment(&raw[cursor..], inner_w);
+        total += count_md_segment(&raw[cursor..], width);
     }
 
     total
@@ -240,16 +240,13 @@ pub fn content_line_count_segmented(
 
 /// Apply the same pre-processing as `render_content_segment` (legacy
 /// markers + text tool calls) and return the markdown line count.
-fn count_md_segment(text: &str, inner_w: usize) -> u32 {
-    if text.is_empty() {
-        return 0;
-    }
-    let text = strip_legacy_markers(text);
-    let text = crate::session::strip_text_tool_calls(&text);
-    if text.trim().is_empty() {
-        return 0;
-    }
-    count_md_lines(&text, inner_w)
+/// Uses `render_content_segment` directly so the count is guaranteed
+/// to match the actual rendered output — no divergence between the
+/// counting path and the rendering path.
+fn count_md_segment(text: &str, width: usize) -> u32 {
+    let mut tmp: Vec<Line<'static>> = Vec::new();
+    render_content_segment(text, width, &mut tmp);
+    tmp.len() as u32
 }
 
 pub(super) fn value_after_prefix<'a>(content: &'a str, prefix: &str) -> Option<&'a str> {

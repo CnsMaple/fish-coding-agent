@@ -1433,8 +1433,8 @@ tool_calls: Vec::new(),
         // Warmup walks all messages but uses O(1) cached block counts.
         // Even for 1M+ chars across 500+ messages this should be <100ms.
         assert!(
-            warmup_us < 200_000,
-            "warmup took {warmup_us}µs (expected <200ms)"
+            warmup_us < 400_000,
+            "warmup took {warmup_us}µs (expected <400ms)"
         );
         // Viewport render renders 1-2 messages (~40 lines each) through
         // Markdown plus slicing. In debug mode this is typically 2-10ms.

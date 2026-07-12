@@ -1,5 +1,6 @@
 use crate::app::App;
 use crate::function::{CancelState, Selection};
+use crate::session::Session;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::Modifier;
@@ -207,8 +208,13 @@ pub fn render(f: &mut Frame, app: &mut App) {
 
     if let Some(sel) = app.tui_selection {
         let buf = f.buffer_mut();
-        apply_selection_style(buf, &sel);
-        app.selected_text = Some(extract_selection_text(buf, &sel));
+        let total = app.session.line_offsets.last().copied().unwrap_or(0);
+        let scroll = app.session.scroll;
+        if let Some(area) = app.session_area {
+            apply_selection_style(buf, &sel, &area, scroll, total);
+        }
+        let width = app.session_area.map(|a| a.width as usize).unwrap_or(80);
+        app.selected_text = Some(extract_selection_text(&sel, &app.session, width));
     } else {
         app.selected_text = None;
     }
@@ -427,40 +433,36 @@ fn truncate_path(path: &str, max_width: usize) -> String {
     format!("{prefix}...{suffix}")
 }
 
+/// Convert a screen Y (within the session area) to a global document line index.
+pub(crate) fn screen_y_to_doc_line(y: u16, area: &Rect, scroll: u32, total: u32) -> usize {
+    let inner_h = area.height as u32;
+    let max_scroll = total.saturating_sub(inner_h);
+    let offset_from_top = max_scroll.saturating_sub(scroll);
+    (offset_from_top + (y - area.top()) as u32) as usize
+}
+
+/// Convert a global document line index to a screen Y, if visible.
+pub(crate) fn doc_line_to_screen_y(line: usize, area: &Rect, scroll: u32, total: u32) -> Option<u16> {
+    let inner_h = area.height as u32;
+    let max_scroll = total.saturating_sub(inner_h);
+    let offset_from_top = max_scroll.saturating_sub(scroll);
+    if (line as u32) < offset_from_top || (line as u32) >= offset_from_top + inner_h {
+        return None;
+    }
+    Some(area.top() + ((line as u32) - offset_from_top) as u16)
+}
+
 /// Apply a REVERSED style to every cell inside the selection rectangle so
 /// the user can see what they have highlighted.
-fn apply_selection_style(buf: &mut Buffer, sel: &Selection) {
-    // Stream selection: from start through end, flowing across line breaks.
-    let start = sel.start;
-    let end = sel.end;
+fn apply_selection_style(buf: &mut Buffer, sel: &Selection, area: &Rect, scroll: u32, total: u32) {
+    let y_start = sel.doc_start.min(sel.doc_end);
+    let y_end = sel.doc_start.max(sel.doc_end);
     let width = buf.area().width;
     let w = width.saturating_sub(1);
-    if start.1 == end.1 {
-        let x_min = start.0.min(end.0);
-        let x_max = start.0.max(end.0);
-        for x in x_min..=x_max {
-            if let Some(cell) = buf.cell_mut((x, start.1)) {
-                let new_style = cell.style().add_modifier(Modifier::REVERSED);
-                cell.set_style(new_style);
-            }
-        }
-    } else if start.1 < end.1 {
-        for y in start.1..=end.1 {
-            let row_sx = if y == start.1 { start.0 } else { 0 };
-            let row_ex = if y == end.1 { end.0.min(w) } else { w };
-            for x in row_sx..=row_ex {
-                if let Some(cell) = buf.cell_mut((x, y)) {
-                    let new_style = cell.style().add_modifier(Modifier::REVERSED);
-                    cell.set_style(new_style);
-                }
-            }
-        }
-    } else {
-        for y in end.1..=start.1 {
-            let row_sx = if y == end.1 { end.0 } else { 0 };
-            let row_ex = if y == start.1 { start.0.min(w) } else { w };
-            for x in row_sx..=row_ex {
-                if let Some(cell) = buf.cell_mut((x, y)) {
+    for doc_line in y_start..=y_end {
+        if let Some(screen_y) = doc_line_to_screen_y(doc_line, area, scroll, total) {
+            for x in 0..=w {
+                if let Some(cell) = buf.cell_mut((x, screen_y)) {
                     let new_style = cell.style().add_modifier(Modifier::REVERSED);
                     cell.set_style(new_style);
                 }
@@ -469,58 +471,58 @@ fn apply_selection_style(buf: &mut Buffer, sel: &Selection) {
     }
 }
 
-/// Read the rendered symbols from the buffer in the selection area and
+/// Read the rendered symbols from message lines in the selection range and
 /// return them as plain text. Trailing whitespace on each row is trimmed
 /// and empty trailing rows are dropped, so a single-row selection across a
 /// padded cell line does not produce a wall of spaces.
-pub fn extract_selection_text(buf: &Buffer, sel: &Selection) -> String {
-    let start = sel.start;
-    let end = sel.end;
-    let width = buf.area().width;
-    let w = width.saturating_sub(1);
+pub fn extract_selection_text(
+    sel: &Selection,
+    session: &Session,
+    width: usize,
+) -> String {
+    let y_start = sel.doc_start.min(sel.doc_end);
+    let y_end = sel.doc_start.max(sel.doc_end);
     let mut lines: Vec<String> = Vec::new();
-    if start.1 == end.1 {
-        let x_min = start.0.min(end.0);
-        let x_max = start.0.max(end.0);
-        let mut line = String::new();
-        for x in x_min..=x_max {
-            if let Some(cell) = buf.cell((x, start.1)) {
-                line.push_str(cell.symbol());
-            }
+
+    let offsets = &session.line_offsets;
+    if offsets.len() < 2 {
+        return String::new();
+    }
+
+    let first_msg = match offsets[..offsets.len() - 1].binary_search(&(y_start as u32)) {
+        Ok(i) => i,
+        Err(i) => i.saturating_sub(1),
+    };
+
+    for msg_idx in first_msg..session.messages.len() {
+        let msg_start = offsets[msg_idx] as usize;
+        if msg_start > y_end {
+            break;
         }
-        lines.push(line.trim_end().to_string());
-    } else if start.1 < end.1 {
-        for y in start.1..=end.1 {
-            let row_sx = if y == start.1 { start.0 } else { 0 };
-            let row_ex = if y == end.1 { end.0.min(w) } else { w };
-            let mut line = String::new();
-            for x in row_sx..=row_ex {
-                if let Some(cell) = buf.cell((x, y)) {
-                    line.push_str(cell.symbol());
-                }
-            }
-            lines.push(line.trim_end().to_string());
-        }
-    } else {
-        for y in end.1..=start.1 {
-            let row_sx = if y == end.1 { end.0 } else { 0 };
-            let row_ex = if y == start.1 { start.0.min(w) } else { w };
-            let mut line = String::new();
-            for x in row_sx..=row_ex {
-                if let Some(cell) = buf.cell((x, y)) {
-                    line.push_str(cell.symbol());
-                }
-            }
-            lines.push(line.trim_end().to_string());
+        let msg_end = if msg_idx + 1 < offsets.len() {
+            offsets[msg_idx + 1] as usize
+        } else {
+            y_end + 1
+        };
+        let local_start = y_start.saturating_sub(msg_start);
+        let local_end = y_end.min(msg_end.saturating_sub(1)).saturating_sub(msg_start);
+
+        let rendered = crate::session::render::build_message_lines(session, msg_idx, width);
+        for i in local_start..=local_end.min(rendered.len().saturating_sub(1)) {
+            let line_text: String = rendered[i].spans.iter()
+                .map(|s| s.content.as_ref())
+                .collect();
+            lines.push(line_text.trim_end().to_string());
         }
     }
+
     while lines.len() > 1 && lines.last().unwrap().is_empty() {
         lines.pop();
     }
     compact_render_spacing(&lines.join("\n"))
 }
 
-fn compact_render_spacing(text: &str) -> String {
+pub(crate) fn compact_render_spacing(text: &str) -> String {
     let chars: Vec<char> = text.chars().collect();
     let mut out = String::with_capacity(text.len());
     let mut idx = 0;
@@ -678,9 +680,4 @@ pub fn render_agents_area(area: ratatui::layout::Rect, buf: &mut ratatui::buffer
     }
 }
 
-/// Test-only re-export under a stable name. The implementation lives in
-/// [`extract_selection_text`]; the alias keeps tests from depending on
-/// visibility tweaks.
-pub fn extract_selection_text_for_test(buf: &Buffer, sel: &Selection) -> String {
-    extract_selection_text(buf, sel)
-}
+

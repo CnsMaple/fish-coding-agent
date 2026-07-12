@@ -73,6 +73,7 @@ fn make_app() -> App {
         tui_selection: None,
         selected_text: None,
         tui_drag_start: None,
+        tui_auto_scroll_dir: 0,
         model_cache_path: cache_file,
         thinking_toggle_rows: Vec::new(),
         tool_toggle_rows: Vec::new(),
@@ -1923,14 +1924,14 @@ fn active_name_returns_empty_when_no_active_provider() {
 
 #[test]
 fn selection_rect_normalizes_start_and_end() {
-    // The rect helper should always return the top-left first even
-    // when the user drags upward or right-to-left.
+    // The selection should always normalize doc_start/doc_end so that
+    // the min is the top and the max is the bottom, even when the user
+    // drags upward.
     use crate::function::Selection;
-    let s = Selection::new((10, 5));
-    let s = Selection { end: (3, 8), ..s };
-    let ((sx, sy), (ex, ey)) = s.rect();
-    assert_eq!((sx, sy), (3, 5));
-    assert_eq!((ex, ey), (10, 8));
+    let s = Selection::new(5);
+    let s = Selection { doc_end: 8, ..s };
+    assert_eq!(s.doc_start.min(s.doc_end), 5);
+    assert_eq!(s.doc_start.max(s.doc_end), 8);
 }
 
 #[test]
@@ -1978,70 +1979,27 @@ fn status_set_cwd_shows_full_path_with_tilde_abbrev() {
 
 #[test]
 fn extract_selection_text_skips_trailing_padding() {
-    // Single-row selection across a padded cell line should not
-    // produce a wall of trailing spaces.
-    use crate::function::Selection;
-    use crate::ui::extract_selection_text_for_test;
-    use ratatui::buffer::Buffer;
-    use ratatui::layout::Rect;
-
-    let area = Rect::new(0, 0, 20, 1);
-    let mut buf = Buffer::empty(area);
-    // Render "hello" in cells 0..5 and leave the rest as spaces.
-    for (i, c) in "hello".chars().enumerate() {
-        buf[(i as u16, 0)].set_symbol(&c.to_string());
-    }
-    let s = Selection {
-        start: (0, 0),
-        end: (19, 0),
-        active: false,
-    };
-    let text = extract_selection_text_for_test(&buf, &s);
-    assert_eq!(text, "hello");
+    // compact_render_spacing preserves trailing spaces; the trim_end
+    // in extract_selection_text handles the actual trimming.
+    use crate::ui::compact_render_spacing;
+    let input = "hello               ";
+    assert_eq!(compact_render_spacing(input), "hello               ");
 }
 
 #[test]
 fn extract_selection_text_compacts_cjk_render_spacing() {
-    use crate::function::Selection;
-    use crate::ui::extract_selection_text_for_test;
-    use ratatui::buffer::Buffer;
-    use ratatui::layout::Rect;
+    use crate::ui::compact_render_spacing;
 
     let rendered = "使 用 command分 别 执 行 3 次 ls， 需 要 整 个 tree";
-    let area = Rect::new(0, 0, rendered.chars().count() as u16, 1);
-    let mut buf = Buffer::empty(area);
-    for (i, c) in rendered.chars().enumerate() {
-        buf[(i as u16, 0)].set_symbol(&c.to_string());
-    }
-    let s = Selection {
-        start: (0, 0),
-        end: (area.width - 1, 0),
-        active: false,
-    };
-    let text = extract_selection_text_for_test(&buf, &s);
-    assert_eq!(text, "使用 command分别执行 3次 ls，需要整个 tree");
+    assert_eq!(compact_render_spacing(rendered), "使用 command分别执行 3次 ls，需要整个 tree");
 }
 
 #[test]
 fn extract_selection_text_compacts_short_ascii_before_cjk() {
-    use crate::function::Selection;
-    use crate::ui::extract_selection_text_for_test;
-    use ratatui::buffer::Buffer;
-    use ratatui::layout::Rect;
+    use crate::ui::compact_render_spacing;
 
     let rendered = "给 我 一 个 md的 代 码 块 示 例 和 表 格 示 例";
-    let area = Rect::new(0, 0, rendered.chars().count() as u16, 1);
-    let mut buf = Buffer::empty(area);
-    for (i, c) in rendered.chars().enumerate() {
-        buf[(i as u16, 0)].set_symbol(&c.to_string());
-    }
-    let s = Selection {
-        start: (0, 0),
-        end: (area.width - 1, 0),
-        active: false,
-    };
-    let text = extract_selection_text_for_test(&buf, &s);
-    assert_eq!(text, "给我一个md的代码块示例和表格示例");
+    assert_eq!(compact_render_spacing(rendered), "给我一个md的代码块示例和表格示例");
 }
 
 #[test]
@@ -2170,8 +2128,10 @@ fn drag_creates_tui_selection_after_real_movement() {
     // Down + Drag + Up with at least one cell of movement must create
     // a TUI selection that the post-render pass highlights.
     use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    use ratatui::layout::Rect;
 
     let mut app = make_app();
+    app.session_area = Some(Rect::new(0, 0, 80, 24));
     let down = MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),
         column: 2,
@@ -2181,13 +2141,13 @@ fn drag_creates_tui_selection_after_real_movement() {
     let drag = MouseEvent {
         kind: MouseEventKind::Drag(MouseButton::Left),
         column: 10,
-        row: 2,
+        row: 5,
         modifiers: crossterm::event::KeyModifiers::NONE,
     };
     let up = MouseEvent {
         kind: MouseEventKind::Up(MouseButton::Left),
         column: 10,
-        row: 2,
+        row: 5,
         modifiers: crossterm::event::KeyModifiers::NONE,
     };
     handle_mouse(down, &mut app);
@@ -2198,8 +2158,8 @@ fn drag_creates_tui_selection_after_real_movement() {
         .tui_selection
         .expect("a drag of >0 cells must create a selection");
     assert!(!sel.active, "Up must finalize the selection");
-    assert_eq!(sel.start, (2, 2));
-    assert_eq!(sel.end, (10, 2));
+    assert_eq!(sel.doc_start, 2);
+    assert_eq!(sel.doc_end, 5);
 }
 
 fn esc_key() -> KeyEvent {
