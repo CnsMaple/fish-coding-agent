@@ -1476,9 +1476,20 @@ async fn handle_key(k: crossterm::event::KeyEvent, app: &mut App) {
                         app.input.delete_word_back();
                         app.sync_completion();
                     }
+                    'z' | 'Z' => {
+                        app.input.undo();
+                        app.sync_completion();
+                    }
+                    'y' | 'Y' => {
+                        app.input.redo();
+                        app.sync_completion();
+                    }
                     'a' | 'A' => app.input.move_home(),
                     'e' | 'E' => app.input.move_end(),
                     'u' | 'U' => {
+                        if !app.input.buffer.is_empty() {
+                            app.input.push_undo();
+                        }
                         app.input.buffer.clear();
                         app.input.cursor = 0;
                         app.input.clear_selection();
@@ -1486,7 +1497,10 @@ async fn handle_key(k: crossterm::event::KeyEvent, app: &mut App) {
                         app.sync_completion();
                     }
                     'k' | 'K' => {
-                        app.input.buffer.truncate(app.input.cursor);
+                        if app.input.cursor < app.input.buffer.len() {
+                            app.input.push_undo();
+                            app.input.buffer.truncate(app.input.cursor);
+                        }
                         app.sync_completion();
                     }
                     _ => {}

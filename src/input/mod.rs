@@ -8,8 +8,13 @@ use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 use ratatui::widgets::{Block, Borders, Paragraph};
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
+/// Maximum number of undo snapshots retained in `InputState::undo_stack`.
+/// Each snapshot clones the full buffer, so the cap bounds memory usage.
+const UNDO_LIMIT: usize = 100;
 
 #[derive(Debug)]
 pub struct InputState {
@@ -22,6 +27,13 @@ pub struct InputState {
     /// Active text selection within the buffer (byte indices, end exclusive).
     /// None means no selection; the tuple is always stored as (start, end) with start <= end.
     pub selection: Option<(usize, usize)>,
+    /// Undo history: each entry is a (buffer, cursor, selection) snapshot
+    /// captured *before* a mutating operation. Ctrl+Z pops the top entry
+    /// and restores it.
+    pub undo_stack: VecDeque<(String, usize, Option<(usize, usize)>)>,
+    /// Redo history: entries that were undone and can be re-applied with
+    /// Ctrl+Y. Cleared whenever a new mutation occurs.
+    pub redo_stack: VecDeque<(String, usize, Option<(usize, usize)>)>,
 }
 
 impl InputState {
@@ -33,7 +45,62 @@ impl InputState {
             history_idx: None,
             busy_hint: None,
             selection: None,
+            undo_stack: VecDeque::new(),
+            redo_stack: VecDeque::new(),
         }
+    }
+
+    /// Snapshot the current state onto the undo stack *before* a mutation.
+    /// Call this at the start of every method that modifies `buffer`/`cursor`/
+    /// `selection`. Also clears the redo stack so Ctrl+Y cannot re-apply
+    /// stale state after a new edit.
+    pub fn push_undo(&mut self) {
+        self.redo_stack.clear();
+        if self.undo_stack.len() >= UNDO_LIMIT {
+            self.undo_stack.pop_front();
+        }
+        self.undo_stack
+            .push_back((self.buffer.clone(), self.cursor, self.selection));
+    }
+
+    /// Restore the most recent undo snapshot. Returns `true` if an undo
+    /// was performed (i.e. the stack was non-empty).
+    pub fn undo(&mut self) -> bool {
+        let Some(entry) = self.undo_stack.pop_back() else {
+            return false;
+        };
+        self.redo_stack
+            .push_back((self.buffer.clone(), self.cursor, self.selection));
+        if self.redo_stack.len() > UNDO_LIMIT {
+            self.redo_stack.pop_front();
+        }
+        self.buffer = entry.0;
+        self.cursor = entry.1;
+        self.selection = entry.2;
+        true
+    }
+
+    /// Re-apply the most recently undone snapshot. Returns `true` if a
+    /// redo was performed (i.e. the redo stack was non-empty).
+    pub fn redo(&mut self) -> bool {
+        let Some(entry) = self.redo_stack.pop_back() else {
+            return false;
+        };
+        self.undo_stack
+            .push_back((self.buffer.clone(), self.cursor, self.selection));
+        if self.undo_stack.len() > UNDO_LIMIT {
+            self.undo_stack.pop_front();
+        }
+        self.buffer = entry.0;
+        self.cursor = entry.1;
+        self.selection = entry.2;
+        true
+    }
+
+    /// Clear all undo/redo history (e.g. when starting a fresh session).
+    pub fn clear_undo(&mut self) {
+        self.undo_stack.clear();
+        self.redo_stack.clear();
     }
 
     pub fn has_selection(&self) -> bool {
@@ -135,6 +202,7 @@ impl InputState {
         if self.cursor == 0 {
             return;
         }
+        self.push_undo();
         let mut i = self.cursor;
         let prev_char = |pos: usize| -> Option<(usize, char)> {
             if pos == 0 {
@@ -946,3 +1014,4 @@ pub fn sidebar_tab_name(t: &SidebarTab) -> &'static str {
         SidebarTab::Hotkey => "hotkey",
     }
 }
+

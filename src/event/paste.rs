@@ -268,6 +268,7 @@ pub(super) fn try_remove_paste_marker(app: &mut App) -> bool {
             .and_then(|s| s.strip_suffix(" lines]"))
         {
             if !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()) {
+                app.input.push_undo();
                 app.input.buffer.replace_range(start..cursor, "");
                 app.input.cursor = start;
                 app.paste_blocks.pop_front();
