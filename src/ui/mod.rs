@@ -44,7 +44,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     app.session.tool_display = app.config.tool_display;
     app.session.tool_preview_lines = app.config.tool_preview_lines;
 
-    let agents_idx = if app.agents_visible { 0 } else { 0 };
+    let agents_idx = 0;
     let session_idx = if app.agents_visible { 1 } else { 0 };
     let panel_idx = session_idx + 1;
     let input_idx = if app.function_visible { panel_idx + 1 } else { session_idx + 1 };

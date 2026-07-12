@@ -1,4 +1,5 @@
 pub mod anthropic;
+pub mod common;
 pub mod cursor;
 pub mod openai;
 pub mod volcengine;
@@ -183,14 +184,7 @@ pub struct ListModelsArgs<'a> {
 }
 
 pub async fn list_models(args: ListModelsArgs<'_>) -> Result<Vec<ModelInfo>> {
-    let p: Box<dyn Provider> = match args.kind {
-        ProviderKind::Openai => Box::new(openai::OpenAiProvider),
-        ProviderKind::Anthropic => Box::new(anthropic::AnthropicProvider),
-        ProviderKind::Cursor => Box::new(cursor::CursorProvider),
-        ProviderKind::DeepSeek => Box::new(openai::OpenAiProvider),
-        ProviderKind::MiniMax => Box::new(openai::OpenAiProvider),
-        ProviderKind::Volcengine => Box::new(volcengine::VolcengineProvider),
-    };
+    let p = make_list_provider(args.kind);
     let mut models = p
         .list_models(args.client, args.base_url, args.api_key, args.access_key, args.secret_key)
         .await?;
@@ -244,12 +238,36 @@ pub async fn fill_context_windows(
 }
 
 pub fn provider(kind: ProviderKind) -> Box<dyn Provider> {
+    make_chat_provider(kind)
+}
+
+/// Construct a boxed `Provider` for the given `ProviderKind` for chat
+/// streaming. Shared by `provider()`.
+///
+/// Note: `Volcengine` maps to `OpenAiProvider` here because chat uses
+/// the OpenAI-compatible `/chat/completions` endpoint. Model listing
+/// (`list_models`) uses `VolcengineProvider` which needs V4 signing.
+fn make_chat_provider(kind: ProviderKind) -> Box<dyn Provider> {
     match kind {
-        ProviderKind::Openai => Box::new(openai::OpenAiProvider),
+        ProviderKind::Openai
+        | ProviderKind::DeepSeek
+        | ProviderKind::MiniMax
+        | ProviderKind::Volcengine => Box::new(openai::OpenAiProvider),
         ProviderKind::Anthropic => Box::new(anthropic::AnthropicProvider),
         ProviderKind::Cursor => Box::new(cursor::CursorProvider),
-        ProviderKind::DeepSeek => Box::new(openai::OpenAiProvider),
-        ProviderKind::MiniMax => Box::new(openai::OpenAiProvider),
-        ProviderKind::Volcengine => Box::new(openai::OpenAiProvider),
+    }
+}
+
+/// Construct a boxed `Provider` for the given `ProviderKind` for model
+/// listing. `Volcengine` maps to `VolcengineProvider` (needs V4 signing)
+/// unlike `make_chat_provider` which maps it to `OpenAiProvider`.
+fn make_list_provider(kind: ProviderKind) -> Box<dyn Provider> {
+    match kind {
+        ProviderKind::Openai
+        | ProviderKind::DeepSeek
+        | ProviderKind::MiniMax => Box::new(openai::OpenAiProvider),
+        ProviderKind::Anthropic => Box::new(anthropic::AnthropicProvider),
+        ProviderKind::Cursor => Box::new(cursor::CursorProvider),
+        ProviderKind::Volcengine => Box::new(volcengine::VolcengineProvider),
     }
 }

@@ -501,7 +501,6 @@ format!("[!{}] | ", app.pending_events),
         vertical_right: " ",
         horizontal_top: "-",
         horizontal_bottom: "-",
-        ..ratatui::symbols::border::Set::default()
     };
     let block = Block::default()
         .borders(Borders::ALL)

@@ -144,42 +144,11 @@ impl VolcengineProvider {
         access_key: &str,
         secret_key: &str,
     ) -> Result<Vec<ModelInfo>> {
-        let now = Utc::now();
-        let date_str = now.format("%Y%m%d").to_string();
-        let datetime_str = now.format("%Y%m%dT%H%M%SZ").to_string();
-        let signed_headers = "host;x-content-sha256;x-date";
         let query = format!("Action=ListEndpoints&Version={}", VOLCENGINE_API_VERSION);
         let body = b"{}";
-        let hashed_body = hex::encode(Sha256::digest(body));
-
-        let canonical_request = format!(
-            "POST\n/\n{query}\nhost:{VOLCENGINE_API_HOST}\nx-content-sha256:{hashed_body}\nx-date:{datetime_str}\n\n{signed_headers}\n{hashed_body}"
-        );
-        let hashed_canonical = hex::encode(Sha256::digest(canonical_request.as_bytes()));
-        let credential_scope =
-            format!("{date_str}/{VOLCENGINE_REGION}/{VOLCENGINE_SERVICE}/request");
-        let string_to_sign =
-            format!("HMAC-SHA256\n{datetime_str}\n{credential_scope}\n{hashed_canonical}");
-
-        let signing_key = build_signing_key(secret_key, &date_str);
-        let signature = hex::encode(hmac_sha256(&signing_key, string_to_sign.as_bytes()));
-
-        let authorization = format!(
-            "HMAC-SHA256 Credential={access_key}/{credential_scope}, SignedHeaders={signed_headers}, Signature={signature}"
-        );
-
-        let url = format!("https://{VOLCENGINE_API_HOST}/?{query}");
-        let resp = client
-            .post(&url)
-            .header("Host", VOLCENGINE_API_HOST)
-            .header("X-Date", &datetime_str)
-            .header("X-Content-Sha256", &hashed_body)
-            .header("Authorization", &authorization)
-            .header("Content-Type", "application/json")
-            .body(body.to_vec())
-            .send()
-            .await
-            .map_err(ProviderError::Http)?;
+        let resp = self
+            .signed_post(client, &query, body, access_key, secret_key)
+            .await?;
 
         let status = resp.status();
         if !status.is_success() {
@@ -509,10 +478,6 @@ fn hmac_sha256(key: &[u8], msg: &[u8]) -> [u8; 32] {
     result.into()
 }
 
-fn build_signing_key(secret_key: &str, date: &str) -> Vec<u8> {
-    build_signing_key_for(secret_key, date, VOLCENGINE_SERVICE)
-}
-
 fn build_signing_key_for(secret_key: &str, date: &str, service: &str) -> Vec<u8> {
     let k_date = hmac_sha256(secret_key.as_bytes(), date.as_bytes());
     let k_region = hmac_sha256(&k_date, VOLCENGINE_REGION.as_bytes());
@@ -533,7 +498,7 @@ mod tests {
 
     #[test]
     fn test_build_signing_key() {
-        let key = build_signing_key("test-secret", "20240601");
+        let key = build_signing_key_for("test-secret", "20240601", VOLCENGINE_SERVICE);
         assert!(!key.is_empty());
         assert_eq!(key.len(), 32);
     }

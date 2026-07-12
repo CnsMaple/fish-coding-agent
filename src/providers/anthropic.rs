@@ -1,3 +1,4 @@
+use super::common;
 use super::{ChatEvent, ChatRequest, Provider, ProviderError, ToolCall, Usage};
 use crate::config::ProviderKind;
 use crate::function::notifications::ModelInfo;
@@ -35,17 +36,7 @@ impl Provider for AnthropicProvider {
             .await
             .map_err(ProviderError::Http)?;
         let status = resp.status();
-        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-            return Err(ProviderError::AuthFailed(status.as_u16()).into());
-        }
-        if status == reqwest::StatusCode::NOT_FOUND
-            || status == reqwest::StatusCode::METHOD_NOT_ALLOWED
-        {
-            return Err(ProviderError::NoModelsEndpoint.into());
-        }
-        if !status.is_success() {
-            return Err(ProviderError::Other(format!("status {}", status)).into());
-        }
+        common::check_list_models_status(status)?;
         let body: AnthropicModelsResp = resp.json().await.map_err(ProviderError::Http)?;
         Ok(body
             .data
@@ -97,21 +88,10 @@ impl Provider for AnthropicProvider {
             .send()
             .await
             .map_err(ProviderError::Http)?;
-        let resp_status = resp.status();
-        let resp_ct = resp
-            .headers()
-            .get("content-type")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("")
-            .to_string();
+        let (resp_status, resp_ct) = common::response_meta(&resp);
         if !resp_status.is_success() {
-            let status = resp_status;
             let text = resp.text().await.unwrap_or_default();
-            return Err(ProviderError::Other(format!(
-                "status {} ct={} body={}",
-                status, resp_ct, text
-            ))
-            .into());
+            return Err(common::chat_response_error(resp_status, &resp_ct, text).into());
         }
 
         let mut final_usage: Option<Usage> = None;
@@ -121,16 +101,9 @@ impl Provider for AnthropicProvider {
             if ev.data.is_empty() {
                 return Ok(SseControl::Continue);
             }
-            let v: serde_json::Value = match serde_json::from_str(ev.data) {
-                Ok(v) => v,
-                Err(e) => {
-                    let _ = tx.send(ChatEvent::Debug(format!(
-                        "anthropic: malformed SSE json ({}): {}",
-                        e,
-                        &ev.data[..ev.data.len().min(120)]
-                    )));
-                    return Ok(SseControl::Continue);
-                }
+            let v: serde_json::Value = match common::parse_sse_json(&ev, "anthropic", &tx) {
+                Some(v) => v,
+                None => return Ok(SseControl::Continue),
             };
             let kind = if !ev.event.is_empty() {
                 ev.event
@@ -282,7 +255,7 @@ fn anthropic_message(m: &super::ChatMessage) -> serde_json::Value {
                         content.push(serde_json::json!({"type": "text", "text": text_buf}));
                         text_buf.clear();
                     }
-                    let b64 = crate::providers::openai::image_to_base64(&att.asset_path);
+                    let b64 = common::image_to_base64(&att.asset_path);
                     content.push(serde_json::json!({
                         "type": "image",
                         "source": {
@@ -311,13 +284,7 @@ fn merge_tool_use_start(tool_calls: &mut Vec<ToolCall>, event: &serde_json::Valu
         .get("index")
         .and_then(|v| v.as_u64())
         .unwrap_or(tool_calls.len() as u64) as usize;
-    while tool_calls.len() <= idx {
-        tool_calls.push(ToolCall {
-            id: String::new(),
-            name: String::new(),
-            arguments: String::new(),
-        });
-    }
+    common::ensure_tool_slot(tool_calls, idx);
     let call = &mut tool_calls[idx];
     if let Some(id) = event.pointer("/content_block/id").and_then(|v| v.as_str()) {
         call.id = id.to_string();
@@ -337,13 +304,7 @@ fn merge_tool_use_start(tool_calls: &mut Vec<ToolCall>, event: &serde_json::Valu
 
 fn merge_tool_use_delta(tool_calls: &mut Vec<ToolCall>, event: &serde_json::Value, partial: &str) {
     let idx = event.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-    while tool_calls.len() <= idx {
-        tool_calls.push(ToolCall {
-            id: String::new(),
-            name: String::new(),
-            arguments: String::new(),
-        });
-    }
+    common::ensure_tool_slot(tool_calls, idx);
     tool_calls[idx].arguments.push_str(partial);
 }
 

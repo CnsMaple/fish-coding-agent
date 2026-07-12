@@ -278,7 +278,7 @@ pub fn select(messages: &[Message], keep_tokens: u64) -> Option<(String, String)
     }
     let conversation: Vec<String> = messages
         .iter()
-        .map(|m| serialize_message(m))
+        .map(serialize_message)
         .filter(|s| !s.is_empty())
         .collect();
     if conversation.is_empty() {

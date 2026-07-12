@@ -1,10 +1,10 @@
+use super::common;
 use super::{ChatEvent, ChatRequest, Provider, ProviderError, ToolCall, Usage};
 use crate::config::ProviderKind;
 use crate::function::notifications::ModelInfo;
 use crate::net::stream::{drive_sse_stream, SseControl, STREAM_IDLE_TIMEOUT};
 use anyhow::Result;
 use async_trait::async_trait;
-use base64::Engine;
 use serde::Deserialize;
 use tokio::sync::mpsc;
 
@@ -32,17 +32,7 @@ impl Provider for OpenAiProvider {
             .await
             .map_err(ProviderError::Http)?;
         let status = resp.status();
-        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-            return Err(ProviderError::AuthFailed(status.as_u16()).into());
-        }
-        if status == reqwest::StatusCode::NOT_FOUND
-            || status == reqwest::StatusCode::METHOD_NOT_ALLOWED
-        {
-            return Err(ProviderError::NoModelsEndpoint.into());
-        }
-        if !status.is_success() {
-            return Err(ProviderError::Other(format!("status {}", status)).into());
-        }
+        common::check_list_models_status(status)?;
         let body: ModelsResp = resp.json().await.map_err(ProviderError::Http)?;
         Ok(body
             .data
@@ -89,21 +79,10 @@ impl Provider for OpenAiProvider {
             .send()
             .await
             .map_err(ProviderError::Http)?;
-        let resp_status = resp.status();
-        let resp_ct = resp
-            .headers()
-            .get("content-type")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("")
-            .to_string();
+        let (resp_status, resp_ct) = common::response_meta(&resp);
         if !resp_status.is_success() {
-            let status = resp_status;
             let text = resp.text().await.unwrap_or_default();
-            return Err(ProviderError::Other(format!(
-                "status {} ct={} body={}",
-                status, resp_ct, text
-            ))
-            .into());
+            return Err(common::chat_response_error(resp_status, &resp_ct, text).into());
         }
         if !resp_ct.is_empty()
             && !resp_ct.contains("text/event-stream")
@@ -132,16 +111,9 @@ impl Provider for OpenAiProvider {
             if ev.data.is_empty() {
                 return Ok(SseControl::Continue);
             }
-            let v: serde_json::Value = match serde_json::from_str(ev.data) {
-                Ok(v) => v,
-                Err(e) => {
-                    let _ = tx.send(ChatEvent::Debug(format!(
-                        "openai: malformed SSE json ({}): {}",
-                        e,
-                        &ev.data[..ev.data.len().min(120)]
-                    )));
-                    return Ok(SseControl::Continue);
-                }
+            let v: serde_json::Value = match common::parse_sse_json(&ev, "openai", &tx) {
+                Some(v) => v,
+                None => return Ok(SseControl::Continue),
             };
             if let Some(delta) = v.pointer("/choices/0/delta/content") {
                 if let Some(s) = delta.as_str() {
@@ -253,7 +225,7 @@ fn openai_message(m: &super::ChatMessage) -> serde_json::Value {
                         text_buf.clear();
                     }
                     // Read the image file and base64-encode it.
-                    let b64 = image_to_base64(&att.asset_path);
+                    let b64 = common::image_to_base64(&att.asset_path);
                     let url = format!("data:{};base64,{}", att.media_type, b64);
                     content.push(serde_json::json!({
                         "type": "image_url",
@@ -273,14 +245,6 @@ fn openai_message(m: &super::ChatMessage) -> serde_json::Value {
     serde_json::json!({"role": m.role, "content": m.content})
 }
 
-/// Read an image file from disk and return its base64-encoded content.
-pub(crate) fn image_to_base64(path: &std::path::Path) -> String {
-    match std::fs::read(path) {
-        Ok(bytes) => base64::engine::general_purpose::STANDARD.encode(&bytes),
-        Err(_) => String::new(),
-    }
-}
-
 /// Merge OpenAI streaming `tool_calls` deltas into the accumulated
 /// `tool_calls` vector. Returns the indices of slots that were created
 /// or updated in this delta, so callers can emit `ToolArgDelta` only
@@ -297,13 +261,7 @@ fn merge_tool_call_deltas(
             .get("index")
             .and_then(|v| v.as_u64())
             .unwrap_or(tool_calls.len() as u64) as usize;
-        while tool_calls.len() <= idx {
-            tool_calls.push(ToolCall {
-                id: String::new(),
-                name: String::new(),
-                arguments: String::new(),
-            });
-        }
+        common::ensure_tool_slot(tool_calls, idx);
         let call = &mut tool_calls[idx];
         if let Some(id) = delta.get("id").and_then(|v| v.as_str()) {
             call.id = id.to_string();
