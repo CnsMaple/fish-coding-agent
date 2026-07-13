@@ -1009,6 +1009,33 @@ mod tests {
         assert_eq!(m.tool_results[1].content, "result B");
         assert!(!m.tool_results[0].running);
         assert!(!m.tool_results[1].running);
+
+        // Regression: an empty placeholder block (no content and no
+        // streaming input) must not consume any blank lines in the
+        // total line count, otherwise the viewport grows with phantom
+        // blank rows during parallel tool calls.
+        s.messages[1].tool_results.push(ToolResultBlock {
+            name: "webfetch".into(),
+            title: String::new(),
+            content: String::new(),
+            metadata: String::new(),
+            content_offset: 0,
+            visible: true,
+            running: true,
+            failed: false,
+            call_id: "stale".into(),
+            pruned: false,
+            streaming_input: String::new(),
+            cached_line_count_visible: None,
+            cached_line_count_collapsed: None,
+        });
+        let total_with_placeholder = s.count_all_lines_with_width(80);
+        s.messages[1].tool_results.pop();
+        let total_without_placeholder = s.count_all_lines_with_width(80);
+        assert_eq!(
+            total_with_placeholder, total_without_placeholder,
+            "empty placeholder must not change total line count"
+        );
     }
 
     /// Regression: a leftover empty placeholder block (content and

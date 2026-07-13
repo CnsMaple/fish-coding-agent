@@ -1176,6 +1176,14 @@ impl Session {
             // Tool result blocks.
             if self.tool_display != crate::config::ToolResultDisplay::Hide {
                 for t in m.tool_results.iter_mut() {
+                    // Skip placeholder blocks that have no renderable
+                    // content. These are stale duplicates left over
+                    // from parallel tool-call streaming before
+                    // call-id routing; they must not consume a blank
+                    // line in the total.
+                    if t.content.is_empty() && t.streaming_input.is_empty() {
+                        continue;
+                    }
                     let t_vis = t.name == "plan"
                         || match self.tool_display {
                             crate::config::ToolResultDisplay::Show => t.visible,

@@ -375,6 +375,11 @@ pub fn build_message_lines(
             continue;
         }
         let offset = clamp_char_boundary(raw, tool.content_offset.min(raw.len()));
+        // Clamp a tool that was anchored beyond the current content
+        // length back to the end of the content so it renders in the
+        // right visual order and does not create a bogus gap for
+        // content that no longer exists.
+        let offset = offset.min(raw.len());
         items.push(RenderItem {
             offset,
             kind: RenderItemKind::Tool(ti),
@@ -570,7 +575,7 @@ pub(crate) fn count_block_gaps(
     let mut offsets: Vec<usize> = thinking_segments
         .iter()
         .map(|s| s.offset)
-        .chain(tool_results.iter().map(|t| t.content_offset))
+        .chain(tool_results.iter().filter(|t| has_renderable_content(t)).map(|t| t.content_offset))
         .collect();
     offsets.sort();
     let mut gaps: u32 = 0;
@@ -591,6 +596,10 @@ pub(crate) fn count_block_gaps(
         prev = Some(off);
     }
     gaps
+}
+
+fn has_renderable_content(tool: &super::ToolResultBlock) -> bool {
+    !tool.content.is_empty() || !tool.streaming_input.is_empty()
 }
 
 /// Build only the lines that intersect the visible viewport.

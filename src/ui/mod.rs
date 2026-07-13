@@ -167,6 +167,11 @@ pub fn render(f: &mut Frame, app: &mut App) {
         let mut tool_blocks: usize = 0;
         if app.config.tool_display != crate::config::ToolResultDisplay::Hide {
             for (tool_idx, t) in m.tool_results.iter().enumerate() {
+                // Skip empty placeholders left over from parallel
+                // streaming; they have no rendered rows.
+                if t.content.is_empty() && t.streaming_input.is_empty() {
+                    continue;
+                }
                 let t_vis = t.name == "plan"
                     || match app.config.tool_display {
                         crate::config::ToolResultDisplay::Show => t.visible,
