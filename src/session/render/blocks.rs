@@ -1028,6 +1028,24 @@ pub(super) fn render_ask_snapshot_message(
     out
 }
 
+/// Line count for an ask-snapshot message. Mirrors
+/// `render_ask_snapshot_message` so the viewport math matches the
+/// actual rendered output.
+pub fn ask_snapshot_line_count(content: &str, width: usize) -> u32 {
+    let width = width.max(8);
+    let body = content
+        .lines()
+        .skip_while(|l| l.trim_start().starts_with("---ask---"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut n: u32 = 1; // top border
+    for line in body.lines() {
+        n += wrap_line(line, width.saturating_sub(4)).len() as u32;
+    }
+    n += 1; // bottom border
+    n
+}
+
 fn box_row_lines(text: &str, width: usize, bg: Color) -> Vec<Line<'static>> {
     wrap_line(text, width.saturating_sub(4))
         .into_iter()

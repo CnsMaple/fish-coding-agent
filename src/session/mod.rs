@@ -1378,13 +1378,17 @@ fn render_cached_content_lines(m: &mut Message, width: u16) -> u32 {
             return c.count;
         }
     }
-    let segments = crate::session::render::get_thinking_segments(m);
-    let n = crate::session::render::content_line_count_segmented(
-        &m.content,
-        width as usize,
-        &segments,
-        &m.tool_results,
-    );
+    let n = if m.content.trim_start().starts_with("---ask---") {
+        crate::session::render::ask_snapshot_line_count(&m.content, width as usize)
+    } else {
+        let segments = crate::session::render::get_thinking_segments(m);
+        crate::session::render::content_line_count_segmented(
+            &m.content,
+            width as usize,
+            &segments,
+            &m.tool_results,
+        )
+    };
     m.cached_content_line_count = Some(CachedLineCount {
         width,
         count: n,
@@ -1403,12 +1407,16 @@ fn read_cached_content_lines(m: &Message, width: u16) -> u32 {
             return c.count;
         }
     }
-    crate::session::render::content_line_count_segmented(
-        &m.content,
-        width as usize,
-        &m.thinking_segments,
-        &m.tool_results,
-    )
+    if m.content.trim_start().starts_with("---ask---") {
+        crate::session::render::ask_snapshot_line_count(&m.content, width as usize)
+    } else {
+        crate::session::render::content_line_count_segmented(
+            &m.content,
+            width as usize,
+            &m.thinking_segments,
+            &m.tool_results,
+        )
+    }
 }
 
 /// Remove text-based tool call JSON fallback lines from content.

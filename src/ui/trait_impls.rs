@@ -305,7 +305,7 @@ impl TabWidget for crate::function::AskState {
         let body_area = Rect { y: area.y + 1, height: area.height.saturating_sub(1), ..area };
         let total = body_lines.len();
         if total > 0 {
-            let cursor = match self.phase { AskPhase::Asking => self.items[active_idx].cursor, AskPhase::Reviewing => 0 };
+            let cursor = match self.phase { AskPhase::Asking => self.items[active_idx].cursor + 1, AskPhase::Reviewing => 0 };
             let range = visible_window(cursor, &mut self.scroll, body_area.height as usize, total);
             for row in range {
                 let y = body_area.y + (row - self.scroll) as u16;

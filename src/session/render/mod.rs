@@ -3,12 +3,11 @@ mod utils;
 #[cfg(test)]
 mod tests;
 
-pub use blocks::{attachment_block_line_count, get_thinking_segments, skill_block_line_count};
+pub use blocks::{ask_snapshot_line_count, attachment_block_line_count, get_thinking_segments, skill_block_line_count};
 pub use utils::{
     content_line_count, content_line_count_segmented, thinking_block_line_count,
     tool_block_line_count, total_thinking_line_count, visible_width,
 };
-
 use blocks::{
     build_attachment_block_rows, build_skill_block_rows, build_thinking_block_rows,
     build_tool_block_rows, ensure_gap_before_block, push_block_rows, render_ask_snapshot_message,
@@ -194,13 +193,17 @@ pub(crate) fn read_cached_content_count_at(m: &super::Message, width: u16) -> u3
             return c.count;
         }
     }
-    let segments = get_thinking_segments(m);
-    content_line_count_segmented(
-        &m.content,
-        width as usize,
-        &segments,
-        &m.tool_results,
-    )
+    if m.content.trim_start().starts_with("---ask---") {
+        ask_snapshot_line_count(&m.content, width as usize)
+    } else {
+        let segments = get_thinking_segments(m);
+        content_line_count_segmented(
+            &m.content,
+            width as usize,
+            &segments,
+            &m.tool_results,
+        )
+    }
 }
 
 /// Toggle label text used by older tests / callers.
@@ -246,7 +249,21 @@ pub fn build_message_lines(
     // tool-result pipeline.
     if m.content.trim_start().starts_with("---ask---") {
         let rendered = render_ask_snapshot_message(&m.content, width, m.streaming, m.display_cursor);
-        return Arc::new(rendered);
+        let content_line_count = ask_snapshot_line_count(&m.content, width);
+        let lines = Arc::new(rendered);
+        let mut lru = session.message_lines_cache.lock().unwrap();
+        lru.put(
+            msg_idx,
+            CachedMessageLines {
+                content_version: m.content_version,
+                width: width as u16,
+                display_cursor: m.display_cursor,
+                content_len: m.content.len(),
+                lines: Arc::clone(&lines),
+                content_line_count,
+            },
+        );
+        return lines;
     }
 
     let mut msg_lines: Vec<Line<'static>> = Vec::new();
