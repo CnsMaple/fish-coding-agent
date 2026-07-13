@@ -17,11 +17,15 @@ pub async fn execute_tool_with_agent(
     args: &str,
     cwd: &Path,
 ) -> String {
-    use crate::permission::{tool as t, Action};
+    use crate::permission::{tool as t, Action, Agent};
     if matches!(crate::permission::check(agent, name), Action::Deny) {
+        let hint = match agent {
+            Agent::Plan => " (plan mode is read-only; switch to /yolo to edit or run commands)",
+            _ => "",
+        };
         return json!({
             "ok": false,
-            "error": format!("tool `{name}` is not allowed in {} mode", agent.as_str()),
+            "error": format!("tool `{name}` is not allowed in {} mode{}", agent.as_str(), hint),
         })
         .to_string();
     }
@@ -87,11 +91,15 @@ pub async fn execute_tool_streaming_with_agent(
     call_id: &str,
     tx: UnboundedSender<AppMsg>,
 ) -> String {
-    use crate::permission::{tool as t, Action};
+    use crate::permission::{tool as t, Action, Agent};
     if matches!(crate::permission::check(agent, name), Action::Deny) {
+        let hint = match agent {
+            Agent::Plan => " (plan mode is read-only; switch to /yolo to edit or run commands)",
+            _ => "",
+        };
         return json!({
             "ok": false,
-            "error": format!("tool `{name}` is not allowed in {} mode", agent.as_str()),
+            "error": format!("tool `{name}` is not allowed in {} mode{}", agent.as_str(), hint),
         })
         .to_string();
     }

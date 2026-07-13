@@ -860,6 +860,7 @@ pub const COMMAND_LIST: &[&str] = &[
     "/continue",
     "/compact",
     "/plan",
+    "/yolo",
     "/build",
     "/quit",
     "/exit",

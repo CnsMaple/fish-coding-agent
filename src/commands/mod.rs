@@ -83,12 +83,12 @@ pub fn dispatch(app: &mut App, cmd: &str, arg: &str) {
             let arg = arg.trim().to_lowercase();
             if matches!(arg.as_str(), "exit" | "off" | "yolo" | "build") {
                 app.set_mode(crate::function::AppMode::Yolo);
-                app.notify(ToastLevel::Info, "mode: build");
+                app.notify(ToastLevel::Info, "mode: yolo");
             } else if arg.is_empty() {
                 app.set_mode(crate::function::AppMode::Plan);
                 app.notify(
                     ToastLevel::Info,
-                    "mode: plan (read-only — use /build to switch back)",
+                    "mode: plan (read-only — use /yolo to switch back)",
                 );
             } else {
                 app.notify(
@@ -97,9 +97,9 @@ pub fn dispatch(app: &mut App, cmd: &str, arg: &str) {
                 );
             }
         }
-        "build" => {
+        "yolo" | "build" => {
             app.set_mode(crate::function::AppMode::Yolo);
-            app.notify(ToastLevel::Info, "mode: build");
+            app.notify(ToastLevel::Info, "mode: yolo");
         }
         "quit" | "exit" | "q" => {
             app.should_quit = true;
@@ -942,7 +942,7 @@ The runtime will reject (with an error) any attempt to:
   - websearch (no web searching)
 
 If a task truly requires running a command or mutating a file, hand it back \
-to the user — they can switch to build mode with `/build` and re-send. Do \
+to the user — they can switch to yolo mode with `/yolo` and re-send. Do \
 not pretend to invoke these tools; never claim a tool ran unless you saw \
 its result.
 

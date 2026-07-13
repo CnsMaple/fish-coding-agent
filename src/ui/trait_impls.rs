@@ -452,7 +452,7 @@ impl TabWidget for HotkeyTab {
             ("/retry", "Retry previous prompt"),
             ("/continue", "Continue interrupted output"),
             ("/plan", "Switch to plan mode (read-only)"),
-            ("/build", "Switch back to build mode"),
+            ("/yolo", "Switch back to yolo mode"),
             ("Mouse wheel", "Scroll session"),
         ];
         let lines: Vec<Line> = rows.into_iter().map(|(k, v)| {
