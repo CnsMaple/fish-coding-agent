@@ -176,8 +176,8 @@ if call.name == "read" {
     if call.name == "edit" {
         if let Ok(val) = serde_json::from_str::<serde_json::Value>(&call.arguments) {
             if let Some(old) = val.get("oldString").and_then(|v| v.as_str()) {
-                let display = if old.len() > 40 {
-                    format!("{}…", &old[..40])
+                let display = if old.chars().count() > 40 {
+                    format!("{}…", old.chars().take(40).collect::<String>())
                 } else {
                     old.to_string()
                 };
@@ -190,8 +190,8 @@ if call.name == "read" {
         if let Ok(val) = serde_json::from_str::<serde_json::Value>(&call.arguments) {
             if let Some(pattern) = val.get("pattern").and_then(|v| v.as_str()) {
                 let short = pattern.trim();
-                let display = if short.len() > 40 {
-                    format!("{}…", &short[..40])
+                let display = if short.chars().count() > 40 {
+                    format!("{}…", short.chars().take(40).collect::<String>())
                 } else {
                     short.to_string()
                 };
@@ -214,8 +214,8 @@ if call.name == "read" {
         if let Ok(val) = serde_json::from_str::<serde_json::Value>(&call.arguments) {
             if let Some(pattern) = val.get("pattern").and_then(|v| v.as_str()) {
                 let short = pattern.trim();
-                let display = if short.len() > 40 {
-                    format!("{}…", &short[..40])
+                let display = if short.chars().count() > 40 {
+                    format!("{}…", short.chars().take(40).collect::<String>())
                 } else {
                     short.to_string()
                 };
@@ -235,8 +235,8 @@ if call.name == "read" {
         if let Ok(val) = serde_json::from_str::<serde_json::Value>(&call.arguments) {
             if let Some(name) = val.get("name").and_then(|v| v.as_str()) {
                 let n = name.trim();
-                let display = if n.len() > 40 {
-                    format!("{}…", &n[..40])
+                let display = if n.chars().count() > 40 {
+                    format!("{}…", n.chars().take(40).collect::<String>())
                 } else {
                     n.to_string()
                 };
@@ -248,8 +248,8 @@ if call.name == "read" {
         if let Ok(val) = serde_json::from_str::<serde_json::Value>(&call.arguments) {
             if let Some(url) = val.get("url").and_then(|v| v.as_str()) {
                 let u = url.trim();
-                let display = if u.len() > 50 {
-                    format!("{}…", &u[..50])
+                let display = if u.chars().count() > 50 {
+                    format!("{}…", u.chars().take(50).collect::<String>())
                 } else {
                     u.to_string()
                 };
@@ -261,8 +261,8 @@ if call.name == "read" {
         if let Ok(val) = serde_json::from_str::<serde_json::Value>(&call.arguments) {
             if let Some(query) = val.get("query").and_then(|v| v.as_str()) {
                 let q = query.trim();
-                let display = if q.len() > 40 {
-                    format!("{}…", &q[..40])
+                let display = if q.chars().count() > 40 {
+                    format!("{}…", q.chars().take(40).collect::<String>())
                 } else {
                     q.to_string()
                 };
@@ -281,8 +281,8 @@ if call.name == "read" {
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
             let short = desc.trim();
-            let display = if short.len() > 40 {
-                format!("{}…", &short[..40])
+            let display = if short.chars().count() > 40 {
+                format!("{}…", short.chars().take(40).collect::<String>())
             } else {
                 short.to_string()
             };
