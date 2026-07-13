@@ -467,6 +467,7 @@ pub async fn run_chat_stream(
         // Stream completed (either via Done event or graceful EOF
         // without error). Reset the retry counter so a subsequent
         // failure starts from 1/3, not from the stale count.
+        send_msg(crate::event::AppMsg::ChatWarnClear("rate limit hit".to_string()));
         stream_retries = 0;
 
         if tool_calls.is_empty() && !assistant_content.is_empty() {
@@ -874,6 +875,8 @@ pub(super) async fn run_sub_agent(
 
             break;
             }
+
+        let _ = tx.send(crate::event::AppMsg::ChatWarnClear("rate limit hit".to_string()));
 
         if tool_calls.is_empty() {
             let _ = tx.send(crate::event::AppMsg::ToolDelta {

@@ -83,6 +83,10 @@ pub enum AppMsg {
     /// Stream-level warning event (e.g. retry), shown in notifications
     /// at Warn level so it is more visible than Info-level debug events.
     ChatWarn(String),
+    /// Remove the most recent notification whose text contains the
+    /// given substring. Used to clean up rate-limit retry warnings once
+    /// the retry succeeds.
+    ChatWarnClear(String),
     /// A structured tool result arrived, to be rendered as a collapsible block.
     ChatToolResult {
         name: String,
@@ -708,6 +712,9 @@ fn handle_msg(msg: AppMsg, app: &mut App) {
         }
         AppMsg::ChatWarn(s) => {
             app.notify(crate::function::notifications::ToastLevel::Warn, s);
+        }
+        AppMsg::ChatWarnClear(s) => {
+            app.notifications.remove_last_containing(&s);
         }
         AppMsg::ChatToolResult {
             name,

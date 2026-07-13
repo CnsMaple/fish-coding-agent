@@ -86,6 +86,21 @@ impl Notifications {
         self.searching = false;
     }
 
+    /// Remove the most recent toast whose text contains `substr`
+    /// (case-insensitive). Used to clean up transient warnings such as
+    /// rate-limit retry messages once the retry succeeds.
+    pub fn remove_last_containing(&mut self, substr: &str) {
+        let query = substr.to_ascii_lowercase();
+        if let Some(idx) = self
+            .items
+            .iter()
+            .rposition(|t| t.text.to_ascii_lowercase().contains(&query))
+        {
+            self.items.remove(idx);
+            self.clamp_cursor();
+        }
+    }
+
     pub fn latest_n(&self, n: usize) -> Vec<&Toast> {
         let start = self.items.len().saturating_sub(n);
         self.items.iter().skip(start).collect()
