@@ -350,25 +350,26 @@ fn continue_response(app: &mut App, arg: &str) {
         app.notify(ToastLevel::Warn, MSG_REQUEST_IN_FLIGHT);
         return;
     }
-    // Sent to the model, never shown in the session — we strip the
-    // user message out of `session.messages` right below. An empty
-    // user message confuses most providers (some reject it, others
-    // stall waiting for real input), so always feed the model an
-    // explicit continuation cue. If the user typed `/continue foo`
-    // we just append their note to the cue.
+    // The continuation cue is sent to the model but not shown in the
+    // session, so the assistant's response appears to continue the
+    // interrupted turn. We still push a synthetic user message so the
+    // provider gets a real prompt, then remove it from the UI log.
     let prompt = if arg.is_empty() {
         "Continue from where you left off.".to_string()
     } else {
         format!("Continue from where you left off.\n\n{arg}")
     };
     crate::commands::send_chat(app, prompt, Vec::new());
-    // Remove the user message from session (kept in API request)
+    // Remove the synthetic user message from the session log. The
+    // assistant placeholder was pushed after it, so its index shifts
+    // down by one; update streaming_id so deltas target the right slot.
     if app.inflight.is_some() && app.session.messages.len() >= 2 {
         let idx = app.session.messages.len() - 2;
         if app.session.messages[idx].role == Role::User {
             app.session.messages.remove(idx);
             app.session.invalidate_message_cache_from(idx);
             app.session.invalidate_layout_cache();
+            app.session.streaming_id = Some(idx);
         }
     }
 }

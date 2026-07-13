@@ -2753,16 +2753,16 @@ fn flush_pending_request_is_noop_when_empty() {
 // ============================================================
 
 #[test]
-fn continue_no_arg_sends_meaningful_cue_and_removes_user_message() {
+fn continue_no_arg_sends_meaningful_cue_and_keeps_streaming_slot() {
     // `/continue` (no extra args) must:
     //   1. Send a non-empty continuation prompt to the model so
     //      providers don't stall or 400 on a literal empty user
     //      content (the bug the user reported).
     //   2. Stage a `PendingRequest::Chat`.
-    //   3. NOT keep the synthesized user message in the session
-    //      — it should be removed right after `send_chat` so the
-    //      chat log only shows the previous turn and the new
-    //      streaming assistant.
+    //   3. Remove the synthetic user message from the UI log so the
+    //      response appears to continue the interrupted turn, while
+    //      keeping the streaming id pointing at the assistant
+    //      placeholder so incoming deltas are rendered.
     let mut app = chat_app();
     // Pretend the prior turn produced a partial assistant
     // response. `/continue` is meant to follow an Esc/abort.
@@ -2815,27 +2815,21 @@ fn continue_no_arg_sends_meaningful_cue_and_removes_user_message() {
         "/continue's synthetic user message must be stripped from the session"
     );
 
-    // The actual prompt going to the model is the cue string.
-    let prompts: Vec<&str> = app
-        .session
-        .messages
-        .iter()
-        .map(|m| m.content.as_str())
-        .collect();
-    // We can't see the staged `ChatPending`'s `req.messages`
-    // without consuming it, but we *can* assert that the cue
-    // string is being sent by checking it doesn't appear in the
-    // session (it would have been pushed then removed) AND
-    // that we pushed-and-removed at least one message — i.e.
-    // there is no User message left from this turn.
-    let _ = prompts; // silence unused if some assertions are dropped
+    // The streaming id must point at the assistant placeholder, not
+    // the removed user message, so deltas land in the right slot.
+    assert_eq!(
+        app.session.streaming_id,
+        Some(len - 1),
+        "streaming id should target the last (assistant) message after /continue"
+    );
 }
 
 #[test]
 fn continue_with_arg_appends_to_cue() {
     // `/continue foo` must seed the API request with
-    // "Continue from where you left off.\n\nfoo" and still
-    // strip the synthetic user message from the session.
+    // "Continue from where you left off.\n\nfoo", remove the
+    // synthetic user message from the session log, and keep the
+    // assistant placeholder as the streaming target.
     let mut app = chat_app();
     use crate::session::{Message, Role};
     app.session.push(Message::new(Role::Assistant, "half".to_string()));
@@ -2857,6 +2851,12 @@ fn continue_with_arg_appends_to_cue() {
     assert!(
         app.inflight.is_some(),
         "inflight must be armed so /continue arms the spinner"
+    );
+    let len = app.session.messages.len();
+    assert_eq!(
+        app.session.streaming_id,
+        Some(len - 1),
+        "streaming id should target the assistant placeholder after /continue"
     );
 }
 
