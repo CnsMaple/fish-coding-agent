@@ -126,7 +126,7 @@ pub enum FocusTarget {
 impl SidebarTab {
     /// Number of content lines this tab needs to display, given the
     /// current app state. Used to compute a dynamic panel height that
-    /// shrinks to fit the content and expands up to the 20% cap.
+    /// shrinks to fit the content and expands up to the 30% cap.
     pub fn content_lines(&self, app: &crate::function::App) -> usize {
         match self {
             Self::PastePreview(s) => {

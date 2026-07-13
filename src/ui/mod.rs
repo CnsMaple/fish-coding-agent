@@ -32,7 +32,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
 
     if app.function_visible {
         let remaining = area.height.saturating_sub(input_height + CWD_HEIGHT + agents_height);
-        let pct_height = (remaining as f64 * 0.20) as u16;
+        let pct_height = (remaining as f64 * 0.30) as u16;
         let panel_height = app.function.tabs.get(app.function.active)
             .map_or(4, |t| t.panel_height(pct_height, app));
         constraints.push(Constraint::Length(panel_height));
