@@ -82,6 +82,9 @@ impl Provider for OpenAiProvider {
         let (resp_status, resp_ct) = common::response_meta(&resp);
         if !resp_status.is_success() {
             let text = resp.text().await.unwrap_or_default();
+            if common::is_rate_limited_error(resp_status, &text) {
+                return Err(ProviderError::RateLimited(text).into());
+            }
             return Err(common::chat_response_error(resp_status, &resp_ct, text).into());
         }
         if !resp_ct.is_empty()

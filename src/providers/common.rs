@@ -88,3 +88,13 @@ pub(crate) fn chat_response_error(
 ) -> ProviderError {
     ProviderError::Other(format!("status {status} ct={ct} body={body}"))
 }
+
+/// Check whether a chat response error looks like a rate/quota limit
+/// (HTTP 429 or body containing `insufficient_quota`) so the caller can
+/// apply a longer backoff before retrying.
+pub(crate) fn is_rate_limited_error(status: reqwest::StatusCode, body: &str) -> bool {
+    status == reqwest::StatusCode::TOO_MANY_REQUESTS
+        || body.contains("\"type\":\"insufficient_quota\"")
+        || body.contains("'type':'insufficient_quota'")
+        || body.contains("insufficient_quota")
+}

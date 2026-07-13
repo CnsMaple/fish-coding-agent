@@ -316,7 +316,7 @@ pub async fn run_chat_stream(
         }
     };
     let mut stream_retries = 0u32;
-    let retry_delays = [3u64, 12, 60];
+    let retry_delays = [3u64, 10, 60];
     // Rolling record of recent tool calls (name, arguments) used by
     // the doom-loop detector: when the same tool is invoked 3 times
     // in a row with identical arguments, the loop is broken and the
@@ -435,6 +435,7 @@ pub async fn run_chat_stream(
                 Err(e) => Some(format!("chat task failed: {e:#}")),
             };
             if let Some(e) = err {
+                let is_rate_limit = e.contains("status 429") || e.contains("insufficient_quota");
                 stream_retries += 1;
                 if stream_retries >= 3 {
                     // Show the full error chain in the final failure so
@@ -448,9 +449,12 @@ pub async fn run_chat_stream(
                 // (Info level) so retry notifications are more visible
                 // in the notification list. Use {e:#} to show the full
                 // error chain including the underlying cause.
-                send_msg(crate::event::AppMsg::ChatWarn(format!(
-                    "stream retry {stream_retries}/3 ({delay}s): {e:#}"
-                )));
+                let warn = if is_rate_limit {
+                    format!("rate limit hit, stream retry {stream_retries}/3 (wait {delay}s): {e:#}")
+                } else {
+                    format!("stream retry {stream_retries}/3 ({delay}s): {e:#}")
+                };
+                send_msg(crate::event::AppMsg::ChatWarn(warn));
                 // If an assistant message was pushed to req (we got tool calls),
                 // pop it so the retry starts clean.
                 if !tool_calls.is_empty() {
@@ -744,7 +748,7 @@ pub(super) async fn run_sub_agent(
     };
 
     const MAX_STEPS: usize = 15;
-    let retry_delays: [u64; 3] = [3, 12, 60];
+    let retry_delays: [u64; 3] = [3, 10, 60];
     for step in 0..MAX_STEPS {
         if *cancel_rx.borrow() {
             return json!({"ok": false, "error": "sub-agent cancelled"}).to_string();
@@ -801,16 +805,18 @@ pub(super) async fn run_sub_agent(
             }
 
             if let Some(e) = stream_err {
+                let is_rate_limit = e.contains("status 429") || e.contains("insufficient_quota");
                 stream_retries += 1;
                 if stream_retries >= 3 {
                     return json!({"ok": false, "error": format!("sub-agent stream error after {stream_retries} retries: {e}")})
                         .to_string();
                 }
                 let delay = retry_delays[(stream_retries - 1) as usize];
+                let label = if is_rate_limit { "rate limit hit" } else { "stream retry" };
                 let _ = tx.send(crate::event::AppMsg::ToolDelta {
                     call_id: String::new(),
                     content: format!(
-                        "[sub_agent:{}] stream retry {stream_retries}/3 ({delay}s): {e:#}\n",
+                        "[sub_agent:{}] {label} {stream_retries}/3 ({delay}s): {e:#}\n",
                         sub.as_str()
                     ),
                 });
@@ -824,16 +830,19 @@ pub(super) async fn run_sub_agent(
                         break;
                     }
                     Ok(Err(e)) => {
+                        let e_str = format!("{e:#}");
+                        let is_rate_limit = e_str.contains("status 429") || e_str.contains("insufficient_quota");
                         stream_retries += 1;
                         if stream_retries >= 3 {
                             return json!({"ok": false, "error": format!("sub-agent stream failed after {stream_retries} retries: {e:#}")})
                                 .to_string();
                         }
                         let delay = retry_delays[(stream_retries - 1) as usize];
+                        let label = if is_rate_limit { "rate limit hit" } else { "stream retry" };
                         let _ = tx.send(crate::event::AppMsg::ToolDelta {
                             call_id: String::new(),
                             content: format!(
-                                "[sub_agent:{}] stream retry {stream_retries}/3 ({delay}s): {e:#}\n",
+                                "[sub_agent:{}] {label} {stream_retries}/3 ({delay}s): {e:#}\n",
                                 sub.as_str()
                             ),
                         });
@@ -841,16 +850,19 @@ pub(super) async fn run_sub_agent(
                         continue;
                     }
                     Err(e) => {
+                        let e_str = format!("{e:#}");
+                        let is_rate_limit = e_str.contains("status 429") || e_str.contains("insufficient_quota");
                         stream_retries += 1;
                         if stream_retries >= 3 {
                             return json!({"ok": false, "error": format!("sub-agent task failed after {stream_retries} retries: {e:#}")})
                                 .to_string();
                         }
                         let delay = retry_delays[(stream_retries - 1) as usize];
+                        let label = if is_rate_limit { "rate limit hit" } else { "stream retry" };
                         let _ = tx.send(crate::event::AppMsg::ToolDelta {
                             call_id: String::new(),
                             content: format!(
-                                "[sub_agent:{}] stream retry {stream_retries}/3 ({delay}s): {e:#}\n",
+                                "[sub_agent:{}] {label} {stream_retries}/3 ({delay}s): {e:#}\n",
                                 sub.as_str()
                             ),
                         });

@@ -162,6 +162,8 @@ pub enum ProviderError {
     AuthFailed(u16),
     #[error("http error: {0}")]
     Http(#[from] reqwest::Error),
+    #[error("rate limited: {0}")]
+    RateLimited(String),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
     #[error("json error: {0}")]
