@@ -396,7 +396,7 @@ impl App {
         }
         if !self.function_visible {
             if level == crate::function::notifications::ToastLevel::Fail {
-                self.show_panel();
+                self.function_visible = true;
             }
             self.pending_events = self.pending_events.saturating_add(1);
         }
@@ -998,9 +998,10 @@ impl App {
         self.pending_events = 0;
     }
 
-    /// Show the function panel without stealing focus from the input.
+    /// Show the function panel and move focus to it.
     pub fn show_panel(&mut self) {
         self.function_visible = true;
+        self.focus_target = FocusTarget::FunctionPanel;
     }
 
     /// Ensure the Completion sidebar tab reflects the current input buffer.
@@ -1058,7 +1059,9 @@ impl App {
                 // the candidate list, so auto-show the panel and focus
                 // the new Completion tab.
                 self.function.active = self.function.tabs.len() - 1;
-                self.show_panel();
+                // Completion is shown while the user is still typing in
+                // the input — keep focus on the input so typing continues.
+                self.function_visible = true;
                 self.acknowledge_panel();
             }
         }
