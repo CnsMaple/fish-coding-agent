@@ -40,8 +40,11 @@ pub struct SessionSummary {
     pub id: String,
     pub title: String,
     pub cwd: String,
+    pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    pub last_msg_at: Option<DateTime<Utc>>,
     pub message_count: usize,
+    pub token_total: Option<u64>,
 }
 
 pub fn sessions_dir() -> Result<PathBuf> {
@@ -222,8 +225,11 @@ pub fn list(scope_cwd: Option<&Path>) -> Result<Vec<SessionSummary>> {
                     id: stored.id,
                     title: stored.title,
                     cwd: stored.cwd,
+                    created_at: stored.created_at,
                     updated_at: stored.updated_at,
+                    last_msg_at: stored.messages.last().map(|m| m.ts),
                     message_count: stored.messages.len(),
+                    token_total: stored.token_total,
                 });
                 continue;
             }
@@ -248,8 +254,11 @@ pub fn list(scope_cwd: Option<&Path>) -> Result<Vec<SessionSummary>> {
             id: stored.id,
             title: stored.title,
             cwd: stored.cwd,
+            created_at: stored.created_at,
             updated_at: stored.updated_at,
+            last_msg_at: stored.messages.last().map(|m| m.ts),
             message_count: stored.messages.len(),
+            token_total: stored.token_total,
         });
     }
     out.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));

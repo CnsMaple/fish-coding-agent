@@ -11,6 +11,12 @@ use ratatui::widgets::{Paragraph, Wrap, Widget};
 use crate::theme::Theme;
 use crate::ui::function_panel::{list_item, render_new_provider_picker, visible_window, ensure_cursor_visible, ask_active_question_lines, ask_review_lines};
 
+fn fmt_tokens(n: u64) -> String {
+    if n < 1000 { n.to_string() }
+    else if n < 1_000_000 { format!("{:.1}k", n as f64 / 1000.0) }
+    else { format!("{:.1}m", n as f64 / 1_000_000.0) }
+}
+
 impl TabWidget for crate::function::ModelPickerState {
     fn title(&self) -> &str { "model picker" }
     fn hint(&self) -> &str {
@@ -212,11 +218,13 @@ impl TabWidget for crate::function::SessionPickerState {
                 let y = area.y + (row - self.scroll) as u16;
                 let active = row == self.cursor;
                 let updated = entry.updated_at.format("%m-%d %H:%M").to_string();
+                let last_msg = entry.last_msg_at.map(|t| t.format("%m-%d %H:%M").to_string()).unwrap_or_else(|| "-".to_string());
                 let cwd = std::path::Path::new(&entry.cwd).file_name().and_then(|s| s.to_str()).unwrap_or(entry.cwd.as_str());
+                let tokens = entry.token_total.map(fmt_tokens).unwrap_or_else(|| "-".to_string());
                 let mut spans = Vec::new();
                 spans.push(if active { Span::styled("> ", Theme::bold()) } else { Span::raw("  ") });
                 spans.push(Span::raw(entry.title.clone()));
-                spans.push(Span::styled(format!("  {} msg  {}  {}", entry.message_count, updated, cwd), Theme::dim()));
+                spans.push(Span::styled(format!("  {}msg  {}  use:{}  msg:{}  {}", entry.message_count, tokens, updated, last_msg, cwd), Theme::dim()));
                 buf.set_line(area.x, y, &Line::from(spans), area.width);
             }
         }
