@@ -124,13 +124,7 @@ pub(super) struct SubAgentArgs {
 pub(super) fn resolve_workspace_path(cwd: &Path, path: &str) -> Result<PathBuf> {
     let requested = Path::new(path);
     if requested.is_absolute() {
-        return Err(anyhow!("path must be relative to workspace (got absolute path: {})", path));
-    }
-    if requested
-        .components()
-        .any(|c| matches!(c, std::path::Component::ParentDir))
-    {
-        return Err(anyhow!("path must not contain .."));
+        return Ok(requested.to_path_buf());
     }
     Ok(cwd.join(requested))
 }
@@ -140,7 +134,11 @@ pub(super) fn select_lines(text: &str, start_line: Option<usize>, end_line: Opti
         (None, None) => Ok(text.to_string()),
         (Some(start), Some(end)) => {
             if start == 0 || end == 0 || start > end {
-                return Err(anyhow!("invalid line range"));
+                return Err(anyhow!(
+                    "invalid line range: start_line must be <= end_line (got {}:{})",
+                    start,
+                    end
+                ));
             }
             Ok(text
                 .lines()
