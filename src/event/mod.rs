@@ -249,35 +249,7 @@ where
     const DRAW_INTERVAL: Duration = Duration::from_millis(16);
 
     loop {
-        // Edge auto-scroll during an active drag selection.
-        if app.tui_auto_scroll_dir != 0
-            && app.tui_selection.as_ref().is_some_and(|s| s.active)
-        {
-            if let Some(area) = app.session_area {
-                let width = area.width as usize;
-                let total = app.session.count_all_lines_with_width(width);
-                let inner_h = area.height as u32;
-                let max_scroll = total.saturating_sub(inner_h);
-                let dir = app.tui_auto_scroll_dir;
-                let step = 3u32;
-                let new_scroll = if dir < 0 {
-                    app.session.scroll.saturating_add(step).min(max_scroll)
-                } else {
-                    app.session.scroll.saturating_sub(step)
-                };
-                app.set_scroll_anchored(new_scroll);
-                if let Some(sel) = app.tui_selection.as_mut() {
-                    let edge_y = if dir < 0 {
-                        area.top()
-                    } else {
-                        area.bottom().saturating_sub(1)
-                    };
-                    sel.doc_end = screen_y_to_doc_line(edge_y, &area, new_scroll, total);
-                }
-                needs_draw = true;
-            }
-        }
-        // Throttled draw: at most once per DRAW_INTERVAL.
+        // Throttled draw: at least once per DRAW_INTERVAL.
         if needs_draw && last_draw.elapsed() >= DRAW_INTERVAL {
             if let Err(e) = terminal.draw(|f| crate::ui::render(f, app)) {
                 let _ = e;
@@ -1888,7 +1860,6 @@ match m.kind {
             app.tui_selection = None;
             app.selected_text = None;
             app.tui_drag_start = Some((m.column, m.row));
-            app.tui_auto_scroll_dir = 0;
             app.input.clear_selection();
             if let Ok(mut d) = DRAG.lock() {
                 d.active = false;
@@ -1916,7 +1887,14 @@ match m.kind {
                         let width = area.width as usize;
                         let total = app.session.count_all_lines_with_width(width);
                         let doc_start = screen_y_to_doc_line(start.1, &area, app.session.scroll, total);
-                        app.tui_selection = Some(crate::function::Selection::new(doc_start));
+                        let col_start = start.0.saturating_sub(area.x);
+                        app.tui_selection = Some(crate::function::Selection {
+                            doc_start,
+                            doc_end: doc_start,
+                            col_start: Some(col_start),
+                            col_end: Some(col_start),
+                            active: true,
+                        });
                     }
                 }
                 if let Some(sel) = app.tui_selection.as_mut() {
@@ -1924,13 +1902,7 @@ match m.kind {
                         let width = area.width as usize;
                         let total = app.session.count_all_lines_with_width(width);
                         sel.doc_end = screen_y_to_doc_line(m.row, &area, app.session.scroll, total);
-                        if m.row <= area.top().saturating_add(2) {
-                            app.tui_auto_scroll_dir = -1;
-                        } else if m.row.saturating_add(3) >= area.bottom() {
-                            app.tui_auto_scroll_dir = 1;
-                        } else {
-                            app.tui_auto_scroll_dir = 0;
-                        }
+                        sel.col_end = Some(m.column.saturating_sub(area.x));
                     }
                 }
             }
@@ -1962,7 +1934,6 @@ match m.kind {
             // A click (Down + Up with no Drag) ends here: no selection
             // was ever created, so nothing to finalize.
             app.tui_drag_start = None;
-            app.tui_auto_scroll_dir = 0;
             if let Some(sel) = app.tui_selection.as_mut() {
                 sel.active = false;
             }

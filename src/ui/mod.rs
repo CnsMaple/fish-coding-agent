@@ -461,11 +461,34 @@ pub(crate) fn doc_line_to_screen_y(line: usize, area: &Rect, scroll: u32, total:
 fn apply_selection_style(buf: &mut Buffer, sel: &Selection, area: &Rect, scroll: u32, total: u32) {
     let y_start = sel.doc_start.min(sel.doc_end);
     let y_end = sel.doc_start.max(sel.doc_end);
+    // Determine column range. When the user drags upward (doc_end <
+    // doc_start), the visual start column belongs to the bottom-most
+    // original line, so normalize accordingly.
+    let (col_lo, col_hi) = if sel.doc_start <= sel.doc_end {
+        (sel.col_start, sel.col_end)
+    } else {
+        (sel.col_end, sel.col_start)
+    };
+    // Columns are relative to the session area; convert to absolute x.
+    let x_lo = col_lo.map(|c| area.x + c.min(area.width.saturating_sub(1)));
+    let x_hi = col_hi.map(|c| area.x + c.min(area.width.saturating_sub(1)));
     let width = buf.area().width;
-    let w = width.saturating_sub(1);
+    let buf_x_start = x_lo.unwrap_or(0);
+    let buf_x_end = x_hi.unwrap_or(width.saturating_sub(1));
     for doc_line in y_start..=y_end {
         if let Some(screen_y) = doc_line_to_screen_y(doc_line, area, scroll, total) {
-            for x in 0..=w {
+            // First and last rows use the column clamp; middle rows
+            // span the full width.
+            let (row_x_start, row_x_end) = if y_start == y_end {
+                (buf_x_start, buf_x_end)
+            } else if doc_line == y_start {
+                (buf_x_start, width.saturating_sub(1))
+            } else if doc_line == y_end {
+                (0, buf_x_end)
+            } else {
+                (0, width.saturating_sub(1))
+            };
+            for x in row_x_start..=row_x_end {
                 if let Some(cell) = buf.cell_mut((x, screen_y)) {
                     let new_style = cell.style().add_modifier(Modifier::REVERSED);
                     cell.set_style(new_style);
@@ -486,6 +509,13 @@ pub fn extract_selection_text(
 ) -> String {
     let y_start = sel.doc_start.min(sel.doc_end);
     let y_end = sel.doc_start.max(sel.doc_end);
+    let (col_lo, col_hi) = if sel.doc_start <= sel.doc_end {
+        (sel.col_start, sel.col_end)
+    } else {
+        (sel.col_end, sel.col_start)
+    };
+    let col_lo = col_lo.unwrap_or(0) as usize;
+    let col_hi = col_hi.map(|c| c as usize).unwrap_or(width);
     let mut lines: Vec<String> = Vec::new();
 
     let offsets = &session.line_offsets;
@@ -512,11 +542,25 @@ pub fn extract_selection_text(
         let local_end = y_end.min(msg_end.saturating_sub(1)).saturating_sub(msg_start);
 
         let rendered = crate::session::render::build_message_lines(session, msg_idx, width);
-        for i in local_start..=local_end.min(rendered.len().saturating_sub(1)) {
-            let line_text: String = rendered[i].spans.iter()
+        for (i, line) in rendered.iter().enumerate() {
+            if i < local_start || i > local_end {
+                continue;
+            }
+            let full: String = line.spans.iter()
                 .map(|s| s.content.as_ref())
                 .collect();
-            lines.push(line_text.trim_end().to_string());
+            // Determine column slice for this row.
+            let (cs, ce) = if y_start == y_end {
+                (col_lo, col_hi)
+            } else if i == local_start {
+                (col_lo, full.chars().count())
+            } else if i == local_end {
+                (0, col_hi)
+            } else {
+                (0, full.chars().count())
+            };
+            let sliced = slice_by_visual_width(&full, cs, ce);
+            lines.push(sliced.trim_end().to_string());
         }
     }
 
@@ -524,6 +568,29 @@ pub fn extract_selection_text(
         lines.pop();
     }
     compact_render_spacing(&lines.join("\n"))
+}
+
+/// Slice a string by visual (terminal cell) column range [start, end),
+/// respecting wide (CJK) characters that occupy 2 cells.
+fn slice_by_visual_width(s: &str, start_col: usize, end_col: usize) -> String {
+    let start_col = start_col.min(end_col);
+    let mut out = String::with_capacity(s.len());
+    let mut col = 0usize;
+    let mut started = false;
+    for ch in s.chars() {
+        let w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if !started && col + w > start_col {
+            started = true;
+        }
+        if started {
+            if col >= end_col {
+                break;
+            }
+            out.push(ch);
+        }
+        col += w;
+    }
+    out
 }
 
 pub(crate) fn compact_render_spacing(text: &str) -> String {

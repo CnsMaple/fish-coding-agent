@@ -96,9 +96,6 @@ pub struct App {
     /// Lets us avoid creating a single-cell "selection" for an
     /// ordinary click with no drag movement.
     pub tui_drag_start: Option<(u16, u16)>,
-    /// Edge auto-scroll direction during an active drag selection.
-    /// -1 = scroll up, 1 = scroll down, 0 = none.
-    pub tui_auto_scroll_dir: i32,
     /// Timestamp of the last mouse event. Used to detect stale drags
     /// when the mouse leaves and re-enters the terminal.
     pub last_mouse_event: Option<Instant>,
@@ -192,11 +189,17 @@ pub struct App {
 }
 
 /// Mouse-driven text selection spanning the full TUI. Coordinates are
-/// document-global line indices (0-based from the top of the session).
+/// document-global line indices (0-based from the top of the session)
+/// plus screen-column offsets for intra-line selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Selection {
     pub doc_start: usize,
     pub doc_end: usize,
+    /// Screen column (absolute x within the session area) where the
+    /// selection starts on the `doc_start` line. `None` = full width.
+    pub col_start: Option<u16>,
+    /// Screen column where the selection ends on the `doc_end` line.
+    pub col_end: Option<u16>,
     pub active: bool,
 }
 
@@ -205,6 +208,8 @@ impl Selection {
         Self {
             doc_start: doc_line,
             doc_end: doc_line,
+            col_start: None,
+            col_end: None,
             active: true,
         }
     }
@@ -212,6 +217,8 @@ impl Selection {
     pub fn clear(&mut self) {
         self.doc_start = 0;
         self.doc_end = 0;
+        self.col_start = None;
+        self.col_end = None;
         self.active = false;
     }
 }
@@ -294,7 +301,6 @@ impl App {
             tui_selection: None,
             selected_text: None,
             tui_drag_start: None,
-            tui_auto_scroll_dir: 0,
             last_mouse_event: None,
             input_cursor_screen: None,
             focus_target: FocusTarget::Input,

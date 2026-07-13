@@ -73,7 +73,6 @@ fn make_app() -> App {
         tui_selection: None,
         selected_text: None,
         tui_drag_start: None,
-        tui_auto_scroll_dir: 0,
         model_cache_path: cache_file,
         thinking_toggle_rows: Vec::new(),
         tool_toggle_rows: Vec::new(),
