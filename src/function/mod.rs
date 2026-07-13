@@ -168,6 +168,12 @@ pub struct App {
     /// cursor by the mouse wheel; reset to `false` on any edit action.
     pub input_scroll_decoupled: bool,
 
+    /// `true` when the next draw should mark every buffer cell
+    /// `AlwaysUpdate` so ratatui's diff engine repaints the full
+    /// screen. Used after scroll changes to work around BufferDiff
+    /// skipping CJK trailing cells (which leaves 1-cell bg streaks).
+    pub force_full_repaint: bool,
+
     /// `true` while an auto- or manual-compaction stream is in
     /// flight. Independent from `inflight` so the spinner logic /
     /// inflight-based cancel do not interfere with a compaction
@@ -316,6 +322,7 @@ impl App {
             session_scroll: crate::event::ScrollAnimator::default(),
             input_scroll: crate::event::ScrollAnimator::default(),
             input_scroll_decoupled: false,
+            force_full_repaint: false,
             compacting: false,
             pending_post_compaction_prompt: None,
             agents_visible: true,

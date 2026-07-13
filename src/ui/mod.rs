@@ -1,7 +1,7 @@
 use crate::app::App;
 use crate::function::{CancelState, Selection};
 use crate::session::Session;
-use ratatui::buffer::Buffer;
+use ratatui::buffer::{Buffer, CellDiffOption};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
@@ -223,7 +223,24 @@ pub fn render(f: &mut Frame, app: &mut App) {
         app.selected_text = None;
     }
 
-    if let Some((cx, cy)) = app.function_panel_cursor.or(app.input_cursor_screen) {
+    if app.force_full_repaint {
+        let buf = f.buffer_mut();
+        let area = *buf.area();
+        for y in area.top()..area.bottom() {
+            for x in area.left()..area.right() {
+                if let Some(cell) = buf.cell_mut((x, y)) {
+                    if matches!(cell.diff_option, CellDiffOption::None) {
+                        cell.set_diff_option(CellDiffOption::AlwaysUpdate);
+                    }
+                }
+            }
+        }
+        app.force_full_repaint = false;
+        // Skip set_cursor_position so terminal.draw() hides the cursor
+        // internally (None branch). position_ime_cursor will show it
+        // at the correct spot afterwards, avoiding the "cursor flies
+        // to last-flushed cell then jumps back" flicker.
+    } else if let Some((cx, cy)) = app.function_panel_cursor.or(app.input_cursor_screen) {
         f.set_cursor_position((cx, cy));
     }
 }

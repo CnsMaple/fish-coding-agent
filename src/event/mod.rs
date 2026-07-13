@@ -32,7 +32,7 @@ mod tests;
 ///
 /// The function panel cursor (e.g. picker search input) takes priority
 /// over the main input cursor.
-fn position_ime_cursor(app: &mut App) {
+fn position_ime_cursor(app: &App) {
     let cursor = match app.focus_target {
         crate::function::FocusTarget::FunctionPanel => app.function_panel_cursor,
         crate::function::FocusTarget::Input => app.input_cursor_screen,
@@ -50,9 +50,18 @@ fn position_ime_cursor(app: &mut App) {
         *last = Some((cx, cy));
     }
 
-    use std::io::Write;
+    force_show_cursor_at(cx, cy);
+}
 
-    let _ = write!(std::io::stdout(), "\x1B[{};{}H\x1B[?25h", cy + 1, cx + 1,);
+/// Unconditionally move to (cx, cy) and show the cursor, bypassing
+/// the `LAST_CURSOR_POS` de-duplication in `position_ime_cursor`.
+/// Called after a `force_full_repaint` frame, which leaves the
+/// cursor hidden (no `set_cursor_position` in render).
+fn force_show_cursor_at(cx: u16, cy: u16) {
+    use std::io::Write;
+    // Move first, then show, so the cursor never appears at a stale
+    // position.
+    let _ = write!(std::io::stdout(), "\x1B[{};{}H\x1B[?25h", cy + 1, cx + 1);
     let _ = std::io::stdout().flush();
 }
 
@@ -244,6 +253,7 @@ where
     let mut scroll_tick = interval(Duration::from_millis(SCROLL_ANIM_TICK_MS));
     let mut last_status_refresh = std::time::Instant::now();
     let mut needs_draw = true;
+    let mut prev_scroll: Option<u32> = None;
     let mut last_draw = Instant::now();
     // Minimum interval between draws (~60 fps).
     const DRAW_INTERVAL: Duration = Duration::from_millis(16);
@@ -251,10 +261,29 @@ where
     loop {
         // Throttled draw: at least once per DRAW_INTERVAL.
         if needs_draw && last_draw.elapsed() >= DRAW_INTERVAL {
+            let was_full = app.force_full_repaint;
+            if app.force_full_repaint {
+                let _ = terminal.hide_cursor();
+            }
             if let Err(e) = terminal.draw(|f| crate::ui::render(f, app)) {
                 let _ = e;
             }
-            position_ime_cursor(app);
+            if was_full {
+                // render() already cleared force_full_repaint and skipped
+                // set_cursor_position, so terminal.draw() hid the cursor.
+                // Bypass the LAST_CURSOR_POS de-dup to unconditionally
+                // show it at the correct spot.
+                let cur = match app.focus_target {
+                    crate::function::FocusTarget::FunctionPanel => app.function_panel_cursor,
+                    crate::function::FocusTarget::Input => app.input_cursor_screen,
+                    crate::function::FocusTarget::AgentsCheckbox => None,
+                };
+                if let Some((cx, cy)) = cur {
+                    force_show_cursor_at(cx, cy);
+                }
+            } else {
+                position_ime_cursor(app);
+            }
             last_draw = Instant::now();
             needs_draw = false;
 
@@ -263,10 +292,9 @@ where
             // deferred request — see `submit_input` /
             // `commands::send_message` for the producer side.
             flush_pending_request(app);
-            // Drain a queued post-compaction continue prompt, if
-            // any. The session is idle (no inflight) so this is the
-            // safest spot to launch the synthetic follow-up.
             drain_post_compaction_prompt(app);
+
+            prev_scroll = Some(app.session.scroll);
         }
 
         tokio::select! {
@@ -342,6 +370,17 @@ Event::Resize(_, _) => {}
                     last_status_refresh = std::time::Instant::now();
                     needs_draw = true;
                 }
+            }
+        }
+
+        // Detect scroll changes to force a full repaint (every cell
+        // marked AlwaysUpdate) on the next draw. This works around
+        // ratatui's BufferDiff skipping CJK trailing cells, which
+        // leaves 1-cell bg-color streaks when wide characters scroll
+        // over previously-colored regions.
+        if let Some(prev) = prev_scroll {
+            if prev != app.session.scroll {
+                app.force_full_repaint = true;
             }
         }
 

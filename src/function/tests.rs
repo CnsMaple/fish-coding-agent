@@ -78,6 +78,7 @@ fn make_test_app() -> App {
         session_scroll: crate::event::ScrollAnimator::default(),
         input_scroll: crate::event::ScrollAnimator::default(),
         input_scroll_decoupled: false,
+        force_full_repaint: false,
         compacting: false,
         pending_post_compaction_prompt: None,
         agents_visible: false,
