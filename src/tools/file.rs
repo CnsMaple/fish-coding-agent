@@ -5,7 +5,12 @@ pub(super) async fn read_file(args: &str, cwd: &Path) -> Result<String> {
     let path = resolve_workspace_path(cwd, &args.path)?;
     let text = tokio::fs::read_to_string(&path).await?;
     let selected = select_lines(&text, args.start_line, args.end_line)?;
-    Ok(truncate(selected, READ_OUTPUT_LIMIT))
+    let trimmed = selected.trim_end().to_string();
+    if trimmed.len() > READ_OUTPUT_LIMIT {
+        Ok(truncate_output_str(&trimmed))
+    } else {
+        Ok(trimmed)
+    }
 }
 
 pub(super) async fn write_file(args: &str, cwd: &Path) -> Result<String> {

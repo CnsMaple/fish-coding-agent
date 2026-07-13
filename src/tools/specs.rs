@@ -352,6 +352,7 @@ pub(super) fn tool_defs() -> Vec<ToolDef> {
                     "description": { "type": "string", "description": "A short (3-5 words) description of the task" },
                     "prompt": { "type": "string", "description": "The task for the agent to perform" },
                     "subagent_type": { "type": "string", "enum": ["general", "explore"], "description": "The type of specialized agent to use for this task" },
+                    "max_steps": { "type": "integer", "minimum": 1, "maximum": 100, "default": 15, "description": "Maximum number of steps the sub-agent may take." },
                     "task_id": { "type": "string", "description": "Optional: resume a previous sub-agent session" }
                 },
                 "required": ["description", "prompt", "subagent_type"],

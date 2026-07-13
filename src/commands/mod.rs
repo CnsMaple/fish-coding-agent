@@ -843,11 +843,12 @@ references, or any public web resource relevant to the task.
 Search the web for information. Use when you need up-to-date knowledge beyond your \
 training data, or when the task references technologies or APIs you're unsure about.
 
-### sub_agent(description, prompt, subagent_type, task_id?)
+### sub_agent(description, prompt, subagent_type, max_steps?, task_id?)
 
 Delegate a complex, multi-step subtask to a sub-agent. The sub-agent runs independently \
 and returns a single result. Use `\"general\"` for broad tasks and `\"explore\"` for \
-codebase search/analysis. The sub-agent cannot spawn further sub-agents.
+codebase search/analysis. The sub-agent cannot spawn further sub-agents. `max_steps` \
+defaults to 15 and is capped at 100.
 
 ## Workflow
 

@@ -117,6 +117,8 @@ pub(super) struct SubAgentArgs {
     pub(super) prompt: String,
     #[serde(rename = "subagent_type")]
     pub(super) subagent_type: String,
+    #[serde(rename = "max_steps", default)]
+    pub(super) max_steps: Option<u64>,
     #[serde(rename = "task_id")]
     pub(super) task_id: Option<String>,
 }

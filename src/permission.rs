@@ -35,7 +35,7 @@ pub mod tool {
 pub enum SubAgent {
     /// Full tool access except `sub_agent` (no recursion).
     General,
-    /// Read-only exploration: read, grep, glob, list, webfetch, websearch, skill.
+    /// Read-only exploration: read, grep, glob, list, webfetch, websearch.
     Explore,
 }
 
@@ -139,12 +139,12 @@ fn explore_sub_agent_rules() -> &'static [(&'static str, Action)] {
         (tool::PYTHON_COMMAND, Action::Deny),
         (tool::GREP, Action::Allow),
         (tool::LIST, Action::Allow),
-        (tool::PLAN, Action::Allow),
-        (tool::ASK, Action::Allow),
-        (tool::TODO_WRITE, Action::Allow),
+        (tool::PLAN, Action::Deny),
+        (tool::ASK, Action::Deny),
+        (tool::TODO_WRITE, Action::Deny),
         (tool::GLOB, Action::Allow),
         (tool::WRITE, Action::Deny),
-        (tool::SKILL, Action::Allow),
+        (tool::SKILL, Action::Deny),
         (tool::WEB_FETCH, Action::Allow),
         (tool::WEB_SEARCH, Action::Allow),
         (tool::SUB_AGENT, Action::Deny),
@@ -290,6 +290,14 @@ mod tests {
         assert_eq!(check_sub_agent(SubAgent::Explore, tool::GREP), Action::Allow);
         assert_eq!(check_sub_agent(SubAgent::Explore, tool::GLOB), Action::Allow);
         assert_eq!(check_sub_agent(SubAgent::Explore, tool::WEB_FETCH), Action::Allow);
+    }
+
+    #[test]
+    fn explore_denies_interaction_tools() {
+        assert_eq!(check_sub_agent(SubAgent::Explore, tool::PLAN), Action::Deny);
+        assert_eq!(check_sub_agent(SubAgent::Explore, tool::ASK), Action::Deny);
+        assert_eq!(check_sub_agent(SubAgent::Explore, tool::TODO_WRITE), Action::Deny);
+        assert_eq!(check_sub_agent(SubAgent::Explore, tool::SKILL), Action::Deny);
     }
 
     #[test]
