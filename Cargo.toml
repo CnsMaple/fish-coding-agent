@@ -42,6 +42,7 @@ base64 = "0.22.1"
 hex = "0.4"
 uuid = { version = "1.23.3", features = ["v4", "serde"] }
 open = "5"
+image = { version = "0.25", default-features = false, features = ["png"] }
 rmcp = { version = "2.0", default-features = false, features = [
     "client",
     "server",

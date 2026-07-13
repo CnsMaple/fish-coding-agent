@@ -219,23 +219,23 @@ pub fn skill_block_line_count(skill: &SkillRef, _width: usize) -> u32 {
     rows
 }
 
-/// Build dim placeholder rows for pasted image attachments.
+/// Build placeholder rows for pasted image attachments.
 /// Each image gets one row: `[image #K] png 1024x768 234KB`.
 pub(super) fn build_attachment_block_rows(
     attachments: &[ImageAttachment],
-    _width: usize,
+    width: usize,
 ) -> Vec<Line<'static>> {
+    let width = width.max(8);
     let mut rows = Vec::new();
-    // Top border
-    rows.push(Line::from(Span::styled(
-        "┌ images ────────────────────────────────────────────────",
-        Style::default().dim(),
-    )));
+    // Use a transparent background so borders are uniform dim grey
+    // rather than tinted by a colored block background.
+    let bg = Color::Reset;
+    rows.push(border_with_label_line(width, " images ", bg));
     for (i, att) in attachments.iter().enumerate() {
         let size_kb = (att.byte_size + 512) / 1024;
         let label = if att.width > 0 && att.height > 0 {
             format!(
-                "  [image #{}] {} {}x{} · {}KB",
+                "[image #{}] {} {}x{} · {}KB",
                 i + 1,
                 att.media_type,
                 att.width,
@@ -243,20 +243,11 @@ pub(super) fn build_attachment_block_rows(
                 size_kb
             )
         } else {
-            format!(
-                "  [image #{}] {} · {}KB",
-                i + 1,
-                att.media_type,
-                size_kb
-            )
+            format!("[image #{}] {} · {}KB", i + 1, att.media_type, size_kb)
         };
-        rows.push(Line::from(Span::styled(label, Style::default().dim())));
+        rows.push(box_row_line(&label, width, bg));
     }
-    // Bottom border
-    rows.push(Line::from(Span::styled(
-        "└────────────────────────────────────────────────────────",
-        Style::default().dim(),
-    )));
+    rows.push(border_line(width, bg));
     rows
 }
 

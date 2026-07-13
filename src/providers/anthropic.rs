@@ -256,6 +256,10 @@ fn anthropic_message(m: &super::ChatMessage) -> serde_json::Value {
                         text_buf.clear();
                     }
                     let b64 = common::image_to_base64(&att.asset_path);
+                    if b64.is_empty() {
+                        content.push(serde_json::json!({"type": "text", "text": "[image load failed]"}));
+                        continue;
+                    }
                     content.push(serde_json::json!({
                         "type": "image",
                         "source": {

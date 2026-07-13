@@ -226,11 +226,15 @@ fn openai_message(m: &super::ChatMessage) -> serde_json::Value {
                     }
                     // Read the image file and base64-encode it.
                     let b64 = common::image_to_base64(&att.asset_path);
-                    let url = format!("data:{};base64,{}", att.media_type, b64);
-                    content.push(serde_json::json!({
-                        "type": "image_url",
-                        "image_url": { "url": url }
-                    }));
+                    if b64.is_empty() {
+                        content.push(serde_json::json!({"type": "text", "text": "[image load failed]"}));
+                    } else {
+                        let url = format!("data:{};base64,{}", att.media_type, b64);
+                        content.push(serde_json::json!({
+                            "type": "image_url",
+                            "image_url": { "url": url }
+                        }));
+                    }
                 }
             }
         }

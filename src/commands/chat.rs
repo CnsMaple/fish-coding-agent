@@ -202,10 +202,20 @@ pub fn send_message(app: &mut App, user_msg: Message) {
                     });
                 }
             } else {
+                // Preserve image attachments on user messages by converting
+                // Message::attachments into ChatMessage content_parts so the
+                // provider can send them as multimodal content.
+                let mut content_parts = Vec::new();
+                if !m.content.is_empty() {
+                    content_parts.push(crate::session::ContentPart::Text(m.content.clone()));
+                }
+                for att in &m.attachments {
+                    content_parts.push(crate::session::ContentPart::Image(att.clone()));
+                }
                 msgs.push(ChatMessage {
                     role,
                     content: m.content.clone(),
-                    content_parts: Vec::new(),
+                    content_parts,
                     tool_call_id: None,
                     tool_calls: Vec::new(),
                 });

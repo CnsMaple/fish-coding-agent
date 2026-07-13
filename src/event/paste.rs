@@ -3,6 +3,32 @@ use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use super::pickers::close_active_function_tab;
+
+/// Encode raw BGRA clipboard image data into a PNG.
+/// arboard returns ImageData as raw pixels, not an encoded image.
+fn encode_image_data_to_png(img_data: &arboard::ImageData<'_>) -> Option<Vec<u8>> {
+    use image::codecs::png::PngEncoder;
+    use image::ImageEncoder;
+    let width = img_data.width as u32;
+    let height = img_data.height as u32;
+    if width == 0 || height == 0 || img_data.bytes.len() < (width * height * 4) as usize {
+        return None;
+    }
+    // Convert BGRA to RGBA.
+    let mut rgba: Vec<u8> = Vec::with_capacity(img_data.bytes.len());
+    for chunk in img_data.bytes.chunks_exact(4) {
+        rgba.extend_from_slice(&[chunk[2], chunk[1], chunk[0], chunk[3]]);
+    }
+    let mut encoded: Vec<u8> = Vec::new();
+    let encoder = PngEncoder::new(&mut encoded);
+    if encoder
+        .write_image(&rgba, width, height, image::ExtendedColorType::Rgba8)
+        .is_err()
+    {
+        return None;
+    }
+    Some(encoded)
+}
 /// Unified Ctrl+V / Cmd+V handler: open clipboard once, try image
 /// first, fall back to text paste.
 /// Open the paste preview sidebar tab, showing the current clipboard
@@ -24,27 +50,30 @@ app.notify(ToastLevel::Warn, "clipboard unavailable");
         return;
     };
 
-    // Try image first.
+    // Try image first. arboard returns raw BGRA pixels, so we need to
+    // re-encode to PNG before storing the asset.
     if let Ok(img_data) = cb.get_image() {
-        let bytes = &img_data.bytes;
-        let media_type = infer_image_type(bytes);
-        let extension = media_type.split('/').nth(1).unwrap_or("png");
-        let hash = hex::encode(Sha256::digest(bytes));
+        let Some(png_bytes) = encode_image_data_to_png(&img_data) else {
+            app.notify(ToastLevel::Warn, "clipboard image encoding failed");
+            return;
+        };
+        let media_type = "image/png";
+        let hash = hex::encode(Sha256::digest(&png_bytes));
         if let Ok(assets_dir) = crate::session::store::assets_dir(&app.session_id) {
             let _ = std::fs::create_dir_all(&assets_dir);
-            let filename = format!("{hash}.{extension}");
+            let filename = format!("{hash}.png");
             let asset_path = assets_dir.join(&filename);
             if !asset_path.exists() {
-                let _ = std::fs::write(&asset_path, bytes);
+                let _ = std::fs::write(&asset_path, &png_bytes);
             }
             state.image = Some(ImageAttachment {
                 asset_path,
                 media_type: media_type.to_string(),
-                byte_size: bytes.len() as u64,
+                byte_size: png_bytes.len() as u64,
                 width: img_data.width as u32,
                 height: img_data.height as u32,
             });
-            state.image_bytes = Some(bytes.to_vec());
+            state.image_bytes = Some(png_bytes);
             state.media_type = Some(media_type.to_string());
         }
     }
