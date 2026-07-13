@@ -227,8 +227,8 @@ pub(super) fn build_attachment_block_rows(
 ) -> Vec<Line<'static>> {
     let width = width.max(8);
     let mut rows = Vec::new();
-    // Use a transparent background so borders are uniform dim grey
-    // rather than tinted by a colored block background.
+    // Render the whole block in dim grey so borders and text stay
+    // uniform and visually distinct from the message content.
     let bg = Color::Reset;
     rows.push(border_with_label_line(width, " images ", bg));
     for (i, att) in attachments.iter().enumerate() {
@@ -245,7 +245,7 @@ pub(super) fn build_attachment_block_rows(
         } else {
             format!("[image #{}] {} · {}KB", i + 1, att.media_type, size_kb)
         };
-        rows.push(box_row_line(&label, width, bg));
+        rows.push(box_row_line_dim(&label, width));
     }
     rows.push(border_line(width, bg));
     rows
@@ -899,6 +899,18 @@ pub(super) fn box_row_line(text: &str, width: usize, bg: Color) -> Line<'static>
     let pad = max_content.saturating_sub(visible_width(&text));
     let line_str = format!("| {}{} |", text, " ".repeat(pad));
     Line::from(Span::styled(line_str, bg_style(bg)))
+}
+
+fn box_row_line_dim(text: &str, width: usize) -> Line<'static> {
+    let max_content = width.saturating_sub(4);
+    let text = strip_control_chars(text);
+    let text = truncate_str_to_width(&text, max_content);
+    let pad = max_content.saturating_sub(visible_width(&text));
+    let line_str = format!("| {}{} |", text, " ".repeat(pad));
+    Line::from(Span::styled(
+        line_str,
+        Style::default().add_modifier(Modifier::DIM),
+    ))
 }
 
 fn box_row_line_spans(spans: Vec<Span<'static>>, width: usize, bg: Color) -> Line<'static> {
