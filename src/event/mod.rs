@@ -9,7 +9,6 @@ use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::time::interval;
 
 use crate::app::App;
-use crate::function::AppMode;
 use crate::function::CancelState;
 use crate::ui::screen_y_to_doc_line;
 
@@ -2111,10 +2110,6 @@ pub fn cycle_sidebar_forward(app: &mut App) {
         return;
     }
     app.function.active = (app.function.active + 1) % app.function.tabs.len();
-    if app.mode != AppMode::Plan {
-        app.previous_mode = app.mode;
-    }
-    app.set_mode(AppMode::Plan);
     if app.function_visible {
         app.acknowledge_panel();
     }

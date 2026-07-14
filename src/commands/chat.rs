@@ -753,7 +753,7 @@ pub(super) async fn run_sub_agent(
         tools: Some(tools),
     };
 
-    let retry_delays: [u64; 3] = [3, 10, 60];
+    let retry_delays: [u64; 3] = [10, 30, 60];
     for step in 0..max_steps {
         if *cancel_rx.borrow() {
             return json!({"ok": false, "error": "sub-agent cancelled"}).to_string();
