@@ -132,7 +132,7 @@ pub(super) fn build_thinking_block_rows(
             rows.extend(box_row_lines("[no thinking content]", width, bg));
         } else {
             // Wrap all markdown lines (so content stays visible), then
-            // keep only the last `preview_lines` body rows + a Ctrl+O
+            // keep only the last `preview_lines` body rows + a click
             // hint when content overflows. No padding when content is
             // shorter — the collapsed height matches the content.
             let mut body: Vec<Line<'static>> = Vec::new();
@@ -142,7 +142,7 @@ pub(super) fn build_thinking_block_rows(
             if body.len() > preview_lines {
                 let skip = body.len() - preview_lines;
                 body = body.split_off(skip);
-                body.push(ctrl_o_hint_line(skip, width, bg));
+                body.push(click_hint_line(skip, width, bg));
             }
             rows.extend(body);
         }
@@ -672,7 +672,7 @@ pub(super) fn build_shell_command_rows(
         let (preview, skipped) = collapsed_output_lines(output, preview_lines, width, bg);
         rows.extend(preview);
         if skipped > 0 {
-            rows.push(ctrl_o_hint_line(skipped, width, bg));
+            rows.push(click_hint_line(skipped, width, bg));
         }
     }
 
@@ -712,7 +712,7 @@ pub(super) fn build_output_block_rows(
         let (preview, skipped) = collapsed_output_lines(output, preview_lines, width, bg);
         rows.extend(preview);
         if skipped > 0 {
-            rows.push(ctrl_o_hint_line(skipped, width, bg));
+            rows.push(click_hint_line(skipped, width, bg));
         }
     }
 
@@ -768,7 +768,7 @@ fn build_markdown_block_rows(
         if body_rows.len() > preview_lines {
             let skip = body_rows.len() - preview_lines;
             body_rows = body_rows.split_off(skip);
-            body_rows.push(ctrl_o_hint_line(skip, width, bg));
+            body_rows.push(click_hint_line(skip, width, bg));
         }
         rows.extend(body_rows);
     }
@@ -840,15 +840,15 @@ fn collapsed_output_lines(
     (rows, skipped)
 }
 
-/// Single full-width Ctrl+O hint line for collapsed blocks that
+/// Single full-width click hint line for collapsed blocks that
 /// don't pair the hint with a footer.
-fn ctrl_o_hint_line(skipped: usize, width: usize, bg: Color) -> Line<'static> {
-    let line = format!("[Ctrl+O to collapse/expand {skipped} lines]");
+fn click_hint_line(skipped: usize, width: usize, bg: Color) -> Line<'static> {
+    let line = format!("[click to expand/collapse {skipped} lines]");
     box_row_line(&line, width, bg)
 }
 
 /// One row inside a tool box with a left chunk (typically the
-/// Ctrl+O hint) and a right chunk (typically the timing footer).
+/// click hint) and a right chunk (typically the timing footer).
 /// The middle is filled with the box background so it still looks
 /// like a `box_row_line`. When the chunks would overflow the
 /// available inner width, both are shown full-width stacked on
@@ -1158,7 +1158,7 @@ fn build_python_command_rows(
         let (preview, skipped) = collapsed_output_lines(&output, preview_lines, width, bg);
         rows.extend(preview);
         if skipped > 0 {
-            rows.push(ctrl_o_hint_line(skipped, width, bg));
+            rows.push(click_hint_line(skipped, width, bg));
         }
     }
     if !footer.is_empty() {
@@ -1277,7 +1277,7 @@ fn build_edit_diff_rows(
             rows.push(diff_box_row_line(line, width, bg, lang));
         }
         if skip > 0 {
-            rows.push(ctrl_o_hint_line(skip, width, bg));
+            rows.push(click_hint_line(skip, width, bg));
         }
     }
     rows.push(border_line(width, bg));

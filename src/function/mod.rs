@@ -96,18 +96,23 @@ pub struct App {
     /// Lets us avoid creating a single-cell "selection" for an
     /// ordinary click with no drag movement.
     pub tui_drag_start: Option<(u16, u16)>,
+    /// `(msg_idx, tool_idx)` captured on Mouse Down when the click
+    /// lands inside a tool block. The toggle is deferred to Mouse Up
+    /// so a drag (text selection) inside the block cancels the toggle.
+    pub pending_tool_toggle: Option<(usize, usize)>,
     /// Timestamp of the last mouse event. Used to detect stale drags
     /// when the mouse leaves and re-enters the terminal.
     pub last_mouse_event: Option<Instant>,
     /// Path to the persisted model-cache JSON file. Computed from
     /// `config_path` during construction.
     pub model_cache_path: std::path::PathBuf,
-    /// Screen y-positions of thinking toggle lines, each paired with the
+    /// Screen y-range of thinking toggle blocks, each paired with the
     /// index of the corresponding message. Populated after each render.
-    pub thinking_toggle_rows: Vec<(u16, usize)>,
-    /// Screen y-positions of tool result toggle lines, each paired with
-    /// the index of the corresponding message. Populated after each render.
-    pub tool_toggle_rows: Vec<(u16, usize, usize)>,
+    pub thinking_toggle_rows: Vec<(u16, u16, usize)>,
+    /// Screen y-range of tool result toggle blocks, each paired with
+    /// the index of the corresponding message and tool. Populated after
+    /// each render.
+    pub tool_toggle_rows: Vec<(u16, u16, usize, usize)>,
     /// The screen rect of the session area, updated on each render. Used
     /// by the mouse handler to detect click-in-session for scroll.
     pub session_area: Option<ratatui::layout::Rect>,
@@ -307,6 +312,7 @@ impl App {
             tui_selection: None,
             selected_text: None,
             tui_drag_start: None,
+            pending_tool_toggle: None,
             last_mouse_event: None,
             input_cursor_screen: None,
             focus_target: FocusTarget::Input,
@@ -583,6 +589,7 @@ impl App {
                     last_rendered_total: None,
                     expand_new_tool_results: false,
                     line_offsets: Vec::new(),
+                    pending_scroll_top: None,
                 };
                 self.image_blocks.clear();
                 self.session.invalidate_layout_cache();
@@ -687,6 +694,7 @@ impl App {
                     last_rendered_total: None,
                     expand_new_tool_results: false,
                     line_offsets: Vec::new(),
+                    pending_scroll_top: None,
                 };
                 if let Some(ref p) = stored.provider {
                     self.status.set_provider_name(p);

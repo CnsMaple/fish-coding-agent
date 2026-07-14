@@ -1244,13 +1244,7 @@ async fn handle_key(k: crossterm::event::KeyEvent, app: &mut App) {
         app.notify(ToastLevel::Info, "session cleared");
         return;
     }
-    // Ctrl+O toggles all collapsible tool output blocks at once.
-    if ctrl && matches!(k.code, KeyCode::Char('o') | KeyCode::Char('O')) {
-        app.session.toggle_all_tool_results();
-        return;
-    }
 
-    // Ctrl+N: dedicated shortcut for the Notifications tab.
     //   - panel hidden  -> show it and focus Notifications
     //   - panel showing and Notifications is active -> hide
     //   - panel showing but another tab is active -> switch to Notifications
@@ -1788,6 +1782,11 @@ impl ScrollAnimator {
     }
 }
 
+enum ToggleTarget {
+    Thinking(usize),
+    Tool(usize, usize),
+}
+
 fn handle_mouse(m: MouseEvent, app: &mut App) {
     let prompt = app.input_prompt_area;
     let prefix_width = unicode_width::UnicodeWidthStr::width(" > ") as u16;
@@ -1882,19 +1881,116 @@ fn handle_mouse(m: MouseEvent, app: &mut App) {
         return;
     }
 
-    // Thinking toggle click — if the click lands on a thinking toggle
-    // row, expand / collapse that message's thinking block.
+    // Check if the click landed inside a toggle block (thinking or
+    // tool). If so, capture the pending toggle for Mouse Up — a drag
+    // (text selection) cancels it.
+    let mut pending_toggle: Option<ToggleTarget> = None;
     if matches!(m.kind, MouseEventKind::Down(MouseButton::Left)) {
-        for &(toggle_y, msg_idx) in &app.thinking_toggle_rows {
-            if m.row == toggle_y {
+        for &(top, bot, msg_idx) in &app.thinking_toggle_rows {
+            if m.row >= top && m.row <= bot {
+                pending_toggle = Some(ToggleTarget::Thinking(msg_idx));
+                break;
+            }
+        }
+        if pending_toggle.is_none() {
+            for &(top, bot, msg_idx, tool_idx) in &app.tool_toggle_rows {
+                if m.row >= top && m.row <= bot {
+                    pending_toggle = Some(ToggleTarget::Tool(msg_idx, tool_idx));
+                    break;
+                }
+            }
+        }
+    }
+
+    if matches!(m.kind, MouseEventKind::Down(MouseButton::Left)) {
+        if let Some(target) = pending_toggle {
+            // Defer the actual toggle to Mouse Up so a drag cancels
+            // it. Prevent text selection from starting.
+            app.pending_tool_toggle = match target {
+                ToggleTarget::Thinking(mi) => Some((mi, usize::MAX)),
+                ToggleTarget::Tool(mi, ti) => Some((mi, ti)),
+            };
+            app.tui_selection = None;
+            app.tui_drag_start = None;
+            return;
+        }
+    }
+
+    if matches!(m.kind, MouseEventKind::Drag(MouseButton::Left)) {
+        // A drag cancels any pending toggle — the user is selecting
+        // text inside the block.
+        app.pending_tool_toggle = None;
+    }
+
+    if matches!(m.kind, MouseEventKind::Up(MouseButton::Left)) {
+        if let Some((msg_idx, tool_idx)) = app.pending_tool_toggle.take() {
+            if tool_idx == usize::MAX {
+                // Thinking toggle.
                 if let Some(msg) = app.session.messages.get_mut(msg_idx) {
                     msg.thinking_visible = !msg.thinking_visible;
                 }
-                // Prevent this click from starting a TUI selection.
-                app.tui_selection = None;
-                app.tui_drag_start = None;
-                return;
+            } else {
+                // Tool block toggle.
+                let width = app
+                    .session_area
+                    .map(|a| a.width as usize)
+                    .unwrap_or(120);
+                let preview_lines = app.session.tool_preview_lines;
+                let old_delta = if let Some(msg) = app.session.messages.get(msg_idx) {
+                    if let Some(tool) = msg.tool_results.get(tool_idx) {
+                        let old_vis = tool.visible;
+                        let old_h =
+                            crate::session::render::tool_block_line_count(
+                                tool,
+                                old_vis,
+                                preview_lines,
+                                width,
+                            ) as u32;
+                        let new_h =
+                            crate::session::render::tool_block_line_count(
+                                tool,
+                                !old_vis,
+                                preview_lines,
+                                width,
+                            ) as u32;
+                        Some(new_h as i64 - old_h as i64)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                if let Some(msg) = app.session.messages.get_mut(msg_idx) {
+                    if let Some(tool) = msg.tool_results.get_mut(tool_idx) {
+                        tool.visible = !tool.visible;
+                    }
+                    msg.bump_version();
+                }
+                app.session.invalidate_layout_cache();
+                if let Some(delta) = old_delta {
+                    if delta > 0 {
+                        app.session.scroll = app
+                            .session
+                            .scroll
+                            .saturating_add(delta as u32);
+                    } else if delta < 0 {
+                        app.session.scroll = app
+                            .session
+                            .scroll
+                            .saturating_sub((-delta) as u32);
+                    }
+                    // Sync last_rendered_total to the new total so
+                    // pin_scroll_for_total on the next frame does NOT
+                    // re-absorb the same delta (double compensation).
+                    let w = app.session_area.map(|a| a.width).unwrap_or(120);
+                    let new_total = app.session.count_all_lines_with_width(w as usize);
+                    app.session.last_rendered_total = Some((w, new_total));
+                }
+                app.set_scroll_anchored(app.session.scroll);
             }
+            app.tui_selection = None;
+            app.tui_drag_start = None;
+            return;
         }
     }
 
@@ -1980,6 +2076,7 @@ match m.kind {
             // A click (Down + Up with no Drag) ends here: no selection
             // was ever created, so nothing to finalize.
             app.tui_drag_start = None;
+            app.pending_tool_toggle = None;
             if let Some(sel) = app.tui_selection.as_mut() {
                 sel.active = false;
             }

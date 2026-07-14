@@ -63,7 +63,43 @@ pub fn render(f: &mut Frame, app: &mut App) {
     app.session_area = Some(content_area);
 
     let width_u16 = content_area.width;
+    let inner_h = content_area.height as usize;
     app.session.count_all_lines_with_width(width_u16 as usize);
+
+    let total_lines: usize = app
+        .session
+        .line_offsets
+        .last()
+        .copied()
+        .unwrap_or(0) as usize;
+
+    // If a pending scroll-to-top was set (e.g. by jump_to_message),
+    // compute the scroll using the real inner_h known only at render
+    // time. This avoids the stale-height bug where the panel was
+    // visible when the jump was computed but hidden by the time render
+    // runs, making the viewport taller and the clamp resetting scroll.
+    if let Some(lines_before) = app.session.pending_scroll_top.take() {
+        let new_scroll = (total_lines as u32)
+            .saturating_sub(inner_h as u32)
+            .saturating_sub(lines_before);
+        app.session.scroll = new_scroll;
+        app.session_scroll.snap(new_scroll as f32);
+        // Sync last_rendered_total so pin_scroll_for_total (which
+        // runs next) doesn't treat the total as "grew from 0" and
+        // add a huge delta that clamps scroll back to max (top).
+        app.session.last_rendered_total = Some((width_u16, total_lines as u32));
+    }
+
+    // Pin + clamp scroll BEFORE rendering so the viewport uses the
+    // correct offset this frame. Doing this after `render()` caused a
+    // one-frame mismatch during streaming: content grew, the view
+    // shifted, then scroll was adjusted on the next frame — producing
+    // a visible up-then-down jitter.
+    app.session.pin_scroll_for_total(width_u16, total_lines as u32);
+    app.session.scroll = app
+        .session
+        .scroll
+        .min(total_lines.saturating_sub(inner_h).min(u32::MAX as usize) as u32);
 
     crate::session::render::render(
         content_area,
@@ -79,21 +115,8 @@ pub fn render(f: &mut Frame, app: &mut App) {
 
     app.thinking_toggle_rows.clear();
     app.tool_toggle_rows.clear();
-    let inner_h = content_area.height as usize;
 
-    let total_lines: usize = app
-        .session
-        .line_offsets
-        .last()
-        .copied()
-        .unwrap_or(0) as usize;
-
-    app.session.pin_scroll_for_total(width_u16, total_lines as u32);
-
-    let scroll = app
-        .session
-        .scroll
-        .min(total_lines.saturating_sub(inner_h).min(u32::MAX as usize) as u32);
+    let scroll = app.session.scroll;
     render_session_scrollbar(
         session_frame_area,
         f.buffer_mut(),
@@ -134,74 +157,8 @@ pub fn render(f: &mut Frame, app: &mut App) {
             break;
         }
 
-        let think_show = m.role == crate::session::Role::Assistant
-            && crate::session::render::message_has_thinking(m)
-            && app.config.thinking_display != crate::config::ThinkingDisplay::Hide;
-        let mut thinking_blocks: usize = 0;
-        if think_show {
-            let expanded = (app.config.thinking_display == crate::config::ThinkingDisplay::Show
-                && m.thinking_visible)
-                || (app.config.thinking_display
-                    == crate::config::ThinkingDisplay::ShowWhileStreaming
-                    && (m.streaming || m.thinking_visible));
-            for seg in &m.thinking_segments {
-                if line_idx >= start && line_idx < end {
-                    let screen_y = content_area.y + (line_idx - start) as u16;
-                    app.thinking_toggle_rows.push((screen_y, msg_idx));
-                }
-                let lines = if expanded {
-                    seg.cached_line_count_expanded.unwrap_or(0) as usize
-                } else {
-                    seg.cached_line_count_collapsed.unwrap_or(0) as usize
-                };
-                line_idx += lines;
-                line_idx += 1;
-                thinking_blocks += 1;
-            }
-        }
-
-        let content_lines =
-            crate::session::render::read_cached_content_count_at(m, width_u16) as usize;
-        line_idx += content_lines;
-
-        let mut tool_blocks: usize = 0;
-        if app.config.tool_display != crate::config::ToolResultDisplay::Hide {
-            for (tool_idx, t) in m.tool_results.iter().enumerate() {
-                // Skip empty placeholders left over from parallel
-                // streaming; they have no rendered rows.
-                if t.content.is_empty() && t.streaming_input.is_empty() {
-                    continue;
-                }
-                let t_vis = t.name == "plan"
-                    || match app.config.tool_display {
-                        crate::config::ToolResultDisplay::Show => t.visible,
-                        crate::config::ToolResultDisplay::ShowWhileStreaming => {
-                            m.streaming || t.visible
-                        }
-                        _ => false,
-                    };
-                let lines = if t_vis {
-                    t.cached_line_count_visible.unwrap_or(0) as usize
-                } else {
-                    t.cached_line_count_collapsed.unwrap_or(0) as usize
-                };
-                if lines > 0 && line_idx >= start && line_idx < end && t.name != "plan" {
-                    let screen_y = content_area.y + (line_idx - start) as u16;
-                    app.tool_toggle_rows.push((screen_y, msg_idx, tool_idx));
-                }
-                line_idx += lines;
-                line_idx += 1;
-                tool_blocks += 1;
-            }
-        }
-
-        let first_offset = m.thinking_segments.iter().map(|s| s.offset)
-            .chain(m.tool_results.iter().map(|t| t.content_offset))
-            .min();
-        if first_offset.is_some_and(|off| off > 0) && (thinking_blocks > 0 || tool_blocks > 0) {
-            line_idx += 1;
-        }
-
+        // ── Skill block (rendered before everything else, like
+        // build_message_lines) ──────────────────────────────────
         if m.role == crate::session::Role::User {
             if let Some(skill_ref) = &m.skill_ref {
                 line_idx += crate::session::render::skill_block_line_count(
@@ -209,10 +166,216 @@ pub fn render(f: &mut Frame, app: &mut App) {
                     width_u16 as usize,
                 ) as usize;
             }
+        }
+
+        // ── Attachment block ─────────────────────────────────────
+        if !m.attachments.is_empty() {
+            // ensure_gap_before_block: gap added when lines exist and
+            // last line is non-empty. At this point, if skill block
+            // was pushed, the last line is a trailing blank (non-empty
+            // check fails → no gap). If no skill block and no prior
+            // lines in this message, no gap. So only add gap when a
+            // skill block was NOT pushed (lines start empty → no gap)
+            // — actually ensure_gap_before_block returns early if
+            // msg_lines is empty, so no gap before attachment when
+            // message is empty. This matches: no gap here.
+            line_idx += crate::session::render::attachment_block_line_count(
+                &m.attachments,
+            ) as usize;
+        }
+
+        // ── Interleave content + thinking/tool blocks by offset ─
+        // Mirrors build_message_lines: items sorted by offset (with
+        // the same tiebreaker), content rendered between items,
+        // ensure_gap_before_block before each block, trailing blank
+        // after each block.
+        let raw = if m.streaming {
+            m.visible_content()
+        } else {
+            &m.content
+        };
+
+        let think_show = m.role == crate::session::Role::Assistant
+            && crate::session::render::message_has_thinking(m)
+            && app.config.thinking_display != crate::config::ThinkingDisplay::Hide;
+        let tool_show =
+            app.config.tool_display != crate::config::ToolResultDisplay::Hide;
+
+        // Build sorted items matching build_message_lines.
+        // (offset, is_thinking, thinking_seg_idx or tool_idx,
+        //  tool_results_len_at_open for tiebreaker)
+        enum WalkItem {
+            Thinking(usize), // segment index
+            Tool(usize),     // tool index
+        }
+        let mut items: Vec<(usize, WalkItem)> = Vec::new();
+        if think_show {
+            let segments = crate::session::render::get_thinking_segments(m);
+            for (si, seg) in segments.iter().enumerate() {
+                let offset = crate::session::render::clamp_char_boundary(
+                    raw,
+                    seg.offset.min(raw.len()),
+                );
+                items.push((offset, WalkItem::Thinking(si)));
+            }
+        }
+        if tool_show {
+            for (ti, t) in m.tool_results.iter().enumerate() {
+                if t.content.is_empty() && t.streaming_input.is_empty() {
+                    continue;
+                }
+                let offset = crate::session::render::clamp_char_boundary(
+                    raw,
+                    t.content_offset.min(raw.len()),
+                );
+                let offset = offset.min(raw.len());
+                items.push((offset, WalkItem::Tool(ti)));
+            }
+        }
+        // Sort by offset with the same tiebreaker as build_message_lines.
+        items.sort_by(|(off_a, a), (off_b, b)| {
+            off_a.cmp(off_b).then_with(|| match (a, b) {
+                (WalkItem::Tool(ti), WalkItem::Thinking(si)) => {
+                    let seg = &m.thinking_segments[*si];
+                    if *ti >= seg.tool_results_len_at_open {
+                        std::cmp::Ordering::Greater
+                    } else {
+                        std::cmp::Ordering::Less
+                    }
+                }
+                (WalkItem::Thinking(si), WalkItem::Tool(ti)) => {
+                    let seg = &m.thinking_segments[*si];
+                    if *ti >= seg.tool_results_len_at_open {
+                        std::cmp::Ordering::Less
+                    } else {
+                        std::cmp::Ordering::Greater
+                    }
+                }
+                _ => std::cmp::Ordering::Equal,
+            })
+        });
+
+        let mut cursor = 0usize;
+        let mut prev_line_was_blank = false; // tracks ensure_gap_before_block
+        let mut has_any_line = false; // tracks whether msg_lines was non-empty
+
+        for (offset, item) in &items {
+            let offset = *offset;
+            if offset < cursor {
+                continue;
+            }
+
+            // Render content before this item.
+            if offset > cursor {
+                let seg_text = crate::session::render::strip_legacy_markers(
+                    &raw[cursor..offset],
+                );
+                let seg_lines = crate::session::render::count_md_segment(
+                    &seg_text,
+                    width_u16 as usize,
+                );
+                line_idx += seg_lines as usize;
+                cursor = offset;
+                has_any_line = true;
+                prev_line_was_blank = false;
+            }
+
+            // ensure_gap_before_block: add a blank line if there are
+            // existing lines and the last line is non-empty.
+            if has_any_line && !prev_line_was_blank {
+                line_idx += 1;
+                prev_line_was_blank = true;
+            }
+
+            match item {
+                WalkItem::Thinking(si) => {
+                    let seg = &m.thinking_segments[*si];
+                    let expanded = (app.config.thinking_display
+                        == crate::config::ThinkingDisplay::Show
+                        && m.thinking_visible)
+                        || (app.config.thinking_display
+                            == crate::config::ThinkingDisplay::ShowWhileStreaming
+                            && (m.streaming || m.thinking_visible));
+                    let lines = if expanded {
+                        seg.cached_line_count_expanded.unwrap_or(0) as usize
+                    } else {
+                        seg.cached_line_count_collapsed.unwrap_or(0) as usize
+                    };
+                    let block_top = line_idx;
+                    let block_bot = line_idx + lines; // exclusive
+                    if lines > 0 && block_top < end && block_bot > start {
+                        let screen_top = content_area.y
+                            + block_top.saturating_sub(start).min(inner_h) as u16;
+                        let screen_bot = content_area.y
+                            + (block_bot.min(end) - start).min(inner_h) as u16;
+                        app.thinking_toggle_rows
+                            .push((screen_top, screen_bot.saturating_sub(1), msg_idx));
+                    }
+                    line_idx += lines;
+                    line_idx += 1; // trailing blank
+                    has_any_line = true;
+                }
+                WalkItem::Tool(ti) => {
+                    let t = &m.tool_results[*ti];
+                    let t_vis = t.name == "plan"
+                        || match app.config.tool_display {
+                            crate::config::ToolResultDisplay::Show => t.visible,
+                            crate::config::ToolResultDisplay::ShowWhileStreaming => {
+                                m.streaming || t.visible
+                            }
+                            _ => false,
+                        };
+                    let lines = if t_vis {
+                        t.cached_line_count_visible.unwrap_or(0) as usize
+                    } else {
+                        t.cached_line_count_collapsed.unwrap_or(0) as usize
+                    };
+                    let block_top = line_idx;
+                    let block_bot = line_idx + lines; // exclusive
+                    if lines > 0
+                        && block_top < end
+                        && block_bot > start
+                        && t.name != "plan"
+                    {
+                        let screen_top = content_area.y
+                            + block_top.saturating_sub(start).min(inner_h) as u16;
+                        let screen_bot = content_area.y
+                            + (block_bot.min(end) - start).min(inner_h) as u16;
+                        app.tool_toggle_rows.push((
+                            screen_top,
+                            screen_bot.saturating_sub(1),
+                            msg_idx,
+                            *ti,
+                        ));
+                    }
+                    line_idx += lines;
+                    line_idx += 1; // trailing blank
+                    has_any_line = true;
+                    prev_line_was_blank = true;
+                }
+            }
+        }
+
+        // Render remaining content after last item.
+        if cursor < raw.len() {
+            let seg_text = crate::session::render::strip_legacy_markers(&raw[cursor..]);
+            let seg_lines = crate::session::render::count_md_segment(
+                &seg_text,
+                width_u16 as usize,
+            );
+            line_idx += seg_lines as usize;
+            // Remaining content lines are non-blank; not tracked since
+            // the message loop ends after this.
+        }
+
+        // User messages: 2 background-fill lines (one above content,
+        // one below). build_message_lines inserts a blank at index 0
+        // and pushes a blank at the end, so +2 total.
+        if m.role == crate::session::Role::User {
             line_idx += 2;
         }
 
-        line_idx += 1;
+        line_idx += 1; // inter-message gap
     }
 
     if let Some(sel) = app.tui_selection {

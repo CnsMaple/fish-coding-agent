@@ -988,6 +988,13 @@ impl TimelinePickerState {
     }
 }
 
+/// A segment of content or a tool call, used to sort timeline entries
+/// by their visual position in the session (matching `build_message_lines`).
+struct SnapItem {
+    offset: usize,
+    tool_idx: usize,
+}
+
 fn snapshot_session(session: &Session) -> Vec<TimelineEntry> {
     let mut out = Vec::new();
     for (i, m) in session.messages.iter().enumerate() {
@@ -996,25 +1003,61 @@ fn snapshot_session(session: &Session) -> Vec<TimelineEntry> {
         if matches!(m.role, Role::Assistant) && m.content.trim().is_empty() {
             continue;
         }
-        let first_line = m.content.lines().next().unwrap_or("").trim();
-        let preview = if first_line.chars().count() > 60 {
-            let mut s: String = first_line.chars().take(60).collect();
-            s.push('\u{2026}');
-            s
-        } else if first_line.is_empty() {
-            "(no content)".to_string()
-        } else {
-            first_line.to_string()
-        };
-        out.push(TimelineEntry {
-            msg_idx: i,
-            role: m.role,
-            preview,
-            ts: m.ts,
-            tool_idx: None,
-        });
-        // Add tool call entries for this message.
+
+        // For user messages (no tools/thinking), just add the message.
+        if m.role != Role::Assistant || m.tool_results.is_empty() {
+            let preview = preview_first_line(&m.content);
+            out.push(TimelineEntry {
+                msg_idx: i,
+                role: m.role,
+                preview,
+                ts: m.ts,
+                tool_idx: None,
+            });
+            continue;
+        }
+
+        // For assistant messages with tools, interleave content segments
+        // and tool entries by their content_offset — matching the visual
+        // order in `build_message_lines`.
+        let raw = &m.content;
+
+        // Build sorted items (same logic as build_message_lines).
+        let mut items: Vec<SnapItem> = Vec::new();
         for (ti, t) in m.tool_results.iter().enumerate() {
+            if t.content.is_empty() && t.streaming_input.is_empty() {
+                continue;
+            }
+            let offset = t.content_offset.min(raw.len());
+            items.push(SnapItem { offset, tool_idx: ti });
+        }
+        // Sort by offset; at the same offset, tools are sorted by index.
+        // (Thinking segments are not shown as separate timeline entries.)
+        items.sort_by(|a, b| a.offset.cmp(&b.offset));
+
+        // Walk items, emitting a content segment entry before each tool
+        // when there's text between the previous offset and this tool's
+        // offset. Then emit the tool entry. This produces the same
+        // interleave order as the session view.
+        let mut cursor: usize = 0;
+        for item in &items {
+            if item.offset > cursor {
+                // Content segment between cursor and offset.
+                let seg = &raw[cursor..item.offset];
+                let preview = preview_first_line(seg);
+                if !preview.is_empty() && preview != "(no content)" {
+                    out.push(TimelineEntry {
+                        msg_idx: i,
+                        role: m.role,
+                        preview,
+                        ts: m.ts,
+                        tool_idx: None,
+                    });
+                }
+                cursor = item.offset;
+            }
+            let tool_idx = item.tool_idx;
+            let t = &m.tool_results[tool_idx];
             let tool_preview = if t.title.is_empty() {
                 t.name.clone()
             } else {
@@ -1032,11 +1075,52 @@ fn snapshot_session(session: &Session) -> Vec<TimelineEntry> {
                 role: m.role,
                 preview,
                 ts: m.ts,
-                tool_idx: Some(ti),
+                tool_idx: Some(tool_idx),
+            });
+        }
+
+        // Remaining content after the last tool.
+        if cursor < raw.len() {
+            let seg = &raw[cursor..];
+            let preview = preview_first_line(seg);
+            if !preview.is_empty() && preview != "(no content)" {
+                out.push(TimelineEntry {
+                    msg_idx: i,
+                    role: m.role,
+                    preview,
+                    ts: m.ts,
+                    tool_idx: None,
+                });
+            }
+        }
+
+        // If nothing was emitted (all segments were empty), emit the
+        // message itself so it still appears in the timeline.
+        if !out.iter().any(|e| e.msg_idx == i) {
+            let preview = preview_first_line(&m.content);
+            out.push(TimelineEntry {
+                msg_idx: i,
+                role: m.role,
+                preview,
+                ts: m.ts,
+                tool_idx: None,
             });
         }
     }
     out
+}
+
+fn preview_first_line(content: &str) -> String {
+    let first_line = content.lines().next().unwrap_or("").trim();
+    if first_line.chars().count() > 60 {
+        let mut s: String = first_line.chars().take(60).collect();
+        s.push('\u{2026}');
+        s
+    } else if first_line.is_empty() {
+        "(no content)".to_string()
+    } else {
+        first_line.to_string()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

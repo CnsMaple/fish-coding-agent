@@ -5,7 +5,7 @@ use unicode_width::UnicodeWidthStr;
 use super::blocks::{build_thinking_block_rows, build_tool_block_rows, get_thinking_segments};
 use super::message_has_thinking;
 
-pub(super) fn strip_legacy_markers(s: &str) -> String {
+pub fn strip_legacy_markers(s: &str) -> String {
     s.lines()
         .filter(|line| {
             let t = line.trim();
@@ -15,7 +15,7 @@ pub(super) fn strip_legacy_markers(s: &str) -> String {
         .join("\n")
 }
 
-pub(super) fn clamp_char_boundary(s: &str, mut idx: usize) -> usize {
+pub fn clamp_char_boundary(s: &str, mut idx: usize) -> usize {
     while idx > 0 && !s.is_char_boundary(idx) {
         idx -= 1;
     }
@@ -255,7 +255,7 @@ pub fn content_line_count_segmented(
 /// Uses `render_content_segment` directly so the count is guaranteed
 /// to match the actual rendered output — no divergence between the
 /// counting path and the rendering path.
-fn count_md_segment(text: &str, width: usize) -> u32 {
+pub fn count_md_segment(text: &str, width: usize) -> u32 {
     let mut tmp: Vec<Line<'static>> = Vec::new();
     render_content_segment(text, width, &mut tmp);
     tmp.len() as u32

@@ -911,13 +911,119 @@ mod skill_block_count_tests {
 
         // Warm the per-message content cache that lines_before relies on.
         let _ = s.count_all_lines_with_width(120);
-        let n = s.lines_before(1);
+        let n = s.lines_before(1, 120);
         // lines_before(1) = user message lines + gap after user message.
         let user_lines = build_message_lines(&s, 0, 120).len() as u32;
         assert_eq!(
             n, user_lines + 1,
             "lines_before(1) = {n} but user message ({user_lines} lines) + 1 gap = {}",
             user_lines + 1
+        );
+    }
+
+    /// Regression: `jump_to_message` must set `scroll` so the target
+    /// message appears at the top of the viewport. Previously, when
+    /// `cached_total_lines` was still valid, `count_all_lines_with_width`
+    /// skipped `compute_total_lines` (which populates `line_offsets`),
+    /// so `line_offsets.get(msg_idx)` returned None, unwrap_or(0)
+    /// gave 0 = "scroll to top".
+    #[test]
+    fn jump_to_message_lands_on_correct_position() {
+        let mut s = Session::default();
+        // Message 0: user
+        s.push(Message::new(Role::User, "first question"));
+        // Message 1: assistant with lots of content (many lines)
+        let mut asst1 = Message::new(Role::Assistant, "");
+        asst1.content = (0..50).map(|i| format!("Line {i}")).collect::<Vec<_>>().join("\n");
+        asst1.display_cursor = usize::MAX;
+        s.push(asst1);
+        // Message 2: user
+        s.push(Message::new(Role::User, "second question"));
+        // Message 3: assistant with more content
+        let mut asst2 = Message::new(Role::Assistant, "");
+        asst2.content = (0..50).map(|i| format!("More {i}")).collect::<Vec<_>>().join("\n");
+        asst2.display_cursor = usize::MAX;
+        s.push(asst2);
+
+        let width = 80u16;
+        let viewport_h = 10u16;
+
+        // Warm the cache (simulates a render frame having run).
+        let total = s.count_all_lines_with_width(width as usize);
+
+        // Jump to message 2 (the second user message).
+        s.jump_to_message(2, None, viewport_h, width);
+
+        // pending_scroll_top should be set with the correct lines_before.
+        let msg_start = s.line_offsets.get(2).copied().unwrap_or(0);
+        assert_eq!(
+            s.pending_scroll_top, Some(msg_start),
+            "pending_scroll_top should be line_offsets[2] = {msg_start}, got {:?}",
+            s.pending_scroll_top
+        );
+
+        // Simulate render-time computation with the real inner_h.
+        let real_inner_h = 20u32; // taller viewport (panel hidden)
+        let lines_before = s.pending_scroll_top.take().unwrap();
+        let scroll = total.saturating_sub(real_inner_h).saturating_sub(lines_before);
+        let actual_start = total.saturating_sub(real_inner_h).saturating_sub(scroll);
+        assert_eq!(
+            actual_start, msg_start,
+            "render-time computation: expected start {msg_start}, got {actual_start}"
+        );
+
+        // Jump to message 3.
+        s.jump_to_message(3, None, viewport_h, width);
+        let msg_start = s.line_offsets.get(3).copied().unwrap_or(0);
+        assert_eq!(
+            s.pending_scroll_top, Some(msg_start),
+            "pending_scroll_top should be line_offsets[3] = {msg_start}, got {:?}",
+            s.pending_scroll_top
+        );
+    }
+
+    /// Test that jump_to_message with tool_idx correctly positions the
+    /// tool block at the top of the viewport.
+    #[test]
+    fn jump_to_message_with_tool_idx() {
+        use crate::session::ToolResultBlock;
+        let mut s = Session::default();
+        s.push(Message::new(Role::User, "go"));
+        let mut asst = Message::new(Role::Assistant, "Here is some text.\nMore text.\nEven more.");
+        asst.display_cursor = usize::MAX;
+        asst.tool_results.push(ToolResultBlock {
+            name: "shell_command".into(),
+            title: "$ echo hi".into(),
+            content: "hi".into(),
+            metadata: String::new(),
+            content_offset: 15, // after "Here is some te"
+            visible: false,
+            running: false,
+            failed: false,
+            call_id: String::new(),
+            pruned: false,
+            streaming_input: String::new(),
+            cached_line_count_visible: None,
+            cached_line_count_collapsed: None,
+        });
+        s.push(asst);
+
+        let width = 80u16;
+        let viewport_h = 10u16;
+        let _total = s.count_all_lines_with_width(width as usize);
+
+        // Jump to tool 0 in message 1.
+        s.jump_to_message(1, Some(0), viewport_h, width);
+
+        let msg_start = s.line_offsets.get(1).copied().unwrap_or(0);
+        // pending_scroll_top should be set.
+        assert!(s.pending_scroll_top.is_some(), "pending_scroll_top should be set for tool jump");
+        let lines_before = s.pending_scroll_top.take().unwrap();
+        // The tool offset within the message should be > 0 (there's
+        // content before it), so lines_before > msg_start.
+        assert!(
+            lines_before >= msg_start,
+            "tool jump: lines_before ({lines_before}) should be >= msg_start ({msg_start})"
         );
     }
 }

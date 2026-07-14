@@ -5,14 +5,15 @@ mod tests;
 
 pub use blocks::{ask_snapshot_line_count, attachment_block_line_count, get_thinking_segments, skill_block_line_count};
 pub use utils::{
-    content_line_count, content_line_count_segmented, thinking_block_line_count,
+    clamp_char_boundary, content_line_count, content_line_count_segmented,
+    count_md_segment, strip_legacy_markers, thinking_block_line_count,
     tool_block_line_count, total_thinking_line_count, visible_width,
 };
 use blocks::{
     build_attachment_block_rows, build_skill_block_rows, build_thinking_block_rows,
     build_tool_block_rows, ensure_gap_before_block, push_block_rows, render_ask_snapshot_message,
 };
-use utils::{clamp_char_boundary, render_content_segment, strip_legacy_markers};
+use utils::render_content_segment;
 
 #[cfg(test)]
 use blocks::{
@@ -63,7 +64,7 @@ pub fn render(
     area: Rect,
     buf: &mut Buffer,
     session: &Session,
-    tool_toggle_rows: &mut Vec<(u16, usize, usize)>,
+    tool_toggle_rows: &mut Vec<(u16, u16, usize, usize)>,
 ) {
     let inner_h = area.height as usize;
     let width = area.width as usize;
@@ -491,7 +492,7 @@ pub fn build_message_lines(
                         // — the preview form is used during streaming
                         // and the pending background colour alone
                         // signals "in flight". The user expands with
-                        // Ctrl+O.
+                        // a click.
                         let t_vis = match session.tool_display {
                             ToolResultDisplay::Show => tool.visible,
                             ToolResultDisplay::ShowWhileStreaming => m.streaming || tool.visible,

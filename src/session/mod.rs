@@ -393,6 +393,14 @@ pub struct Session {
     /// viewport lookups.
     #[serde(skip)]
     pub line_offsets: Vec<u32>,
+    /// When set, the next render will compute `scroll` so that this
+    /// line index appears at the top of the viewport, using the
+    /// actual `inner_h` known only at render time. This avoids the
+    /// stale-height bug where `jump_to_message` computed scroll with
+    /// a panel-visible height but the panel is then hidden, making
+    /// the viewport taller and the clamp resetting scroll to max.
+    #[serde(skip)]
+    pub pending_scroll_top: Option<u32>,
 }
 
 impl Default for Session {
@@ -415,6 +423,7 @@ impl Default for Session {
             last_rendered_total: None,
             expand_new_tool_results: false,
             line_offsets: Vec::new(),
+            pending_scroll_top: None,
         }
     }
 }
@@ -1255,7 +1264,7 @@ impl Session {
 
     /// Set `scroll` so that the last `user` message appears at the top
     /// of the viewport.  Lines after the message will fill the viewport.
-    pub fn timeline(&mut self, viewport_height: u16) {
+    pub fn timeline(&mut self, viewport_height: u16, viewport_width: u16) {
         let inner_h = viewport_height.saturating_sub(2) as u32;
         if inner_h == 0 {
             return;
@@ -1267,43 +1276,239 @@ impl Session {
             None => return,
         };
 
-        let lines_before = self.lines_before(last_user);
-        let total = self.count_all_lines();
+        let w = (viewport_width as usize).min(u16::MAX as usize);
+        // Ensure line_offsets is populated (see jump_to_message).
+        let total = if self.line_offsets.len() <= self.messages.len() {
+            self.invalidate_layout_cache();
+            self.count_all_lines_with_width(w)
+        } else {
+            self.count_all_lines_with_width(w)
+        };
+        let lines_before = self
+            .line_offsets
+            .get(last_user)
+            .copied()
+            .unwrap_or(0);
         let target = total.saturating_sub(lines_before + inner_h);
         self.scroll = target;
     }
 
     /// Set `scroll` so the message at index `msg_idx` appears at the
     /// top of the viewport. No-op if `msg_idx` is out of range.
-    pub fn jump_to_message(&mut self, msg_idx: usize, viewport_height: u16) {
+    ///
+    /// Uses `line_offsets` (populated by `compute_total_lines` during
+    /// the last render) as the source of truth instead of recomputing
+    /// `lines_before`, which diverged from the actual render layout
+    /// because it didn't interleave thinking/tool blocks with content
+    /// the way `build_message_lines` does.
+    pub fn jump_to_message(
+        &mut self,
+        msg_idx: usize,
+        tool_idx: Option<usize>,
+        viewport_height: u16,
+        viewport_width: u16,
+    ) {
         if msg_idx >= self.messages.len() {
             return;
         }
+        let w = (viewport_width as usize).min(u16::MAX as usize);
         let inner_h = viewport_height.max(1) as u32;
-        let lines_before = self.lines_before(msg_idx);
-        let total = self.count_all_lines();
+
+        // Force compute_total_lines so line_offsets is populated even
+        // when cached_total_lines is still valid (which skips the
+        // compute path in count_all_lines_with_width). line_offsets
+        // may have been cleared by invalidate_layout_cache after a
+        // tool-toggle or other mutation.
+        let total = if self.line_offsets.len() <= self.messages.len() {
+            self.invalidate_layout_cache();
+            self.count_all_lines_with_width(w)
+        } else {
+            self.count_all_lines_with_width(w)
+        };
+        let msg_start = self.line_offsets.get(msg_idx).copied().unwrap_or(0);
+
+        // If a tool index is specified, compute the line offset of that
+        // tool block within the message — the number of rendered lines
+        // before the tool's top border — so the jump lands on the tool,
+        // not just the message start.
+        let tool_offset: u32 = if let Some(tool_idx) = tool_idx {
+            self.tool_line_offset_within_message(msg_idx, tool_idx, viewport_width)
+        } else {
+            0
+        };
+
+        let lines_before = msg_start + tool_offset;
+        self.pending_scroll_top = Some(lines_before);
         self.scroll = total
             .saturating_sub(inner_h)
             .saturating_sub(lines_before);
     }
 
+    /// Compute the rendered line offset of a tool block's top border
+    /// within message `msg_idx` — i.e. how many lines precede the
+    /// tool block in the message's rendered output. This includes
+    /// content segments before the tool, leading gaps, and any
+    /// thinking/tool blocks that sort before it.
+    fn tool_line_offset_within_message(
+        &self,
+        msg_idx: usize,
+        tool_idx: usize,
+        width: u16,
+    ) -> u32 {
+        let Some(m) = self.messages.get(msg_idx) else {
+            return 0;
+        };
+        let Some(target_tool) = m.tool_results.get(tool_idx) else {
+            return 0;
+        };
+        if target_tool.content.is_empty() && target_tool.streaming_input.is_empty() {
+            return 0;
+        }
+
+        let raw = m.visible_content();
+        use crate::session::render::{clamp_char_boundary, strip_legacy_markers, count_md_segment};
+
+        // Build sorted items matching build_message_lines.
+        enum Item {
+            Thinking(usize),
+            Tool(usize),
+        }
+        let mut items: Vec<(usize, Item)> = Vec::new();
+        let segments = crate::session::render::get_thinking_segments(m);
+        for (si, seg) in segments.iter().enumerate() {
+            let offset = clamp_char_boundary(raw, seg.offset.min(raw.len()));
+            items.push((offset, Item::Thinking(si)));
+        }
+        for (ti, t) in m.tool_results.iter().enumerate() {
+            if t.content.is_empty() && t.streaming_input.is_empty() {
+                continue;
+            }
+            let offset = clamp_char_boundary(raw, t.content_offset.min(raw.len()));
+            items.push((offset, Item::Tool(ti)));
+        }
+        // Sort with the same tiebreaker as build_message_lines.
+        items.sort_by(|(off_a, a), (off_b, b)| {
+            off_a.cmp(off_b).then_with(|| match (a, b) {
+                (Item::Tool(ti), Item::Thinking(si)) => {
+                    let seg = &segments[*si];
+                    if *ti >= seg.tool_results_len_at_open {
+                        std::cmp::Ordering::Greater
+                    } else {
+                        std::cmp::Ordering::Less
+                    }
+                }
+                (Item::Thinking(si), Item::Tool(ti)) => {
+                    let seg = &segments[*si];
+                    if *ti >= seg.tool_results_len_at_open {
+                        std::cmp::Ordering::Less
+                    } else {
+                        std::cmp::Ordering::Greater
+                    }
+                }
+                _ => std::cmp::Ordering::Equal,
+            })
+        });
+
+        let mut line_count: u32 = 0;
+        let mut cursor: usize = 0;
+        let mut prev_blank = false;
+        let mut has_lines = false;
+
+        // User messages: a blank padding line is inserted at the top.
+        if m.role == crate::session::Role::User {
+            line_count += 1;
+            prev_blank = true;
+            has_lines = true;
+        }
+
+        for (offset, item) in &items {
+            let offset = *offset;
+            if offset < cursor {
+                continue;
+            }
+
+            // Content before this item.
+            if offset > cursor {
+                let seg_text = strip_legacy_markers(&raw[cursor..offset]);
+                let seg_lines = count_md_segment(&seg_text, width as usize);
+                line_count += seg_lines;
+                cursor = offset;
+                has_lines = true;
+                prev_blank = false;
+            }
+
+            // ensure_gap_before_block.
+            if has_lines && !prev_blank {
+                line_count += 1;
+                prev_blank = true;
+            }
+
+            match item {
+                Item::Thinking(si) => {
+                    let seg = &segments[*si];
+                    let expanded =
+                        (self.display == crate::config::ThinkingDisplay::Show
+                            && m.thinking_visible)
+                            || (self.display
+                                == crate::config::ThinkingDisplay::ShowWhileStreaming
+                                && (m.streaming || m.thinking_visible));
+                    let lines = if expanded {
+                        seg.cached_line_count_expanded.unwrap_or(0)
+                    } else {
+                        seg.cached_line_count_collapsed.unwrap_or(0)
+                    };
+                    line_count += lines;
+                    line_count += 1; // trailing blank
+                    has_lines = true;
+                    prev_blank = true;
+                }
+                Item::Tool(ti) => {
+                    if *ti == tool_idx {
+                        return line_count;
+                    }
+                    let t = &m.tool_results[*ti];
+                    let t_vis = t.name == "plan"
+                        || match self.tool_display {
+                            crate::config::ToolResultDisplay::Show => t.visible,
+                            crate::config::ToolResultDisplay::ShowWhileStreaming => {
+                                m.streaming || t.visible
+                            }
+                            _ => false,
+                        };
+                    let lines = if t_vis {
+                        t.cached_line_count_visible.unwrap_or(0)
+                    } else {
+                        t.cached_line_count_collapsed.unwrap_or(0)
+                    };
+                    line_count += lines;
+                    line_count += 1; // trailing blank
+                    has_lines = true;
+                }
+            }
+        }
+
+        // Tool not found in the sorted items — return 0 as fallback.
+        0
+    }
+
     /// Number of rendered lines from the top of the buffer up to (but
-    /// not including) the message at `msg_idx`. Uses a fixed width of
-    /// 120 columns to match the previous (pre-cache) behavior.
+    /// not including) the message at `msg_idx`. Uses `viewport_width`
+    /// so the per-segment wrapping matches what the renderer actually
+    /// produces at that width.
     ///
     /// Mirrors `compute_total_lines` so the per-block counts plus
     /// trailing blanks plus leading gap plus spacer all add up to the
     /// same number `build_message_lines` would produce.
-    pub fn lines_before(&mut self, msg_idx: usize) -> u32 {
+    pub fn lines_before(&mut self, msg_idx: usize, viewport_width: u16) -> u32 {
         // Make sure the per-block caches are populated so we can sum
         // without re-rendering.
-        let _ = self.count_all_lines_with_width(120);
+        let _ = self.count_all_lines_with_width(viewport_width as usize);
         let mut n: u32 = 0;
         for (i, m) in self.messages.iter().enumerate() {
             if i >= msg_idx {
                 break;
             }
-            let content_lines = read_cached_content_lines(m, 120);
+            let content_lines = read_cached_content_lines(m, viewport_width);
             n += content_lines;
             if !m.attachments.is_empty() {
                 n += crate::session::render::attachment_block_line_count(&m.attachments);
@@ -1358,13 +1563,12 @@ impl Session {
             if m.role == Role::User {
                 // Count the `[skill]` marker block rows when present
                 // (5 rows + 1 trailing blank, or 6 + 1 with non-empty
-                // args). Uses the same 120-col estimate as the
-                // content count above to match the pre-cache
-                // behaviour.
+                // args). Uses the same width as the content count
+                // above to match the rendered block width.
                 if let Some(skill_ref) = &m.skill_ref {
                     n += crate::session::render::skill_block_line_count(
                         skill_ref,
-                        120,
+                        viewport_width as usize,
                     );
                 }
                 n += 2; // user-bg padding above and below

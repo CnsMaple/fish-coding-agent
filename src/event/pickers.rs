@@ -989,15 +989,9 @@ pub(super) fn commit_timeline_jump(app: &mut App, state: &crate::function::Timel
         return;
     };
     let viewport_h = app.session_area.map(|r| r.height).unwrap_or(20);
-    app.session.jump_to_message(msg_idx, viewport_h);
-    let mut scroll = app.session.scroll;
-    if tool_idx.is_some() {
-        // Nudge scroll up a bit so the tool block is more visible.
-        let nudge = 3u32.min(scroll);
-        scroll = scroll.saturating_sub(nudge);
-    }
-    // Programmatic jump — land immediately, cancel any momentum.
-    app.set_scroll_anchored(scroll);
+    let viewport_w = app.session_area.map(|r| r.width).unwrap_or(120);
+    app.session
+        .jump_to_message(msg_idx, tool_idx, viewport_h, viewport_w);
     let active = app.function.active;
     if active < app.function.tabs.len() {
         app.function.tabs.remove(active);
