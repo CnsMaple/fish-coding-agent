@@ -1349,6 +1349,7 @@ impl Session {
     /// tool block in the message's rendered output. This includes
     /// content segments before the tool, leading gaps, and any
     /// thinking/tool blocks that sort before it.
+    #[allow(unused_assignments)]
     fn tool_line_offset_within_message(
         &self,
         msg_idx: usize,
@@ -1413,6 +1414,7 @@ impl Session {
         let mut cursor: usize = 0;
         let mut prev_blank = false;
         let mut has_lines = false;
+        let _ = prev_blank;
 
         // User messages: a blank padding line is inserted at the top.
         if m.role == crate::session::Role::User {
@@ -1434,6 +1436,8 @@ impl Session {
                 line_count += seg_lines;
                 cursor = offset;
                 has_lines = true;
+                // A non-empty content segment ends with a non-blank line,
+                // so the next block needs a leading gap.
                 prev_blank = false;
             }
 
@@ -1483,6 +1487,7 @@ impl Session {
                     line_count += lines;
                     line_count += 1; // trailing blank
                     has_lines = true;
+                    prev_blank = true;
                 }
             }
         }
@@ -1515,8 +1520,7 @@ impl Session {
             }
             let mut thinking_blocks: u32 = 0;
             let show = m.role == Role::Assistant
-                && crate::session::render::message_has_thinking(m)
-                && self.display != crate::config::ThinkingDisplay::Hide;
+               && self.display != crate::config::ThinkingDisplay::Hide;
             if show {
                 let expanded = (self.display == crate::config::ThinkingDisplay::Show
                     && m.thinking_visible)

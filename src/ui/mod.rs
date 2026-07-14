@@ -258,6 +258,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
         let mut cursor = 0usize;
         let mut prev_line_was_blank = false; // tracks ensure_gap_before_block
         let mut has_any_line = false; // tracks whether msg_lines was non-empty
+        let _ = prev_line_was_blank;
 
         for (offset, item) in &items {
             let offset = *offset;

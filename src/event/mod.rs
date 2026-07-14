@@ -1905,14 +1905,16 @@ fn handle_mouse(m: MouseEvent, app: &mut App) {
     if matches!(m.kind, MouseEventKind::Down(MouseButton::Left)) {
         if let Some(target) = pending_toggle {
             // Defer the actual toggle to Mouse Up so a drag cancels
-            // it. Prevent text selection from starting.
+            // it. Preserve tui_drag_start so a drag can create a
+            // selection inside the block. On Mouse Up we only toggle
+            // if the user did not end up with a selection.
             app.pending_tool_toggle = match target {
                 ToggleTarget::Thinking(mi) => Some((mi, usize::MAX)),
                 ToggleTarget::Tool(mi, ti) => Some((mi, ti)),
             };
             app.tui_selection = None;
-            app.tui_drag_start = None;
-            return;
+            // Don't touch tui_drag_start here; let the standard
+            // Down branch below record it so selection still works.
         }
     }
 
@@ -1924,6 +1926,12 @@ fn handle_mouse(m: MouseEvent, app: &mut App) {
 
     if matches!(m.kind, MouseEventKind::Up(MouseButton::Left)) {
         if let Some((msg_idx, tool_idx)) = app.pending_tool_toggle.take() {
+            // If the user has an selection, do not toggle — they are
+            // selecting text inside the block instead of clicking it.
+            if app.tui_selection.is_some() {
+                app.tui_selection.as_mut().map(|s| s.active = false);
+                return;
+            }
             if tool_idx == usize::MAX {
                 // Thinking toggle.
                 if let Some(msg) = app.session.messages.get_mut(msg_idx) {
