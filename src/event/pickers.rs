@@ -139,9 +139,26 @@ pub(super) async fn handle_plan_key(
     app: &mut App,
     state: &mut crate::function::PlanState,
 ) -> bool {
-    use crossterm::event::KeyCode;
+    use crossterm::event::{KeyCode, KeyModifiers};
     match k.code {
         KeyCode::Enter => {
+            // If the Enter variant the user invoked should insert a
+            // newline (e.g. Shift+Enter under "Enter sends"), do that
+            // in the input buffer instead of approving the plan.
+            let modified = k.modifiers.intersects(
+                KeyModifiers::SHIFT
+                    | KeyModifiers::CONTROL
+                    | KeyModifiers::ALT
+                    | KeyModifiers::META,
+            );
+            if matches!(
+                super::enter_action(app.config.enter_behavior, modified),
+                super::EnterAction::Newline
+            ) {
+                app.input.insert_newline();
+                app.sync_completion();
+                return true;
+            }
             state.approved = Some(true);
             let mut prompt = format!(
                 "Plan approved. Please proceed with the following plan:\n\n{}",

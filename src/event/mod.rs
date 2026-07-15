@@ -2274,14 +2274,14 @@ fn submit_input(app: &mut App) {
 /// `EnterBehavior`. Extracted into its own helper so the contract is
 /// unit-testable independently of the surrounding key-event plumbing.
 #[derive(Debug, PartialEq, Eq)]
-enum EnterAction {
+pub(super) enum EnterAction {
     /// Submit the input buffer.
     Send,
     /// Insert a newline at the cursor.
     Newline,
 }
 
-fn enter_action(behavior: crate::config::EnterBehavior, shift: bool) -> EnterAction {
+pub(super) fn enter_action(behavior: crate::config::EnterBehavior, shift: bool) -> EnterAction {
     use crate::config::EnterBehavior;
     match behavior {
         // "Enter sends / Shift+Enter newline":
