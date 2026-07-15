@@ -250,40 +250,16 @@ fn anthropic_message(m: &super::ChatMessage) -> serde_json::Value {
     // If the message has image content parts, produce a content array
     // with text + image blocks instead of a plain string.
     if !m.content_parts.is_empty() {
-        let mut content = Vec::new();
-        let mut text_buf = String::new();
-        for part in &m.content_parts {
-            match part {
-                super::ContentPart::Text(t) => text_buf.push_str(t),
-                super::ContentPart::Image(att) => {
-                    if !text_buf.is_empty() {
-                        content.push(serde_json::json!({"type": "text", "text": text_buf}));
-                        text_buf.clear();
-                    }
-                    let b64 = common::image_to_base64(&att.asset_path);
-                    if b64.is_empty() {
-                        content.push(
-                            serde_json::json!({"type": "text", "text": "[image load failed]"}),
-                        );
-                        continue;
-                    }
-                    content.push(serde_json::json!({
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": att.media_type,
-                            "data": b64,
-                        }
-                    }));
+        let content = common::build_multimodal_content(m, |att, b64| {
+            serde_json::json!({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": att.media_type,
+                    "data": b64,
                 }
-            }
-        }
-        if !text_buf.is_empty() {
-            content.push(serde_json::json!({"type": "text", "text": text_buf}));
-        }
-        if content.is_empty() {
-            content.push(serde_json::json!({"type": "text", "text": m.content}));
-        }
+            })
+        });
         return serde_json::json!({"role": m.role, "content": content});
     }
 

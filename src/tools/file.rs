@@ -181,7 +181,7 @@ fn grep_path(
             let p = entry.path();
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            if name == ".git" || name == "target" {
+            if should_skip_dir(&name) {
                 continue;
             }
             grep_path(&p, re, cwd, out, limit)?;
@@ -400,7 +400,7 @@ fn collect_glob_matches(
             let p = entry.path();
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            if name == ".git" || name == "target" || name == "node_modules" {
+            if should_skip_dir(&name) {
                 continue;
             }
             let rel = p

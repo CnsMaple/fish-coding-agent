@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 pub mod notifications;
-mod states;
+pub mod states;
 #[cfg(test)]
 mod tests;
 

@@ -61,20 +61,12 @@ pub(super) async fn dispatch_to_active_tab(k: crossterm::event::KeyEvent, app: &
         // of restoring it. The handler already set state.approved
         // and switched the app mode.
         if matches!(&tab, crate::function::SidebarTab::Plan(state) if state.approved.is_some()) {
-            app.function.tabs.remove(active);
-            if app.function.active >= app.function.tabs.len() {
-                app.function.active = app.function.tabs.len().saturating_sub(1);
-            }
-            app.maybe_hide_panel();
+            close_active_function_tab(app);
         } else if matches!(&tab, crate::function::SidebarTab::SessionPicker(state) if state.consumed)
         {
             // The handler already closed the tab and resumed the session.
             // Don't restore it.
-            app.function.tabs.remove(active);
-            if app.function.active >= app.function.tabs.len() {
-                app.function.active = app.function.tabs.len().saturating_sub(1);
-            }
-            app.maybe_hide_panel();
+            close_active_function_tab(app);
         } else {
             app.function.tabs[active] = tab;
         }
@@ -636,71 +628,32 @@ pub(super) fn handle_provider_picker_key(
             }
         };
     match state.focus {
-        crate::function::PickerFocus::Search => match k.code {
-            KeyCode::Esc => {
-                if state.query.is_empty() {
-                    return false; // let the global handler close the tab
-                }
-                state.query.clear();
-                state.rebuild_filter();
-                true
+        crate::function::PickerFocus::Search => {
+            use crate::function::states::FilterablePicker;
+            match state.handle_search_key(k) {
+                Some(consumed) => consumed,
+                None => match k.code {
+                    KeyCode::Enter => {
+                        open_model_picker_for_selected(app, state);
+                        true
+                    }
+                    _ => false,
+                },
             }
-            KeyCode::Down => {
-                state.focus = crate::function::PickerFocus::List;
-                true
+        }
+        crate::function::PickerFocus::List => {
+            use crate::function::states::FilterablePicker;
+            match state.handle_list_key(k) {
+                Some(consumed) => consumed,
+                None => match k.code {
+                    KeyCode::Enter => {
+                        open_model_picker_for_selected(app, state);
+                        true
+                    }
+                    _ => false,
+                },
             }
-            KeyCode::Backspace => {
-                state.query.pop();
-                state.rebuild_filter();
-                true
-            }
-            KeyCode::Char(c) => {
-                state.query.push(c);
-                state.rebuild_filter();
-                true
-            }
-            KeyCode::Enter => {
-                open_model_picker_for_selected(app, state);
-                true
-            }
-            _ => false,
-        },
-        crate::function::PickerFocus::List => match k.code {
-            KeyCode::Up => {
-                if state.cursor > 0 {
-                    state.cursor -= 1;
-                }
-                true
-            }
-            KeyCode::Down => {
-                if state.cursor + 1 < state.filtered.len() {
-                    state.cursor += 1;
-                }
-                true
-            }
-            KeyCode::Enter => {
-                open_model_picker_for_selected(app, state);
-                true
-            }
-            KeyCode::Tab | KeyCode::BackTab => {
-                state.focus = crate::function::PickerFocus::Search;
-                true
-            }
-            KeyCode::Char(c) => {
-                // Start typing again to refine the filter.
-                state.query.push(c);
-                state.focus = crate::function::PickerFocus::Search;
-                state.rebuild_filter();
-                true
-            }
-            KeyCode::Backspace => {
-                state.query.pop();
-                state.focus = crate::function::PickerFocus::Search;
-                state.rebuild_filter();
-                true
-            }
-            _ => false,
-        },
+        }
     }
 }
 pub(super) fn handle_picker_key(
@@ -743,99 +696,53 @@ pub(super) fn handle_picker_key(
     }
 
     match state.focus {
-        crate::function::PickerFocus::Search => match k.code {
-            KeyCode::Esc => {
-                if state.query.is_empty() {
-                    return false; // let global handler close the tab
-                }
-                state.query.clear();
-                state.rebuild_filter();
-                true
-            }
-            KeyCode::Down => {
-                state.focus = crate::function::PickerFocus::List;
-                true
-            }
-            KeyCode::Backspace => {
-                state.query.pop();
-                state.rebuild_filter();
-                true
-            }
-            KeyCode::Char(c) => {
-                state.query.push(c);
-                state.rebuild_filter();
-                true
-            }
-            KeyCode::Enter => {
-                if let Some(&idx) = state.filtered.get(state.cursor) {
-                    let model = &state.models[idx];
-                    if model.context_needs_pick && model.context_window_tokens.is_none() {
-                        open_context_picker(_app, state, idx);
-                    } else {
-                        let id = model.id.clone();
-                        commit_model(_app, state.provider, id, false);
+        crate::function::PickerFocus::Search => {
+            use crate::function::states::FilterablePicker;
+            match state.handle_search_key(k) {
+                Some(consumed) => consumed,
+                None => match k.code {
+                    KeyCode::Enter => {
+                        if let Some(&idx) = state.filtered.get(state.cursor) {
+                            let model = &state.models[idx];
+                            if model.context_needs_pick && model.context_window_tokens.is_none() {
+                                open_context_picker(_app, state, idx);
+                            } else {
+                                let id = model.id.clone();
+                                commit_model(_app, state.provider, id, false);
+                            }
+                        } else {
+                            let id = state.query.trim();
+                            if !id.is_empty() {
+                                commit_model(_app, state.provider, id.to_string(), true);
+                            }
+                        }
+                        true
                     }
-                } else {
-                    let id = state.query.trim();
-                    if !id.is_empty() {
-                        commit_model(_app, state.provider, id.to_string(), true);
+                    _ => false,
+                },
+            }
+        }
+        crate::function::PickerFocus::List => {
+            use crate::function::states::FilterablePicker;
+            match state.handle_list_key(k) {
+                Some(consumed) => consumed,
+                None => match k.code {
+                    KeyCode::Enter => {
+                        if let Some(&idx) = state.filtered.get(state.cursor) {
+                            let model = &state.models[idx];
+                            if model.context_needs_pick && model.context_window_tokens.is_none() {
+                                open_context_picker(_app, state, idx);
+                            } else {
+                                let id = model.id.clone();
+                                commit_model(_app, state.provider, id, false);
+                            }
+                        }
+                        true
                     }
-                }
-                true
+                    _ => false,
+                },
             }
-            _ => false,
-        },
-        crate::function::PickerFocus::List => match k.code {
-            KeyCode::Up => {
-                if state.cursor > 0 {
-                    state.cursor -= 1;
-                }
-                true
-            }
-            KeyCode::Down => {
-                if state.focus != crate::function::PickerFocus::List {
-                    state.focus = crate::function::PickerFocus::List;
-                } else if state.cursor + 1 < state.filtered.len() {
-                    state.cursor += 1;
-                }
-                true
-            }
-            KeyCode::Enter => {
-                if let Some(&idx) = state.filtered.get(state.cursor) {
-                    let model = &state.models[idx];
-                    if model.context_needs_pick && model.context_window_tokens.is_none() {
-                        open_context_picker(_app, state, idx);
-                    } else {
-                        let id = model.id.clone();
-                        commit_model(_app, state.provider, id, false);
-                    }
-                }
-                true
-            }
-            KeyCode::Tab | KeyCode::BackTab => {
-                state.focus = crate::function::PickerFocus::Search;
-                true
-            }
-            KeyCode::Char(c) => {
-                // Type a character while browsing the list: switch back
-                // to Search and append the key so the user can refine
-                // the filter without having to press Up or Tab first.
-                state.query.push(c);
-                state.focus = crate::function::PickerFocus::Search;
-                state.rebuild_filter();
-                true
-            }
-            KeyCode::Backspace => {
-                // Backspace in the list: pop the last filter character
-                // and return to Search so further typing continues to
-                // refine the query.
-                state.query.pop();
-                state.focus = crate::function::PickerFocus::Search;
-                state.rebuild_filter();
-                true
-            }
-            _ => false,
-        },
+        }
     }
 }
 /// Search / navigate / select for the thinking-level picker.  Mirrors the
@@ -879,19 +786,11 @@ pub(super) fn handle_thinking_key(
                 app.save_config();
             }
             // Close the picker tab.
-            let active = app.function.active;
-            if active < app.function.tabs.len() {
-                app.function.tabs.remove(active);
-            }
-            app.maybe_hide_panel();
+            close_active_function_tab(app);
             true
         }
         KeyCode::Esc => {
-            let active = app.function.active;
-            if active < app.function.tabs.len() {
-                app.function.tabs.remove(active);
-            }
-            app.maybe_hide_panel();
+            close_active_function_tab(app);
             true
         }
         KeyCode::Char(c) => {
@@ -914,72 +813,27 @@ pub(super) fn handle_timeline_key(
     app: &mut App,
     state: &mut crate::function::TimelinePickerState,
 ) -> bool {
-    use crossterm::event::KeyCode;
+    use crate::function::states::FilterablePicker;
     match state.focus {
-        crate::function::PickerFocus::Search => match k.code {
-            KeyCode::Esc => {
-                if state.query.is_empty() {
-                    return false; // let the global handler close the tab
+        crate::function::PickerFocus::Search => match state.handle_search_key(k) {
+            Some(consumed) => consumed,
+            None => match k.code {
+                crossterm::event::KeyCode::Enter => {
+                    commit_timeline_jump(app, state);
+                    true
                 }
-                state.query.clear();
-                state.rebuild_filter();
-                true
-            }
-            KeyCode::Down => {
-                state.focus = crate::function::PickerFocus::List;
-                true
-            }
-            KeyCode::Backspace => {
-                state.query.pop();
-                state.rebuild_filter();
-                true
-            }
-            KeyCode::Char(c) => {
-                state.query.push(c);
-                state.rebuild_filter();
-                true
-            }
-            KeyCode::Enter => {
-                commit_timeline_jump(app, state);
-                true
-            }
-            _ => false,
+                _ => false,
+            },
         },
-        crate::function::PickerFocus::List => match k.code {
-            KeyCode::Up => {
-                if state.cursor > 0 {
-                    state.cursor -= 1;
+        crate::function::PickerFocus::List => match state.handle_list_key(k) {
+            Some(consumed) => consumed,
+            None => match k.code {
+                crossterm::event::KeyCode::Enter => {
+                    commit_timeline_jump(app, state);
+                    true
                 }
-                true
-            }
-            KeyCode::Down => {
-                if state.cursor + 1 < state.filtered.len() {
-                    state.cursor += 1;
-                }
-                true
-            }
-            KeyCode::Enter => {
-                commit_timeline_jump(app, state);
-                true
-            }
-            KeyCode::Tab | KeyCode::BackTab => {
-                state.focus = crate::function::PickerFocus::Search;
-                true
-            }
-            KeyCode::Char(c) => {
-                // Start typing again to refine the filter.
-                state.query.push(c);
-                state.focus = crate::function::PickerFocus::Search;
-                state.rebuild_filter();
-                true
-            }
-            KeyCode::Backspace => {
-                state.query.pop();
-                state.focus = crate::function::PickerFocus::Search;
-                state.rebuild_filter();
-                true
-            }
-            _ => false,
+                _ => false,
+            },
         },
     }
 }
@@ -994,14 +848,7 @@ pub(super) fn commit_timeline_jump(app: &mut App, state: &crate::function::Timel
     let viewport_w = app.session_area.map(|r| r.width).unwrap_or(120);
     app.session
         .jump_to_message(msg_idx, tool_idx, viewport_h, viewport_w);
-    let active = app.function.active;
-    if active < app.function.tabs.len() {
-        app.function.tabs.remove(active);
-        if app.function.active >= app.function.tabs.len() {
-            app.function.active = app.function.tabs.len().saturating_sub(1);
-        }
-    }
-    app.maybe_hide_panel();
+    close_active_function_tab(app);
     let label = if tool_idx.is_some() {
         "jumped to tool call"
     } else {
@@ -1229,14 +1076,7 @@ pub(super) fn handle_settings_back(app: &mut App, state: &mut crate::function::S
         }
         SettingsLevel::TopLevel => {
             // close the settings tab entirely
-            let active = app.function.active;
-            if active < app.function.tabs.len() {
-                app.function.tabs.remove(active);
-                if app.function.active >= app.function.tabs.len() {
-                    app.function.active = app.function.tabs.len().saturating_sub(1);
-                }
-            }
-            app.maybe_hide_panel();
+            close_active_function_tab(app);
         }
     }
 }
@@ -1991,12 +1831,7 @@ pub fn commit_model(
     }
 
     // 4. Close the picker tab.
-    if app.function.active < app.function.tabs.len() {
-        app.function.tabs.remove(app.function.active);
-        if app.function.active >= app.function.tabs.len() {
-            app.function.active = app.function.tabs.len().saturating_sub(1);
-        }
-    }
+    close_active_function_tab(app);
     // 4b. If the now-active tab is a ProviderPicker (the /model flow's
     // first step) the user has finished the flow — close it too,
     // otherwise the panel would still be open and the user would
@@ -2007,12 +1842,8 @@ pub fn commit_model(
             crate::function::SidebarTab::ProviderPicker(_)
         )
     {
-        app.function.tabs.remove(app.function.active);
-        if app.function.active >= app.function.tabs.len() {
-            app.function.active = app.function.tabs.len().saturating_sub(1);
-        }
+        close_active_function_tab(app);
     }
-    app.maybe_hide_panel();
 
     // 5. Persist to disk (after tab cleanup so notify() doesn't
     //    shift indices when creating a Notifications tab).

@@ -137,6 +137,41 @@ pub struct ToolResultBlock {
     pub failed: bool,
 }
 
+impl ToolResultBlock {
+    /// Create a new tool result block with the given fields and
+    /// sensible defaults for the rest. `visible` is computed from
+    /// the tool name and `expand_new_tool_results` by the caller.
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        name: String,
+        title: String,
+        content: String,
+        metadata: String,
+        content_offset: usize,
+        visible: bool,
+        running: bool,
+        failed: bool,
+        call_id: String,
+        streaming_input: String,
+    ) -> Self {
+        Self {
+            name,
+            title,
+            content,
+            metadata,
+            content_offset,
+            visible,
+            running,
+            failed,
+            call_id,
+            pruned: false,
+            streaming_input,
+            cached_line_count_visible: None,
+            cached_line_count_collapsed: None,
+        }
+    }
+}
+
 impl ThinkingSegment {
     pub fn cached_line_count(&self, expanded: bool) -> Option<u32> {
         if expanded {
@@ -273,11 +308,36 @@ impl Message {
         }
     }
 
+    /// Find the position of the tool block matching `call_id` (or the
+    /// fallback heuristic when `call_id` is empty). When `name` is
+    /// provided, the fallback matches the most recent running block
+    /// with that name; otherwise it matches the most recent running
+    /// block regardless of name.
+    fn find_tool_block(&self, call_id: &str, name: Option<&str>) -> Option<usize> {
+        if !call_id.is_empty() {
+            self.tool_results.iter().rposition(|t| t.call_id == call_id)
+        } else {
+            self.tool_results
+                .iter()
+                .rposition(|t| t.running && name.is_none_or(|n| t.name == n))
+        }
+    }
+
     /// Bump the per-message version counter. Call this whenever the
     /// message's content, thinking, or tool blocks change so the
     /// render LRU can detect staleness.
     pub fn bump_version(&mut self) {
         self.content_version = self.content_version.wrapping_add(1);
+    }
+
+    /// Close the in-flight thinking segment (if any) so the next
+    /// thinking delta lands in a fresh block.
+    pub fn close_open_thinking(&mut self) {
+        if let Some(last) = self.thinking_segments.last_mut() {
+            if !last.closed {
+                last.closed = true;
+            }
+        }
     }
 
     /// The portion of `content` that should be displayed this frame.
@@ -439,6 +499,17 @@ impl Session {
         self.line_offsets.clear();
     }
 
+    /// Invalidate the line-cache entry for message `id` and the
+    /// layout cache. Called from every tool-block mutation path.
+    fn invalidate_line_cache(&mut self, id: usize) {
+        if let Ok(mut c) = self.line_cache.lock() {
+            if id < c.len() {
+                c[id] = None;
+            }
+        }
+        self.invalidate_layout_cache();
+    }
+
     /// Drop any per-message render-LRU entries whose index is
     /// `>= from_idx`. Call this immediately after truncating or
     /// removing messages so a later `push` cannot reuse a stale
@@ -501,11 +572,7 @@ impl Session {
         if let Some(id) = self.streaming_id {
             if let Some(m) = self.messages.get_mut(id) {
                 m.content.push_str(chunk);
-                if let Some(last) = m.thinking_segments.last_mut() {
-                    if !last.closed {
-                        last.closed = true;
-                    }
-                }
+                m.close_open_thinking();
                 m.line_count = m.content.split('\n').count().max(1) as u32;
                 m.invalidate_render_caches();
                 if let Ok(mut c) = self.line_cache.lock() {
@@ -536,22 +603,12 @@ impl Session {
     ) {
         if let Some(id) = self.streaming_id {
             if let Some(m) = self.messages.get_mut(id) {
-                if let Some(last) = m.thinking_segments.last_mut() {
-                    if !last.closed {
-                        last.closed = true;
-                    }
-                }
+                m.close_open_thinking();
                 // Prefer the stable `call_id` so parallel tool calls
                 // with the same name (or interleaved deltas) route
                 // to the correct block. Fall back to the old
                 // name+running heuristic only when no call_id is set.
-                let pos = if !call_id.is_empty() {
-                    m.tool_results.iter().rposition(|t| t.call_id == call_id)
-                } else {
-                    m.tool_results
-                        .iter()
-                        .rposition(|t| t.name == name && t.running)
-                };
+                let pos = m.find_tool_block(&call_id, Some(&name));
                 if let Some(pos) = pos {
                     let tool = &mut m.tool_results[pos];
                     tool.content = content;
@@ -566,12 +623,7 @@ impl Session {
                     tool.cached_line_count_visible = None;
                     tool.cached_line_count_collapsed = None;
                     m.invalidate_render_caches();
-                    if let Ok(mut c) = self.line_cache.lock() {
-                        if id < c.len() {
-                            c[id] = None;
-                        }
-                    }
-                    self.invalidate_layout_cache();
+                    self.invalidate_line_cache(id);
                     return;
                 }
             }
@@ -590,28 +642,21 @@ impl Session {
     ) {
         if let Some(id) = self.streaming_id {
             if let Some(m) = self.messages.get_mut(id) {
-                if let Some(last) = m.thinking_segments.last_mut() {
-                    if !last.closed {
-                        last.closed = true;
-                    }
-                }
+                m.close_open_thinking();
                 let content_offset = m.content.len();
                 let visible = name == "plan" || self.expand_new_tool_results;
-                m.tool_results.push(ToolResultBlock {
+                m.tool_results.push(ToolResultBlock::new(
                     name,
                     title,
                     content,
                     metadata,
                     content_offset,
                     visible,
-                    running: false,
+                    false,
                     failed,
-                    call_id: String::new(),
-                    pruned: false,
-                    streaming_input: String::new(),
-                    cached_line_count_visible: None,
-                    cached_line_count_collapsed: None,
-                });
+                    String::new(),
+                    String::new(),
+                ));
                 m.invalidate_render_caches();
                 self.invalidate_layout_cache();
             }
@@ -621,23 +666,13 @@ impl Session {
     pub fn start_tool_in_last(&mut self, call_id: String, name: String, title: String) {
         if let Some(id) = self.streaming_id {
             if let Some(m) = self.messages.get_mut(id) {
-                if let Some(last) = m.thinking_segments.last_mut() {
-                    if !last.closed {
-                        last.closed = true;
-                    }
-                }
+                m.close_open_thinking();
                 // Match an existing running block by the stable
                 // `call_id` (the streaming placeholder created during
                 // ToolInputDelta) so a ToolStarted arriving for a
                 // parallel tool call updates the right block instead
                 // of pushing a duplicate.
-                let pos = if !call_id.is_empty() {
-                    m.tool_results.iter().rposition(|t| t.call_id == call_id)
-                } else {
-                    m.tool_results
-                        .iter()
-                        .rposition(|t| t.running && t.name == name)
-                };
+                let pos = m.find_tool_block(&call_id, Some(&name));
                 if let Some(pos) = pos {
                     let tool = &mut m.tool_results[pos];
                     tool.title = title;
@@ -653,21 +688,18 @@ impl Session {
                 }
                 let content_offset = m.content.len();
                 let visible = name == "plan" || self.expand_new_tool_results;
-                m.tool_results.push(ToolResultBlock {
+                m.tool_results.push(ToolResultBlock::new(
                     name,
                     title,
-                    content: String::new(),
-                    metadata: String::new(),
+                    String::new(),
+                    String::new(),
                     content_offset,
                     visible,
-                    running: true,
-                    failed: false,
+                    true,
+                    false,
                     call_id,
-                    pruned: false,
-                    streaming_input: String::new(),
-                    cached_line_count_visible: None,
-                    cached_line_count_collapsed: None,
-                });
+                    String::new(),
+                ));
                 m.invalidate_render_caches();
                 self.invalidate_layout_cache();
             }
@@ -679,23 +711,14 @@ impl Session {
             if let Some(m) = self.messages.get_mut(id) {
                 // Route to the block matching `call_id` (parallel-safe);
                 // fall back to the last running block when call_id is empty.
-                let pos = if !call_id.is_empty() {
-                    m.tool_results.iter().rposition(|t| t.call_id == call_id)
-                } else {
-                    m.tool_results.iter().rposition(|t| t.running)
-                };
+                let pos = m.find_tool_block(call_id, None);
                 if let Some(pos) = pos {
                     let tool = &mut m.tool_results[pos];
                     tool.content.push_str(delta);
                     tool.cached_line_count_visible = None;
                     tool.cached_line_count_collapsed = None;
                     m.invalidate_render_caches();
-                    if let Ok(mut c) = self.line_cache.lock() {
-                        if id < c.len() {
-                            c[id] = None;
-                        }
-                    }
-                    self.invalidate_layout_cache();
+                    self.invalidate_line_cache(id);
                 }
             }
         }
@@ -718,13 +741,7 @@ impl Session {
     ) {
         if let Some(id) = self.streaming_id {
             if let Some(m) = self.messages.get_mut(id) {
-                let pos = if !call_id.is_empty() {
-                    m.tool_results.iter().rposition(|t| t.call_id == call_id)
-                } else {
-                    m.tool_results
-                        .iter()
-                        .rposition(|t| t.running && t.name == name)
-                };
+                let pos = m.find_tool_block(call_id, Some(name));
                 if let Some(pos) = pos {
                     let tool = &mut m.tool_results[pos];
                     tool.streaming_input = args.to_string();
@@ -737,36 +754,24 @@ impl Session {
                     tool.cached_line_count_visible = None;
                     tool.cached_line_count_collapsed = None;
                 } else {
-                    if let Some(last) = m.thinking_segments.last_mut() {
-                        if !last.closed {
-                            last.closed = true;
-                        }
-                    }
+                    m.close_open_thinking();
                     let content_offset = m.content.len();
                     let visible = name == "plan" || self.expand_new_tool_results;
-                    m.tool_results.push(ToolResultBlock {
-                        name: name.to_string(),
-                        title: String::new(),
-                        content: String::new(),
-                        metadata: String::new(),
+                    m.tool_results.push(ToolResultBlock::new(
+                        name.to_string(),
+                        String::new(),
+                        String::new(),
+                        String::new(),
                         content_offset,
                         visible,
-                        running: true,
-                        failed: false,
-                        call_id: call_id.to_string(),
-                        pruned: false,
-                        streaming_input: args.to_string(),
-                        cached_line_count_visible: None,
-                        cached_line_count_collapsed: None,
-                    });
+                        true,
+                        false,
+                        call_id.to_string(),
+                        args.to_string(),
+                    ));
                 }
                 m.invalidate_render_caches();
-                if let Ok(mut c) = self.line_cache.lock() {
-                    if id < c.len() {
-                        c[id] = None;
-                    }
-                }
-                self.invalidate_layout_cache();
+                self.invalidate_line_cache(id);
             }
         }
     }
@@ -786,21 +791,18 @@ impl Session {
             thinking: String::new(),
             thinking_segments: Vec::new(),
             thinking_visible: false,
-            tool_results: vec![ToolResultBlock {
+            tool_results: vec![ToolResultBlock::new(
                 name,
                 title,
                 content,
                 metadata,
-                content_offset: 0,
+                0,
                 visible,
-                running: false,
+                false,
                 failed,
-                call_id: String::new(),
-                pruned: false,
-                streaming_input: String::new(),
-                cached_line_count_visible: None,
-                cached_line_count_collapsed: None,
-            }],
+                String::new(),
+                String::new(),
+            )],
             tool_calls: Vec::new(),
             attachments: Vec::new(),
             ts: Utc::now(),

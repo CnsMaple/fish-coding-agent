@@ -258,12 +258,7 @@ pub(super) async fn handle_grep_exec(
 }
 
 pub(super) fn resolve_cursor_path(cwd: &std::path::Path, path: &str) -> PathBuf {
-    let p = PathBuf::from(path.trim());
-    if p.is_absolute() {
-        p
-    } else {
-        cwd.join(p)
-    }
+    crate::tools::resolve_path(cwd, path.trim())
 }
 
 pub(super) fn build_ls_tree(
@@ -287,7 +282,7 @@ pub(super) fn build_ls_tree(
     for entry in std::fs::read_dir(path)? {
         let entry = entry?;
         let file_name = entry.file_name().to_string_lossy().to_string();
-        if file_name == ".git" || file_name == "target" {
+        if crate::tools::should_skip_dir(&file_name) {
             continue;
         }
         let meta = entry.metadata()?;

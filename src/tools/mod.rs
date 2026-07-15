@@ -28,6 +28,103 @@ pub(super) const DEFAULT_TIMEOUT_SECS: u64 = 300;
 pub(super) const COMMAND_OUTPUT_LIMIT: usize = 16_000;
 pub(super) const READ_OUTPUT_LIMIT: usize = 32_000;
 
+/// Build the shell program name and argument list for a command string.
+/// On Windows, prepends a UTF-8 preamble and uses pwsh/powershell.
+/// On Unix, uses `$SHELL -lc`.
+pub(super) fn build_shell_args(command: &str) -> (String, Vec<String>) {
+    #[cfg(windows)]
+    {
+        let utf8_preamble = "\
+$OutputEncoding = [Console]::OutputEncoding = \
+[System.Text.UTF8Encoding]::UTF8; \
+$env:PYTHONIOENCODING='utf-8'; ";
+        let full_cmd = format!("{utf8_preamble}{command}");
+        let shell = windows_shell_program().to_string();
+        (
+            shell,
+            vec![
+                "-NoLogo".into(),
+                "-NoProfile".into(),
+                "-Command".into(),
+                full_cmd,
+            ],
+        )
+    }
+    #[cfg(not(windows))]
+    {
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "sh".to_string());
+        (shell, vec!["-lc".into(), command.to_string()])
+    }
+}
+
+/// Return the list of (program, args) invocations to try for running Python
+/// code, in fallback order. On Windows: `python` → `py -3`. On Unix:
+/// `python3` → `python`.
+pub(super) fn python_invocations(code: &str) -> Vec<(String, Vec<String>)> {
+    #[cfg(windows)]
+    {
+        vec![
+            (
+                "python".into(),
+                vec!["-X".into(), "utf8".into(), "-c".into(), code.into()],
+            ),
+            (
+                "py".into(),
+                vec![
+                    "-3".into(),
+                    "-X".into(),
+                    "utf8".into(),
+                    "-c".into(),
+                    code.into(),
+                ],
+            ),
+        ]
+    }
+    #[cfg(not(windows))]
+    {
+        vec![
+            ("python3".into(), vec!["-c".into(), code.into()]),
+            ("python".into(), vec!["-c".into(), code.into()]),
+        ]
+    }
+}
+
+/// Format the output of a command execution into the standard envelope
+/// `exit_code / wall_secs / timeout_secs / stdout / stderr`.
+pub(super) fn format_command_output(
+    exit_code: &str,
+    elapsed: std::time::Duration,
+    timeout_secs: u64,
+    stdout: &str,
+    stderr: &str,
+) -> String {
+    format!(
+        "exit_code: {}\nwall_secs: {:.2}\ntimeout_secs: {}\nstdout:\n{}\nstderr:\n{}",
+        exit_code,
+        elapsed.as_secs_f64(),
+        timeout_secs,
+        stdout,
+        stderr
+    )
+}
+
+/// Directory names that should be skipped when traversing the workspace
+/// (build artifacts, VCS metadata, or heavy dependency trees).
+pub fn should_skip_dir(name: &str) -> bool {
+    matches!(name, ".git" | "target" | "node_modules")
+}
+
+/// Resolve a possibly-relative path against `cwd`. Absolute paths are
+/// returned as-is; relative paths are joined to `cwd`.
+pub fn resolve_path(cwd: &Path, path: &str) -> PathBuf {
+    let p = PathBuf::from(path);
+    if p.is_absolute() {
+        p
+    } else {
+        cwd.join(p)
+    }
+}
+
 #[derive(Deserialize)]
 pub(super) struct ReadArgs {
     pub(super) path: String,
@@ -124,11 +221,7 @@ pub(super) struct SubAgentArgs {
 }
 
 pub(super) fn resolve_workspace_path(cwd: &Path, path: &str) -> Result<PathBuf> {
-    let requested = Path::new(path);
-    if requested.is_absolute() {
-        return Ok(requested.to_path_buf());
-    }
-    Ok(cwd.join(requested))
+    Ok(resolve_path(cwd, path))
 }
 
 pub(super) fn select_lines(

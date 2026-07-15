@@ -10,36 +10,57 @@ const MCP_TOOL_LIMIT: usize = 256;
 /// behaviour in `McpCatalog.convertTool`.
 const MCP_DESC_LIMIT: usize = 200;
 
-pub fn openai_tool_specs() -> Vec<serde_json::Value> {
-    let mut out: Vec<serde_json::Value> = tool_defs()
-        .into_iter()
-        .map(|tool| {
-            json!({
+/// Provider-specific tool-spec JSON shape.
+#[derive(Clone, Copy)]
+enum ToolFormat {
+    OpenAi,
+    Anthropic,
+}
+
+impl ToolFormat {
+    /// Wrap a `(name, description, schema)` triple into the
+    /// provider-specific tool-spec JSON object.
+    fn wrap(&self, name: &str, description: &str, schema: &serde_json::Value) -> serde_json::Value {
+        match self {
+            ToolFormat::OpenAi => json!({
                 "type": "function",
                 "function": {
-                    "name": tool.name,
-                    "description": tool.description,
-                    "parameters": tool.schema,
+                    "name": name,
+                    "description": description,
+                    "parameters": schema,
                 }
-            })
-        })
-        .collect();
-    out.extend(mcp_specs_for_openai());
-    out
+            }),
+            ToolFormat::Anthropic => json!({
+                "name": name,
+                "description": description,
+                "input_schema": schema,
+            }),
+        }
+    }
+
+    /// Extract the tool name from a provider-specific spec.
+    fn name_of<'a>(&self, spec: &'a serde_json::Value) -> &'a str {
+        match self {
+            ToolFormat::OpenAi => spec["function"]["name"].as_str().unwrap_or(""),
+            ToolFormat::Anthropic => spec["name"].as_str().unwrap_or(""),
+        }
+    }
+}
+
+pub fn openai_tool_specs() -> Vec<serde_json::Value> {
+    tool_specs(ToolFormat::OpenAi)
 }
 
 pub fn anthropic_tool_specs() -> Vec<serde_json::Value> {
+    tool_specs(ToolFormat::Anthropic)
+}
+
+fn tool_specs(fmt: ToolFormat) -> Vec<serde_json::Value> {
     let mut out: Vec<serde_json::Value> = tool_defs()
         .into_iter()
-        .map(|tool| {
-            json!({
-                "name": tool.name,
-                "description": tool.description,
-                "input_schema": tool.schema,
-            })
-        })
+        .map(|tool| fmt.wrap(tool.name, &tool.description, &tool.schema))
         .collect();
-    out.extend(mcp_specs_for_anthropic());
+    out.extend(mcp_specs(&fmt));
     out
 }
 
@@ -48,25 +69,23 @@ pub fn anthropic_tool_specs() -> Vec<serde_json::Value> {
 pub fn openai_tool_specs_for_sub_agent(
     sub_agent: crate::permission::SubAgent,
 ) -> Vec<serde_json::Value> {
-    openai_tool_specs()
-        .into_iter()
-        .filter(|spec| {
-            let name = spec["function"]["name"].as_str().unwrap_or("");
-            matches!(
-                crate::permission::check_sub_agent(sub_agent, name),
-                crate::permission::Action::Allow
-            )
-        })
-        .collect()
+    tool_specs_for_sub_agent(ToolFormat::OpenAi, sub_agent)
 }
 
 pub fn anthropic_tool_specs_for_sub_agent(
     sub_agent: crate::permission::SubAgent,
 ) -> Vec<serde_json::Value> {
-    anthropic_tool_specs()
+    tool_specs_for_sub_agent(ToolFormat::Anthropic, sub_agent)
+}
+
+fn tool_specs_for_sub_agent(
+    fmt: ToolFormat,
+    sub_agent: crate::permission::SubAgent,
+) -> Vec<serde_json::Value> {
+    tool_specs(fmt)
         .into_iter()
         .filter(|spec| {
-            let name = spec["name"].as_str().unwrap_or("");
+            let name = fmt.name_of(spec);
             matches!(
                 crate::permission::check_sub_agent(sub_agent, name),
                 crate::permission::Action::Allow
@@ -75,35 +94,13 @@ pub fn anthropic_tool_specs_for_sub_agent(
         .collect()
 }
 
-/// Read the current MCP tool list and convert it to the OpenAI
+/// Read the current MCP tool list and convert it to the provider-specific
 /// tool-spec shape. Returns an empty Vec when the service is not
 /// installed or has no connected tools.
-pub(super) fn mcp_specs_for_openai() -> Vec<serde_json::Value> {
+fn mcp_specs(fmt: &ToolFormat) -> Vec<serde_json::Value> {
     mcp_tool_iter()
         .into_iter()
-        .map(|(key, description, schema)| {
-            json!({
-                "type": "function",
-                "function": {
-                    "name": key,
-                    "description": description,
-                    "parameters": schema,
-                }
-            })
-        })
-        .collect()
-}
-
-pub(super) fn mcp_specs_for_anthropic() -> Vec<serde_json::Value> {
-    mcp_tool_iter()
-        .into_iter()
-        .map(|(key, description, schema)| {
-            json!({
-                "name": key,
-                "description": description,
-                "input_schema": schema,
-            })
-        })
+        .map(|(key, description, schema)| fmt.wrap(&key, &description, &schema))
         .collect()
 }
 

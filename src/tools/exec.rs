@@ -2,9 +2,7 @@ use super::file::{
     ask_question, glob_search, grep_text, list_path, plan_review, read_file, skill_load,
     split_edit_diff, todowrite, write_file, write_new_file,
 };
-use super::web::{
-    run_command, run_python_command, strip_ansi, webfetch, websearch, windows_shell_program,
-};
+use super::web::{run_command, run_python_command, strip_ansi, webfetch, websearch};
 use super::*;
 
 pub async fn execute_tool(name: &str, args: &str, cwd: &Path) -> String {
@@ -222,30 +220,8 @@ pub(super) async fn run_shell_streaming(
     tx: UnboundedSender<AppMsg>,
     timeout_secs: u64,
 ) -> Result<String> {
-    #[cfg(windows)]
-    {
-        let utf8_preamble = "\
-$OutputEncoding = [Console]::OutputEncoding = \
-[System.Text.UTF8Encoding]::UTF8; \
-$env:PYTHONIOENCODING='utf-8'; ";
-        let full_cmd = format!("{utf8_preamble}{command}");
-        let shell = windows_shell_program();
-        run_shell_streaming_impl(
-            shell,
-            &["-NoLogo", "-NoProfile", "-Command", &full_cmd],
-            cwd,
-            call_id,
-            tx,
-            timeout_secs,
-        )
-        .await
-    }
-
-    #[cfg(not(windows))]
-    {
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "sh".to_string());
-        run_shell_streaming_impl(&shell, &["-lc", command], cwd, call_id, tx, timeout_secs).await
-    }
+    let (shell, args) = build_shell_args(command);
+    run_shell_streaming_impl(&shell, &args, cwd, call_id, tx, timeout_secs).await
 }
 
 pub(super) async fn run_python_streaming_inner(
@@ -255,52 +231,16 @@ pub(super) async fn run_python_streaming_inner(
     tx: UnboundedSender<AppMsg>,
     timeout_secs: u64,
 ) -> Result<String> {
-    #[cfg(windows)]
-    {
-        match run_shell_streaming_impl(
-            "python",
-            &["-X", "utf8", "-c", code],
-            cwd,
-            call_id,
-            tx.clone(),
-            timeout_secs,
-        )
-        .await
+    let invocations = python_invocations(code);
+    let mut last_err = None;
+    for (program, args) in &invocations {
+        match run_shell_streaming_impl(program, args, cwd, call_id, tx.clone(), timeout_secs).await
         {
-            Ok(output) => Ok(output),
-            Err(_) => {
-                run_shell_streaming_impl(
-                    "py",
-                    &["-3", "-X", "utf8", "-c", code],
-                    cwd,
-                    call_id,
-                    tx,
-                    timeout_secs,
-                )
-                .await
-            }
+            Ok(output) => return Ok(output),
+            Err(e) => last_err = Some(e),
         }
     }
-
-    #[cfg(not(windows))]
-    {
-        match run_shell_streaming_impl(
-            "python3",
-            &["-c", code],
-            cwd,
-            call_id,
-            tx.clone(),
-            timeout_secs,
-        )
-        .await
-        {
-            Ok(output) => Ok(output),
-            Err(_) => {
-                run_shell_streaming_impl("python", &["-c", code], cwd, call_id, tx, timeout_secs)
-                    .await
-            }
-        }
-    }
+    Err(last_err.unwrap_or_else(|| anyhow!("no python invocations")))
 }
 
 /// Core streaming shell implementation.
@@ -308,7 +248,7 @@ pub(super) async fn run_python_streaming_inner(
 /// sends them via ToolDelta, and returns the full accumulated output.
 pub(super) async fn run_shell_streaming_impl(
     program: &str,
-    args: &[&str],
+    args: &[String],
     cwd: &Path,
     call_id: &str,
     tx: UnboundedSender<AppMsg>,
@@ -389,16 +329,15 @@ pub(super) async fn run_shell_streaming_impl(
     let status = child.wait().await?;
     let stdout = strip_ansi(&stdout_buf);
     let stderr = strip_ansi(&stderr_buf);
-
-    Ok(format!(
-        "exit_code: {}\nwall_secs: {:.2}\ntimeout_secs: {}\nstdout:\n{}\nstderr:\n{}",
-        status
-            .code()
-            .map(|c| c.to_string())
-            .unwrap_or_else(|| "terminated".to_string()),
-        started.elapsed().as_secs_f64(),
+    let exit_code = status
+        .code()
+        .map(|c| c.to_string())
+        .unwrap_or_else(|| "terminated".to_string());
+    Ok(format_command_output(
+        &exit_code,
+        started.elapsed(),
         timeout_secs,
-        stdout,
-        stderr
+        &stdout,
+        &stderr,
     ))
 }

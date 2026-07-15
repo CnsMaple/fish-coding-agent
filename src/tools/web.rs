@@ -334,46 +334,20 @@ pub(super) async fn run_python_command(args: &str, cwd: &Path) -> Result<String>
 }
 
 async fn run_python(code: &str, cwd: &Path, timeout_secs: u64) -> Result<String> {
-    #[cfg(windows)]
-    {
-        match run_shell("python", &["-X", "utf8", "-c", code], cwd, timeout_secs).await {
-            Ok(output) => Ok(output),
-            Err(_) => run_shell("py", &["-3", "-X", "utf8", "-c", code], cwd, timeout_secs).await,
+    let invocations = python_invocations(code);
+    let mut last_err = None;
+    for (program, args) in &invocations {
+        match run_shell(program, args, cwd, timeout_secs).await {
+            Ok(output) => return Ok(output),
+            Err(e) => last_err = Some(e),
         }
     }
-
-    #[cfg(not(windows))]
-    {
-        match run_shell("python3", &["-c", code], cwd, timeout_secs).await {
-            Ok(output) => Ok(output),
-            Err(_) => run_shell("python", &["-c", code], cwd, timeout_secs).await,
-        }
-    }
+    Err(last_err.unwrap_or_else(|| anyhow!("no python invocations")))
 }
 
 async fn run_shell_command(command: &str, cwd: &Path, timeout_secs: u64) -> Result<String> {
-    #[cfg(windows)]
-    {
-        let utf8_preamble = "\
-$OutputEncoding = [Console]::OutputEncoding = \
-[System.Text.UTF8Encoding]::UTF8; \
-$env:PYTHONIOENCODING='utf-8'; ";
-        let full_cmd = format!("{utf8_preamble}{command}");
-        let shell = windows_shell_program();
-        return run_shell(
-            shell,
-            &["-NoLogo", "-NoProfile", "-Command", &full_cmd],
-            cwd,
-            timeout_secs,
-        )
-        .await;
-    }
-
-    #[cfg(not(windows))]
-    {
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "sh".to_string());
-        run_shell(&shell, &["-lc", command], cwd, timeout_secs).await
-    }
+    let (shell, args) = build_shell_args(command);
+    run_shell(&shell, &args, cwd, timeout_secs).await
 }
 
 pub fn shell_guidance() -> String {
@@ -442,7 +416,12 @@ pub(super) fn windows_shell_program() -> &'static str {
     })
 }
 
-async fn run_shell(program: &str, args: &[&str], cwd: &Path, timeout_secs: u64) -> Result<String> {
+async fn run_shell(
+    program: &str,
+    args: &[String],
+    cwd: &Path,
+    timeout_secs: u64,
+) -> Result<String> {
     let started = Instant::now();
     let output = tokio::process::Command::new(program)
         .args(args)
@@ -451,21 +430,19 @@ async fn run_shell(program: &str, args: &[&str], cwd: &Path, timeout_secs: u64) 
         .env("PYTHONUTF8", "1")
         .output()
         .await?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let stdout = strip_ansi(&stdout);
-    let stderr = strip_ansi(&stderr);
-    Ok(format!(
-        "exit_code: {}\nwall_secs: {:.2}\ntimeout_secs: {}\nstdout:\n{}\nstderr:\n{}",
-        output
-            .status
-            .code()
-            .map(|c| c.to_string())
-            .unwrap_or_else(|| "terminated".to_string()),
-        started.elapsed().as_secs_f64(),
+    let stdout = strip_ansi(&String::from_utf8_lossy(&output.stdout));
+    let stderr = strip_ansi(&String::from_utf8_lossy(&output.stderr));
+    let exit_code = output
+        .status
+        .code()
+        .map(|c| c.to_string())
+        .unwrap_or_else(|| "terminated".to_string());
+    Ok(format_command_output(
+        &exit_code,
+        started.elapsed(),
         timeout_secs,
-        stdout,
-        stderr
+        &stdout,
+        &stderr,
     ))
 }
 

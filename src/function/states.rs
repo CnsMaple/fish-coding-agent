@@ -5,6 +5,89 @@ use chrono::{DateTime, Utc};
 use std::path::PathBuf;
 use std::time::Instant;
 
+/// Trait for pickers that have a search-box + filtered-list pattern
+/// (ProviderPicker, ModelPicker, TimelinePicker). Provides default
+/// implementations for the common Search/List key handling so the
+/// per-picker handler only needs to implement `on_enter`.
+pub trait FilterablePicker {
+    fn query(&mut self) -> &mut String;
+    fn filtered(&self) -> &[usize];
+    fn cursor(&mut self) -> &mut usize;
+    fn focus(&mut self) -> &mut PickerFocus;
+    fn rebuild_filter(&mut self);
+
+    /// Handle a key in Search focus mode. Returns `Some(true)` if the
+    /// key was consumed, `Some(false)` if the global handler should
+    /// close the tab (Esc with empty query), or `None` if the key was
+    /// not recognised (caller falls through).
+    fn handle_search_key(&mut self, k: crossterm::event::KeyEvent) -> Option<bool> {
+        use crossterm::event::KeyCode;
+        match k.code {
+            KeyCode::Esc => {
+                if self.query().is_empty() {
+                    return Some(false);
+                }
+                self.query().clear();
+                self.rebuild_filter();
+                Some(true)
+            }
+            KeyCode::Down => {
+                *self.focus() = PickerFocus::List;
+                Some(true)
+            }
+            KeyCode::Backspace => {
+                self.query().pop();
+                self.rebuild_filter();
+                Some(true)
+            }
+            KeyCode::Char(c) => {
+                self.query().push(c);
+                self.rebuild_filter();
+                Some(true)
+            }
+            _ => None,
+        }
+    }
+
+    /// Handle a key in List focus mode. Returns `Some(true)` if the
+    /// key was consumed, `Some(false)` if the global handler should
+    /// close the tab, or `None` for the caller to fall through.
+    fn handle_list_key(&mut self, k: crossterm::event::KeyEvent) -> Option<bool> {
+        use crossterm::event::KeyCode;
+        match k.code {
+            KeyCode::Up => {
+                if *self.cursor() > 0 {
+                    *self.cursor() -= 1;
+                }
+                Some(true)
+            }
+            KeyCode::Down => {
+                if *self.cursor() + 1 < self.filtered().len() {
+                    *self.cursor() += 1;
+                }
+                Some(true)
+            }
+            KeyCode::Tab | KeyCode::BackTab => {
+                *self.focus() = PickerFocus::Search;
+                Some(true)
+            }
+            KeyCode::Char(c) => {
+                self.query().push(c);
+                *self.focus() = PickerFocus::Search;
+                self.rebuild_filter();
+                Some(true)
+            }
+            KeyCode::Backspace => {
+                self.query().pop();
+                *self.focus() = PickerFocus::Search;
+                self.rebuild_filter();
+                Some(true)
+            }
+            _ => None,
+        }
+    }
+}
+
 /// Transient command-completion state, shown while the input buffer
 /// looks like a partial slash command.
 #[derive(Debug)]
@@ -747,6 +830,24 @@ pub enum ContextPickerFocus {
     CustomInput,
 }
 
+impl FilterablePicker for ModelPickerState {
+    fn query(&mut self) -> &mut String {
+        &mut self.query
+    }
+    fn filtered(&self) -> &[usize] {
+        &self.filtered
+    }
+    fn cursor(&mut self) -> &mut usize {
+        &mut self.cursor
+    }
+    fn focus(&mut self) -> &mut PickerFocus {
+        &mut self.focus
+    }
+    fn rebuild_filter(&mut self) {
+        ModelPickerState::rebuild_filter(self)
+    }
+}
+
 impl ModelPickerState {
     pub fn new(provider: ProviderKind) -> Self {
         Self {
@@ -840,6 +941,24 @@ pub struct ProviderPickerState {
     pub focus: PickerFocus,
     /// The currently-active entry id, used for the `[active]` marker.
     pub active: Option<ProviderId>,
+}
+
+impl FilterablePicker for ProviderPickerState {
+    fn query(&mut self) -> &mut String {
+        &mut self.query
+    }
+    fn filtered(&self) -> &[usize] {
+        &self.filtered
+    }
+    fn cursor(&mut self) -> &mut usize {
+        &mut self.cursor
+    }
+    fn focus(&mut self) -> &mut PickerFocus {
+        &mut self.focus
+    }
+    fn rebuild_filter(&mut self) {
+        ProviderPickerState::rebuild_filter(self)
+    }
 }
 
 impl ProviderPickerState {
@@ -988,6 +1107,24 @@ pub struct TimelinePickerState {
     pub cursor: usize,
     pub scroll: usize,
     pub focus: PickerFocus,
+}
+
+impl FilterablePicker for TimelinePickerState {
+    fn query(&mut self) -> &mut String {
+        &mut self.query
+    }
+    fn filtered(&self) -> &[usize] {
+        &self.filtered
+    }
+    fn cursor(&mut self) -> &mut usize {
+        &mut self.cursor
+    }
+    fn focus(&mut self) -> &mut PickerFocus {
+        &mut self.focus
+    }
+    fn rebuild_filter(&mut self) {
+        TimelinePickerState::rebuild_filter(self)
+    }
 }
 
 impl TimelinePickerState {
