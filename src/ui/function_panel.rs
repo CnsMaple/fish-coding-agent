@@ -59,6 +59,7 @@ pub fn render(area: Rect, buf: &mut Buffer, app: &mut App) {
             SidebarTab::Ask(_) => "ask",
             SidebarTab::Todo(_) => "todo",
             SidebarTab::PastePreview(_) => "paste",
+            SidebarTab::ToolPicker(_) => "tools",
             SidebarTab::Hotkey => "hotkey",
         };
         if i == app.function.active {
@@ -88,6 +89,7 @@ pub fn render(area: Rect, buf: &mut Buffer, app: &mut App) {
         let ctx = crate::ui::tab_widget::TabCtx {
             config: &app.config,
             todos: &todo_items,
+            disabled_tools: &app.disabled_tools,
         };
         let cursor = match tab {
             SidebarTab::Notifications => {
@@ -106,6 +108,7 @@ pub fn render(area: Rect, buf: &mut Buffer, app: &mut App) {
             SidebarTab::Ask(s) => s.render_tab(inner, buf, &ctx),
             SidebarTab::PastePreview(s) => s.render_tab(inner, buf, &ctx),
             SidebarTab::Todo(s) => s.render_tab(inner, buf, &ctx),
+            SidebarTab::ToolPicker(s) => s.render_tab(inner, buf, &ctx),
             SidebarTab::Hotkey => {
                 use crate::ui::trait_impls::HotkeyTab;
                 let mut hk = HotkeyTab;

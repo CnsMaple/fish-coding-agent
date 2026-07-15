@@ -727,6 +727,67 @@ impl TabWidget for crate::function::TodoTabState {
     }
 }
 
+impl TabWidget for crate::function::ToolPickerState {
+    fn title(&self) -> &str {
+        "tools"
+    }
+    fn has_search(&self) -> bool {
+        true
+    }
+    fn content_height(&self, _ctx: &TabCtx) -> usize {
+        if self.filtered.is_empty() {
+            1
+        } else {
+            self.filtered.len()
+        }
+    }
+    fn render_search(&mut self, area: Rect, buf: &mut Buffer, _ctx: &TabCtx) -> Option<(u16, u16)> {
+        crate::ui::picker_widget::render_search_row(
+            area,
+            buf,
+            &self.query,
+            crate::function::PickerFocus::Search,
+            false,
+        )
+    }
+    fn render_body(&mut self, area: Rect, buf: &mut Buffer, ctx: &TabCtx) -> Option<(u16, u16)> {
+        if area.height < 1 {
+            return None;
+        }
+        if self.filtered.is_empty() {
+            Paragraph::new(Line::from(Span::styled("  [no matches]", Theme::dim())))
+                .wrap(Wrap { trim: false })
+                .render(area, buf);
+        } else {
+            let range = visible_window(
+                self.cursor,
+                &mut self.scroll,
+                area.height as usize,
+                self.filtered.len(),
+            );
+            for row in range {
+                let tool_idx = self.filtered[row];
+                let name = &self.tools[tool_idx];
+                let is_disabled = ctx.disabled_tools.contains(name.as_str());
+                let is_cursor = row == self.cursor;
+                let checkbox = if is_disabled { "\u{2612}" } else { "\u{2610}" };
+                let y = area.y + (row - self.scroll) as u16;
+                let line = if is_cursor {
+                    Line::from(vec![
+                        Span::styled("> ", Theme::bold()),
+                        Span::raw(format!("{checkbox} ")),
+                        Span::raw(name.clone()),
+                    ])
+                } else {
+                    Line::from(Span::raw(format!("  {checkbox} {name}")))
+                };
+                buf.set_line(area.x, y, &line, area.width);
+            }
+        }
+        None
+    }
+}
+
 impl TabWidget for crate::function::PastePreviewState {
     fn title(&self) -> &str {
         "paste"
@@ -840,7 +901,7 @@ impl TabWidget for HotkeyTab {
         "hotkey"
     }
     fn content_height(&self, _ctx: &TabCtx) -> usize {
-        17
+        18
     }
     fn render_body(&mut self, area: Rect, buf: &mut Buffer, _ctx: &TabCtx) -> Option<(u16, u16)> {
         let rows: Vec<(&str, &str)> = vec![
@@ -860,6 +921,7 @@ impl TabWidget for HotkeyTab {
             ("/continue", "Continue interrupted output"),
             ("/plan", "Switch to plan mode (read-only)"),
             ("/yolo", "Switch back to yolo mode"),
+            ("/tool", "Toggle tools for current session"),
             ("Mouse wheel", "Scroll session"),
         ];
         let lines: Vec<Line> = rows

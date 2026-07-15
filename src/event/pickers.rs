@@ -2,6 +2,7 @@ use super::mcp::start_cursor_oauth;
 use super::paste::handle_paste_preview_key;
 use super::AppMsg;
 use crate::app::App;
+use crate::function::notifications::ToastLevel;
 use crossterm::event::KeyModifiers;
 /// Dispatch a key event to the per-tab handler for the currently active
 /// sidebar tab. The dispatch follows a "move out → call handler → decide
@@ -49,6 +50,7 @@ pub(super) async fn dispatch_to_active_tab(k: crossterm::event::KeyEvent, app: &
         crate::function::SidebarTab::Plan(state) => handle_plan_key(k, app, state).await,
         crate::function::SidebarTab::Ask(state) => handle_ask_key(k, app, state).await,
         crate::function::SidebarTab::Todo(state) => handle_todo_key(k, app, state).await,
+        crate::function::SidebarTab::ToolPicker(state) => handle_tool_picker_key(k, app, state),
         _ => false,
     };
     if active < app.function.tabs.len()
@@ -1874,5 +1876,66 @@ pub fn commit_model(
             ToastLevel::Ok,
             format!("model set: {}:{model_id}", provider.as_str()),
         );
+    }
+}
+
+/// Search / navigate / toggle for the tool picker.  Space toggles
+/// the focused tool's enabled/disabled state; Enter confirms and
+/// closes the tab; Esc cancels without applying.
+pub(super) fn handle_tool_picker_key(
+    k: crossterm::event::KeyEvent,
+    app: &mut App,
+    state: &mut crate::function::ToolPickerState,
+) -> bool {
+    use crossterm::event::KeyCode;
+    match k.code {
+        KeyCode::Up => {
+            if state.cursor > 0 {
+                state.cursor -= 1;
+            }
+            true
+        }
+        KeyCode::Down => {
+            if state.cursor + 1 < state.filtered.len() {
+                state.cursor += 1;
+            }
+            true
+        }
+        KeyCode::Char(' ') => {
+            if let Some(name) = state.selected() {
+                if app.disabled_tools.contains(name) {
+                    app.disabled_tools.remove(name);
+                } else {
+                    app.disabled_tools.insert(name.to_string());
+                }
+            }
+            true
+        }
+        KeyCode::Enter => {
+            app.sync_disabled_tools();
+            let n = app.disabled_tools.len();
+            close_active_function_tab(app);
+            if n == 0 {
+                app.notify(ToastLevel::Ok, "all tools enabled");
+            } else {
+                app.notify(ToastLevel::Info, format!("{n} tool(s) disabled"));
+            }
+            true
+        }
+        KeyCode::Esc => {
+            close_active_function_tab(app);
+            true
+        }
+        KeyCode::Char(c) => {
+            state.query.push(c);
+            state.rebuild_filter();
+            true
+        }
+        KeyCode::Backspace => {
+            state.query.pop();
+            state.rebuild_filter();
+            true
+        }
+        _ => true,
     }
 }

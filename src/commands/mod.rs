@@ -109,6 +109,7 @@ pub fn dispatch(app: &mut App, cmd: &str, arg: &str) {
         "mcp-auth" => open_mcp_auth(app, arg),
         "mcp-logout" => open_mcp_logout(app, arg),
         "mcp-debug" => open_mcp_debug(app, arg),
+        "tool" | "tools" => open_tool_picker(app),
         _ => {
             app.notify(ToastLevel::Fail, format!("unknown command: /{cmd}"));
         }
@@ -632,6 +633,14 @@ pub fn open_hotkey(app: &mut App) {
 pub fn open_thinking_picker(app: &mut App) {
     app.function.push(SidebarTab::ThinkingPicker(
         crate::function::ThinkingPickerState::new(),
+    ));
+    app.show_panel();
+    app.acknowledge_panel();
+}
+
+pub fn open_tool_picker(app: &mut App) {
+    app.function.push(SidebarTab::ToolPicker(
+        crate::function::ToolPickerState::new(&app.disabled_tools),
     ));
     app.show_panel();
     app.acknowledge_panel();

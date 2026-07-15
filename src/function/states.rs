@@ -200,6 +200,7 @@ pub enum SidebarTab {
     Plan(PlanState),
     Ask(AskState),
     Todo(TodoTabState),
+    ToolPicker(ToolPickerState),
     Hotkey,
 }
 
@@ -285,7 +286,14 @@ impl SidebarTab {
                 }
             }
             Self::Todo(_) => app.session.todo_items.len().max(1),
-            Self::Hotkey => 17,
+            Self::ToolPicker(s) => {
+                if s.filtered.is_empty() {
+                    1
+                } else {
+                    s.filtered.len()
+                }
+            }
+            Self::Hotkey => 18,
         }
     }
 
@@ -299,6 +307,7 @@ impl SidebarTab {
                 | Self::ThinkingPicker(_)
                 | Self::TimelinePicker(_)
                 | Self::SessionPicker(_)
+                | Self::ToolPicker(_)
         )
     }
 
@@ -324,6 +333,7 @@ impl SidebarTab {
             Self::Plan(_) => " Enter: approve | R: reject | S: save | Esc: close ",
             Self::Ask(_) => " ",
             Self::Todo(_) => " ",
+            Self::ToolPicker(_) => " Space: toggle | Enter: confirm | Esc: close ",
             Self::Hotkey => "",
             Self::PastePreview(_) => " Enter: paste | Esc: cancel ",
             Self::Completion(_) => "",
@@ -1079,6 +1089,61 @@ impl Default for ThinkingPickerState {
     }
 }
 
+/// Picker for toggling individual tools on/off for the current
+/// session+mode. Mirrors the ThinkingPicker pattern (search + list)
+/// but each row has a checkbox; Space toggles, Enter confirms.
+#[derive(Debug)]
+pub struct ToolPickerState {
+    pub cursor: usize,
+    pub query: String,
+    pub scroll: usize,
+    /// All tool names available to toggle (built once on open).
+    pub tools: Vec<String>,
+    /// Filtered indices into `tools`.
+    pub filtered: Vec<usize>,
+}
+
+impl ToolPickerState {
+    pub fn new(disabled: &std::collections::HashSet<String>) -> Self {
+        let tools = crate::tools::all_tool_names();
+        let filtered: Vec<usize> = (0..tools.len()).collect();
+        let _ = disabled;
+        let mut s = Self {
+            cursor: 0,
+            query: String::new(),
+            scroll: 0,
+            tools,
+            filtered,
+        };
+        s.rebuild_filter();
+        s
+    }
+
+    pub fn rebuild_filter(&mut self) {
+        let q = self.query.to_lowercase();
+        self.filtered = self
+            .tools
+            .iter()
+            .enumerate()
+            .filter(|(_, name)| q.is_empty() || name.to_lowercase().contains(&q))
+            .map(|(i, _)| i)
+            .collect();
+        if self.cursor >= self.filtered.len() {
+            self.cursor = self.filtered.len().saturating_sub(1);
+        }
+        if self.scroll > self.cursor {
+            self.scroll = self.cursor;
+        }
+    }
+
+    pub fn selected(&self) -> Option<&str> {
+        self.filtered
+            .get(self.cursor)
+            .and_then(|&i| self.tools.get(i))
+            .map(|s| s.as_str())
+    }
+}
+
 /// One entry shown in the timeline picker. A snapshot of a session
 /// message at the time the picker was opened; the picker does not
 /// react to new messages streaming in.
@@ -1661,6 +1726,7 @@ impl FunctionPanel {
             Some(SidebarTab::Plan(_)) => "plan",
             Some(SidebarTab::Ask(_)) => "ask",
             Some(SidebarTab::Todo(_)) => "todo",
+            Some(SidebarTab::ToolPicker(_)) => "tools",
             Some(SidebarTab::Hotkey) => "hotkey",
             None => "?",
         }

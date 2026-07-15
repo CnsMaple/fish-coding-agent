@@ -875,6 +875,7 @@ pub const COMMAND_LIST: &[&str] = &[
     "/mcp-auth",
     "/mcp-logout",
     "/mcp-debug",
+    "/tool",
 ];
 
 /// Returns the list of completion candidates that match the given prefix
@@ -1020,6 +1021,7 @@ pub fn sidebar_tab_name(t: &SidebarTab) -> &'static str {
         SidebarTab::Plan(_) => "plan",
         SidebarTab::Ask(_) => "ask",
         SidebarTab::Todo(_) => "todo",
+        SidebarTab::ToolPicker(_) => "tools",
         SidebarTab::Hotkey => "hotkey",
     }
 }

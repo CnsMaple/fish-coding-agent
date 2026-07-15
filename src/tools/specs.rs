@@ -56,12 +56,26 @@ pub fn anthropic_tool_specs() -> Vec<serde_json::Value> {
 }
 
 fn tool_specs(fmt: ToolFormat) -> Vec<serde_json::Value> {
+    let disabled = crate::function::disabled_tools_snapshot();
     let mut out: Vec<serde_json::Value> = tool_defs()
         .into_iter()
+        .filter(|tool| !disabled.contains(tool.name))
         .map(|tool| fmt.wrap(tool.name, &tool.description, &tool.schema))
         .collect();
-    out.extend(mcp_specs(&fmt));
+    out.extend(mcp_specs(&fmt).into_iter().filter(|spec| {
+        let name = fmt.name_of(spec);
+        !disabled.contains(name)
+    }));
     out
+}
+
+/// Return the names of all built-in tools (not MCP). Used by the
+/// `/tool` picker to populate its checkbox list.
+pub fn all_tool_names() -> Vec<String> {
+    tool_defs()
+        .into_iter()
+        .map(|t| t.name.to_string())
+        .collect()
 }
 
 /// Return tool specs filtered for a sub-agent type. Sub-agents may

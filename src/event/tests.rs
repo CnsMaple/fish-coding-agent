@@ -69,6 +69,7 @@ fn make_app() -> App {
         should_quit: false,
         msg_tx: None,
         mcp_tools_dirty: true,
+        disabled_tools: std::collections::HashSet::new(),
         input_prompt_area: None,
         tui_selection: None,
         selected_text: None,

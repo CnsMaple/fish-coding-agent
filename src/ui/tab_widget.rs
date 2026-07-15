@@ -11,6 +11,7 @@ use ratatui::widgets::{Paragraph, Widget};
 pub struct TabCtx<'a> {
     pub config: &'a Config,
     pub todos: &'a [TodoItem],
+    pub disabled_tools: &'a std::collections::HashSet<String>,
 }
 
 /// A widget rendered inside the function panel's bordered area.

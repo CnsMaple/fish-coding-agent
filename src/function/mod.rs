@@ -1,8 +1,10 @@
 use crate::config::{Config, ProviderKind};
 use crate::function::notifications::{HitRate, ModelCache, Notifications, TokenRate};
 use crate::session::{Role, Session};
+use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
 pub mod notifications;
@@ -11,6 +13,32 @@ pub mod states;
 mod tests;
 
 pub use states::*;
+
+/// Global session-scoped set of disabled tools. Populated by the
+/// `/tool` picker; consulted by `tools::tool_specs` so disabled
+/// tools don't appear in the LLM's tool list. Cleared on `/new`.
+static DISABLED_TOOLS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+fn disabled_tools_lock() -> &'static Mutex<HashSet<String>> {
+    DISABLED_TOOLS.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+/// Snapshot of the disabled-tools set for the current session.
+/// Called by `tools::tool_specs` (synchronous, provider layer).
+pub fn disabled_tools_snapshot() -> HashSet<String> {
+    disabled_tools_lock().lock().unwrap().clone()
+}
+
+/// Replace the global disabled-tools set. Called when the `/tool`
+/// picker toggles a tool, and when the session is reset.
+pub fn set_disabled_tools(set: HashSet<String>) {
+    *disabled_tools_lock().lock().unwrap() = set;
+}
+
+/// Clear the global disabled-tools set. Called on `/new`.
+pub fn clear_disabled_tools() {
+    disabled_tools_lock().lock().unwrap().clear();
+}
 
 /// Top-level app state.
 pub struct App {
@@ -54,6 +82,12 @@ pub struct App {
     /// a plain `bool` because the aggregate count is cheap to
     /// recompute.
     pub mcp_tools_dirty: bool,
+
+    /// Tools disabled for the current session+mode via `/tool`.
+    /// Reset on `/new` or process restart. Tool names not in this
+    /// set are enabled. The set is consulted by `tools::tool_specs`
+    /// so disabled tools don't appear in the LLM's tool list.
+    pub disabled_tools: std::collections::HashSet<String>,
 
     /// Monotonic counter incremented every time `send_message` /
     /// `send_chat` (or a direct-tool input) starts a new request.
@@ -315,6 +349,7 @@ impl App {
             should_quit: false,
             msg_tx: None,
             mcp_tools_dirty: true,
+            disabled_tools: std::collections::HashSet::new(),
             input_prompt_area: None,
             tui_selection: None,
             selected_text: None,
@@ -424,6 +459,12 @@ impl App {
         self.notifications.push(level, text);
     }
 
+    /// Push the current `disabled_tools` set to the global registry
+    /// so `tools::tool_specs` picks up the change on the next request.
+    pub fn sync_disabled_tools(&self) {
+        set_disabled_tools(self.disabled_tools.clone());
+    }
+
     pub fn save_config(&mut self) {
         if let Err(e) = self.config.save(&self.config_path) {
             self.notify(
@@ -530,6 +571,8 @@ impl App {
         self.session_id = crate::session::store::new_session_id();
         self.session_title = crate::session::store::default_title(&self.cwd);
         self.image_blocks.clear();
+        self.disabled_tools.clear();
+        clear_disabled_tools();
         // Remove the todo tab when the session is cleared.
         self.function
             .tabs
