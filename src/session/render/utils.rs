@@ -290,7 +290,8 @@ pub(super) fn wrap_line(line: &str, max_width: usize) -> Vec<String> {
     // actually renders, causing the right border to shift.
     let line: String = line
         .chars()
-        .filter(|c| !c.is_control() || *c == '\n')
+        .map(|c| if c == '\n' { ' ' } else { c })
+        .filter(|c| !c.is_control())
         .collect();
 
     let mut rows = Vec::new();
@@ -339,6 +340,7 @@ pub fn visible_width(s: &str) -> usize {
 /// would push the right border `|` past the visible area.
 pub(super) fn strip_control_chars(s: &str) -> String {
     s.chars()
-        .filter(|c| !c.is_control() || *c == '\n')
+        .map(|c| if c == '\n' { ' ' } else { c })
+        .filter(|c| !c.is_control())
         .collect()
 }
