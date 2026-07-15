@@ -627,7 +627,20 @@ pub(crate) fn screen_y_to_doc_line(y: u16, area: &Rect, scroll: u32, total: u32)
     let inner_h = area.height as u32;
     let max_scroll = total.saturating_sub(inner_h);
     let offset_from_top = max_scroll.saturating_sub(scroll);
-    (offset_from_top + (y.saturating_sub(area.top())) as u32) as usize
+    // Clamp the screen-relative row into [0, inner_h) so a click/drag that
+    // leaves the session area (into the header above or the input below)
+    // maps to the topmost/bottom-most visible document line instead of a
+    // doc line that does not exist. Without this, when total < inner_h
+    // (empty session at startup) a click in the blank lower half produced a
+    // doc line far past `total`, and dragging up to the top then spanned the
+    // entire viewport with REVERSED style.
+    let rel = (y.saturating_sub(area.top())) as u32;
+    let clamped_rel = rel.min(inner_h.saturating_sub(1));
+    let mut doc = offset_from_top + clamped_rel;
+    if doc >= total {
+        doc = total.saturating_sub(1);
+    }
+    doc as usize
 }
 
 /// Convert a global document line index to a screen Y, if visible.
@@ -666,6 +679,12 @@ fn apply_selection_style(buf: &mut Buffer, sel: &Selection, area: &Rect, scroll:
     let buf_x_start = x_lo.unwrap_or(0);
     let buf_x_end = x_hi.unwrap_or(width.saturating_sub(1));
     for doc_line in y_start..=y_end {
+        // Never highlight doc lines past `total` — they correspond to the
+        // blank padding below a short session and would otherwise fill the
+        // whole viewport when the user drags into the empty lower half.
+        if (doc_line as u32) >= total {
+            break;
+        }
         if let Some(screen_y) = doc_line_to_screen_y(doc_line, area, scroll, total) {
             // First and last rows use the column clamp; middle rows
             // span the full width.
@@ -706,6 +725,14 @@ pub fn extract_selection_text(sel: &Selection, session: &Session, width: usize) 
 
     let offsets = &session.line_offsets;
     if offsets.len() < 2 {
+        return String::new();
+    }
+
+    // Guard: clamp the selection's end to the real total so the blank
+    // padding rows of a short session are never returned as text.
+    let total = *offsets.last().unwrap_or(&0) as usize;
+    let y_end = y_end.min(total.saturating_sub(1));
+    if y_start > y_end {
         return String::new();
     }
 

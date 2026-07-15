@@ -2132,6 +2132,16 @@ fn drag_creates_tui_selection_after_real_movement() {
     use ratatui::layout::Rect;
 
     let mut app = make_app();
+    // Populate the session with enough lines that document lines 2..5
+    // actually exist; otherwise screen_y_to_doc_line clamps every
+    // click to doc line 0 (total=0 for an empty session).
+    for i in 0..10 {
+        app.session.push(crate::session::Message::new(
+            crate::session::Role::Assistant,
+            format!("line {i}"),
+        ));
+    }
+    app.session.count_all_lines_with_width(80);
     app.session_area = Some(Rect::new(0, 0, 80, 24));
     let down = MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),
