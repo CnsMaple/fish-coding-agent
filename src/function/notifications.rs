@@ -139,16 +139,12 @@ impl Notifications {
     pub fn move_up(&mut self) {
         self.clamp_cursor();
         self.cursor = self.cursor.saturating_sub(1);
-        if self.cursor < self.scroll {
-            self.scroll = self.cursor;
-        }
     }
 
     pub fn move_down(&mut self) {
         let len = self.filtered_indices().len();
         if len == 0 {
             self.cursor = 0;
-            self.scroll = 0;
             return;
         }
         self.cursor = (self.cursor + 1).min(len - 1);

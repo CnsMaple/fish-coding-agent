@@ -163,10 +163,7 @@ pub async fn fetch_models_dev(
         let entry = ModelEntry {
             context_window: m.limit.as_ref().and_then(|l| l.context),
             max_output: m.limit.as_ref().and_then(|l| l.output),
-            modalities: m
-                .modalities
-                .map(|mods| mods.input)
-                .unwrap_or_default(),
+            modalities: m.modalities.map(|mods| mods.input).unwrap_or_default(),
         };
         models.insert(id, entry);
     }

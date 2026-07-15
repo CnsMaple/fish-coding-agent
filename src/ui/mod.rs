@@ -21,7 +21,11 @@ const AGENTS_AREA_HEIGHT: u16 = 5;
 
 pub fn render(f: &mut Frame, app: &mut App) {
     let area = f.area();
-    let agents_height = if app.agents_visible { AGENTS_AREA_HEIGHT } else { 0 };
+    let agents_height = if app.agents_visible {
+        AGENTS_AREA_HEIGHT
+    } else {
+        0
+    };
     let input_height = input_height(app, area.height, area.width);
 
     let mut constraints = vec![];
@@ -31,9 +35,14 @@ pub fn render(f: &mut Frame, app: &mut App) {
     constraints.push(Constraint::Min(0));
 
     if app.function_visible {
-        let remaining = area.height.saturating_sub(input_height + CWD_HEIGHT + agents_height);
+        let remaining = area
+            .height
+            .saturating_sub(input_height + CWD_HEIGHT + agents_height);
         let pct_height = (remaining as f64 * 0.30) as u16;
-        let panel_height = app.function.tabs.get(app.function.active)
+        let panel_height = app
+            .function
+            .tabs
+            .get(app.function.active)
             .map_or(4, |t| t.panel_height(pct_height, app));
         constraints.push(Constraint::Length(panel_height));
     }
@@ -52,7 +61,11 @@ pub fn render(f: &mut Frame, app: &mut App) {
     let agents_idx = 0;
     let session_idx = if app.agents_visible { 1 } else { 0 };
     let panel_idx = session_idx + 1;
-    let input_idx = if app.function_visible { panel_idx + 1 } else { session_idx + 1 };
+    let input_idx = if app.function_visible {
+        panel_idx + 1
+    } else {
+        session_idx + 1
+    };
     let cwd_idx = input_idx + 1;
 
     if app.agents_visible {
@@ -66,12 +79,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     let inner_h = content_area.height as usize;
     app.session.count_all_lines_with_width(width_u16 as usize);
 
-    let total_lines: usize = app
-        .session
-        .line_offsets
-        .last()
-        .copied()
-        .unwrap_or(0) as usize;
+    let total_lines: usize = app.session.line_offsets.last().copied().unwrap_or(0) as usize;
 
     // If a pending scroll-to-top was set (e.g. by jump_to_message),
     // compute the scroll using the real inner_h known only at render
@@ -95,7 +103,8 @@ pub fn render(f: &mut Frame, app: &mut App) {
     // one-frame mismatch during streaming: content grew, the view
     // shifted, then scroll was adjusted on the next frame — producing
     // a visible up-then-down jitter.
-    app.session.pin_scroll_for_total(width_u16, total_lines as u32);
+    app.session
+        .pin_scroll_for_total(width_u16, total_lines as u32);
     app.session.scroll = app
         .session
         .scroll
@@ -130,8 +139,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     let first_visible = if app.session.messages.is_empty() || app.session.line_offsets.len() <= 1 {
         0
     } else {
-        match app.session.line_offsets[..app.session.messages.len()]
-            .binary_search(&(start as u32))
+        match app.session.line_offsets[..app.session.messages.len()].binary_search(&(start as u32))
         {
             Ok(i) => i,
             Err(i) => i.saturating_sub(1),
@@ -145,13 +153,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
         .copied()
         .unwrap_or(0) as usize;
 
-    for (msg_idx, m) in app
-        .session
-        .messages
-        .iter()
-        .enumerate()
-        .skip(first_visible)
-    {
+    for (msg_idx, m) in app.session.messages.iter().enumerate().skip(first_visible) {
         let msg_start = app.session.line_offsets[msg_idx] as usize;
         if msg_start >= end {
             break;
@@ -161,10 +163,9 @@ pub fn render(f: &mut Frame, app: &mut App) {
         // build_message_lines) ──────────────────────────────────
         if m.role == crate::session::Role::User {
             if let Some(skill_ref) = &m.skill_ref {
-                line_idx += crate::session::render::skill_block_line_count(
-                    skill_ref,
-                    width_u16 as usize,
-                ) as usize;
+                line_idx +=
+                    crate::session::render::skill_block_line_count(skill_ref, width_u16 as usize)
+                        as usize;
             }
         }
 
@@ -179,9 +180,8 @@ pub fn render(f: &mut Frame, app: &mut App) {
             // — actually ensure_gap_before_block returns early if
             // msg_lines is empty, so no gap before attachment when
             // message is empty. This matches: no gap here.
-            line_idx += crate::session::render::attachment_block_line_count(
-                &m.attachments,
-            ) as usize;
+            line_idx +=
+                crate::session::render::attachment_block_line_count(&m.attachments) as usize;
         }
 
         // ── Interleave content + thinking/tool blocks by offset ─
@@ -198,8 +198,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
         let think_show = m.role == crate::session::Role::Assistant
             && crate::session::render::message_has_thinking(m)
             && app.config.thinking_display != crate::config::ThinkingDisplay::Hide;
-        let tool_show =
-            app.config.tool_display != crate::config::ToolResultDisplay::Hide;
+        let tool_show = app.config.tool_display != crate::config::ToolResultDisplay::Hide;
 
         // Build sorted items matching build_message_lines.
         // (offset, is_thinking, thinking_seg_idx or tool_idx,
@@ -212,10 +211,8 @@ pub fn render(f: &mut Frame, app: &mut App) {
         if think_show {
             let segments = crate::session::render::get_thinking_segments(m);
             for (si, seg) in segments.iter().enumerate() {
-                let offset = crate::session::render::clamp_char_boundary(
-                    raw,
-                    seg.offset.min(raw.len()),
-                );
+                let offset =
+                    crate::session::render::clamp_char_boundary(raw, seg.offset.min(raw.len()));
                 items.push((offset, WalkItem::Thinking(si)));
             }
         }
@@ -268,13 +265,9 @@ pub fn render(f: &mut Frame, app: &mut App) {
 
             // Render content before this item.
             if offset > cursor {
-                let seg_text = crate::session::render::strip_legacy_markers(
-                    &raw[cursor..offset],
-                );
-                let seg_lines = crate::session::render::count_md_segment(
-                    &seg_text,
-                    width_u16 as usize,
-                );
+                let seg_text = crate::session::render::strip_legacy_markers(&raw[cursor..offset]);
+                let seg_lines =
+                    crate::session::render::count_md_segment(&seg_text, width_u16 as usize);
                 line_idx += seg_lines as usize;
                 cursor = offset;
                 has_any_line = true;
@@ -305,12 +298,15 @@ pub fn render(f: &mut Frame, app: &mut App) {
                     let block_top = line_idx;
                     let block_bot = line_idx + lines; // exclusive
                     if lines > 0 && block_top < end && block_bot > start {
-                        let screen_top = content_area.y
-                            + block_top.saturating_sub(start).min(inner_h) as u16;
-                        let screen_bot = content_area.y
-                            + (block_bot.min(end) - start).min(inner_h) as u16;
-                        app.thinking_toggle_rows
-                            .push((screen_top, screen_bot.saturating_sub(1), msg_idx));
+                        let screen_top =
+                            content_area.y + block_top.saturating_sub(start).min(inner_h) as u16;
+                        let screen_bot =
+                            content_area.y + (block_bot.min(end) - start).min(inner_h) as u16;
+                        app.thinking_toggle_rows.push((
+                            screen_top,
+                            screen_bot.saturating_sub(1),
+                            msg_idx,
+                        ));
                     }
                     line_idx += lines;
                     line_idx += 1; // trailing blank
@@ -333,15 +329,11 @@ pub fn render(f: &mut Frame, app: &mut App) {
                     };
                     let block_top = line_idx;
                     let block_bot = line_idx + lines; // exclusive
-                    if lines > 0
-                        && block_top < end
-                        && block_bot > start
-                        && t.name != "plan"
-                    {
-                        let screen_top = content_area.y
-                            + block_top.saturating_sub(start).min(inner_h) as u16;
-                        let screen_bot = content_area.y
-                            + (block_bot.min(end) - start).min(inner_h) as u16;
+                    if lines > 0 && block_top < end && block_bot > start && t.name != "plan" {
+                        let screen_top =
+                            content_area.y + block_top.saturating_sub(start).min(inner_h) as u16;
+                        let screen_bot =
+                            content_area.y + (block_bot.min(end) - start).min(inner_h) as u16;
                         app.tool_toggle_rows.push((
                             screen_top,
                             screen_bot.saturating_sub(1),
@@ -360,10 +352,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
         // Render remaining content after last item.
         if cursor < raw.len() {
             let seg_text = crate::session::render::strip_legacy_markers(&raw[cursor..]);
-            let seg_lines = crate::session::render::count_md_segment(
-                &seg_text,
-                width_u16 as usize,
-            );
+            let seg_lines = crate::session::render::count_md_segment(&seg_text, width_u16 as usize);
             line_idx += seg_lines as usize;
             // Remaining content lines are non-blank; not tracked since
             // the message loop ends after this.
@@ -509,7 +498,11 @@ fn render_cwd(area: Rect, buf: &mut Buffer, app: &App) {
     // Compute the right-aligned stats line and its display width.
     let stats_line = app.status.render_stats_line();
     let stats_width = stats_line.width();
-    let stats_pad = if stats_width > 0 && avail > stats_width { 1 } else { 0 };
+    let stats_pad = if stats_width > 0 && avail > stats_width {
+        1
+    } else {
+        0
+    };
 
     // Split area: left for cwd, right for stats.
     let left_w = avail.saturating_sub(stats_width + stats_pad);
@@ -539,10 +532,16 @@ fn render_cwd(area: Rect, buf: &mut Buffer, app: &App) {
         };
         let hint = match app.cancel_state {
             CancelState::Idle => {
-                format!("{} esc to interrupt [{timer}]", crate::input::spinner_prompt().trim())
+                format!(
+                    "{} esc to interrupt [{timer}]",
+                    crate::input::spinner_prompt().trim()
+                )
             }
             CancelState::Confirming(_) => {
-                format!("{} esc again [{timer}]", crate::input::spinner_prompt().trim())
+                format!(
+                    "{} esc again [{timer}]",
+                    crate::input::spinner_prompt().trim()
+                )
             }
         };
         let hint_w = UnicodeWidthStr::width(hint.as_str());
@@ -632,7 +631,12 @@ pub(crate) fn screen_y_to_doc_line(y: u16, area: &Rect, scroll: u32, total: u32)
 }
 
 /// Convert a global document line index to a screen Y, if visible.
-pub(crate) fn doc_line_to_screen_y(line: usize, area: &Rect, scroll: u32, total: u32) -> Option<u16> {
+pub(crate) fn doc_line_to_screen_y(
+    line: usize,
+    area: &Rect,
+    scroll: u32,
+    total: u32,
+) -> Option<u16> {
     let inner_h = area.height as u32;
     let max_scroll = total.saturating_sub(inner_h);
     let offset_from_top = max_scroll.saturating_sub(scroll);
@@ -688,11 +692,7 @@ fn apply_selection_style(buf: &mut Buffer, sel: &Selection, area: &Rect, scroll:
 /// return them as plain text. Trailing whitespace on each row is trimmed
 /// and empty trailing rows are dropped, so a single-row selection across a
 /// padded cell line does not produce a wall of spaces.
-pub fn extract_selection_text(
-    sel: &Selection,
-    session: &Session,
-    width: usize,
-) -> String {
+pub fn extract_selection_text(sel: &Selection, session: &Session, width: usize) -> String {
     let y_start = sel.doc_start.min(sel.doc_end);
     let y_end = sel.doc_start.max(sel.doc_end);
     let (col_lo, col_hi) = if sel.doc_start <= sel.doc_end {
@@ -725,16 +725,16 @@ pub fn extract_selection_text(
             y_end + 1
         };
         let local_start = y_start.saturating_sub(msg_start);
-        let local_end = y_end.min(msg_end.saturating_sub(1)).saturating_sub(msg_start);
+        let local_end = y_end
+            .min(msg_end.saturating_sub(1))
+            .saturating_sub(msg_start);
 
         let rendered = crate::session::render::build_message_lines(session, msg_idx, width);
         for (i, line) in rendered.iter().enumerate() {
             if i < local_start || i > local_end {
                 continue;
             }
-            let full: String = line.spans.iter()
-                .map(|s| s.content.as_ref())
-                .collect();
+            let full: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
             // Determine column slice for this row.
             let (cs, ce) = if y_start == y_end {
                 (col_lo, col_hi)
@@ -856,10 +856,13 @@ fn is_cjk_punctuation(c: char) -> bool {
     matches!(c, '\u{3000}'..='\u{303F}' | '\u{FF00}'..='\u{FFEF}')
 }
 
-
 /// Render the agents.md splash area at the top of a new session.
 /// Left side: logo, right side: checkboxes for discovered agents.md files.
-pub fn render_agents_area(area: ratatui::layout::Rect, buf: &mut ratatui::buffer::Buffer, app: &mut crate::app::App) {
+pub fn render_agents_area(
+    area: ratatui::layout::Rect,
+    buf: &mut ratatui::buffer::Buffer,
+    app: &mut crate::app::App,
+) {
     use crate::theme::Theme;
     use ratatui::text::{Line, Span};
     use ratatui::widgets::Paragraph;
@@ -881,7 +884,12 @@ pub fn render_agents_area(area: ratatui::layout::Rect, buf: &mut ratatui::buffer
         let logo_line = Line::from(Span::styled(*line, Theme::bold()));
         let p = Paragraph::new(logo_line);
         p.render(
-            ratatui::layout::Rect { x: area.x + 1, y, width: logo_width, height: 1 },
+            ratatui::layout::Rect {
+                x: area.x + 1,
+                y,
+                width: logo_width,
+                height: 1,
+            },
             buf,
         );
     }
@@ -894,7 +902,12 @@ pub fn render_agents_area(area: ratatui::layout::Rect, buf: &mut ratatui::buffer
     ));
     let p_sep = Paragraph::new(sep_line);
     p_sep.render(
-        ratatui::layout::Rect { x: area.x, y: sep_y, width: area.width.saturating_sub(1), height: 1 },
+        ratatui::layout::Rect {
+            x: area.x,
+            y: sep_y,
+            width: area.width.saturating_sub(1),
+            height: 1,
+        },
         buf,
     );
 
@@ -904,7 +917,12 @@ pub fn render_agents_area(area: ratatui::layout::Rect, buf: &mut ratatui::buffer
         let hint = Line::from(Span::styled("No agents.md found", Theme::dim()));
         let p = Paragraph::new(hint);
         p.render(
-            ratatui::layout::Rect { x: right_x, y: area.y + 1, width: right_w, height: 1 },
+            ratatui::layout::Rect {
+                x: right_x,
+                y: area.y + 1,
+                width: right_w,
+                height: 1,
+            },
             buf,
         );
         return;
@@ -916,14 +934,22 @@ pub fn render_agents_area(area: ratatui::layout::Rect, buf: &mut ratatui::buffer
             break;
         }
         let marker = if enabled { "[x]" } else { "[ ]" };
-        let cursor = if app.agents_cursor == i && app.focus_target == crate::function::FocusTarget::AgentsCheckbox {
+        let cursor = if app.agents_cursor == i
+            && app.focus_target == crate::function::FocusTarget::AgentsCheckbox
+        {
             "> "
         } else {
             "  "
         };
-        let short = path.rsplit('/').next().or_else(|| path.rsplit('\\').next()).unwrap_or(path);
+        let short = path
+            .rsplit('/')
+            .next()
+            .or_else(|| path.rsplit('\\').next())
+            .unwrap_or(path);
         let label = format!("{cursor}{marker} {short}");
-        let style = if app.focus_target == crate::function::FocusTarget::AgentsCheckbox && app.agents_cursor == i {
+        let style = if app.focus_target == crate::function::FocusTarget::AgentsCheckbox
+            && app.agents_cursor == i
+        {
             Theme::bold()
         } else {
             Theme::dim()
@@ -931,10 +957,13 @@ pub fn render_agents_area(area: ratatui::layout::Rect, buf: &mut ratatui::buffer
         let line = Line::from(Span::styled(label, style));
         let p = Paragraph::new(line);
         p.render(
-            ratatui::layout::Rect { x: right_x, y, width: right_w, height: 1 },
+            ratatui::layout::Rect {
+                x: right_x,
+                y,
+                width: right_w,
+                height: 1,
+            },
             buf,
         );
     }
 }
-
-

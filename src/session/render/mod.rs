@@ -1,23 +1,26 @@
 mod blocks;
-mod utils;
 #[cfg(test)]
 mod tests;
+mod utils;
 
-pub use blocks::{ask_snapshot_line_count, attachment_block_line_count, get_thinking_segments, skill_block_line_count};
-pub use utils::{
-    clamp_char_boundary, content_line_count, content_line_count_segmented,
-    count_md_segment, strip_legacy_markers, thinking_block_line_count,
-    tool_block_line_count, total_thinking_line_count, visible_width,
+pub use blocks::{
+    ask_snapshot_line_count, attachment_block_line_count, get_thinking_segments,
+    skill_block_line_count,
 };
 use blocks::{
     build_attachment_block_rows, build_skill_block_rows, build_thinking_block_rows,
     build_tool_block_rows, ensure_gap_before_block, push_block_rows, render_ask_snapshot_message,
 };
 use utils::render_content_segment;
+pub use utils::{
+    clamp_char_boundary, content_line_count, content_line_count_segmented, count_md_segment,
+    strip_legacy_markers, thinking_block_line_count, tool_block_line_count,
+    total_thinking_line_count, visible_width,
+};
 
 #[cfg(test)]
 use blocks::{
-    build_output_block_rows, build_shell_command_rows, box_row_line, diff_box_row_line,
+    box_row_line, build_output_block_rows, build_shell_command_rows, diff_box_row_line,
     output_row_lines, DiffLine, DiffLineKind,
 };
 #[cfg(test)]
@@ -137,7 +140,10 @@ fn count_lines_estimate(session: &Session) -> u32 {
         }
         let tool_blocks = m.tool_results.len() as u32;
         n += tool_blocks * 2; // rough per-block estimate + 1 trailing blank
-        let first_offset = m.thinking_segments.iter().map(|s| s.offset)
+        let first_offset = m
+            .thinking_segments
+            .iter()
+            .map(|s| s.offset)
             .chain(m.tool_results.iter().map(|t| t.content_offset))
             .min();
         if first_offset.is_some_and(|off| off > 0) && (thinking_blocks > 0 || tool_blocks > 0) {
@@ -198,12 +204,7 @@ pub(crate) fn read_cached_content_count_at(m: &super::Message, width: u16) -> u3
         ask_snapshot_line_count(&m.content, width as usize)
     } else {
         let segments = get_thinking_segments(m);
-        content_line_count_segmented(
-            &m.content,
-            width as usize,
-            &segments,
-            &m.tool_results,
-        )
+        content_line_count_segmented(&m.content, width as usize, &segments, &m.tool_results)
     }
 }
 
@@ -249,7 +250,8 @@ pub fn build_message_lines(
     // one block instead of N. Also bypass the normal thinking /
     // tool-result pipeline.
     if m.content.trim_start().starts_with("---ask---") {
-        let rendered = render_ask_snapshot_message(&m.content, width, m.streaming, m.display_cursor);
+        let rendered =
+            render_ask_snapshot_message(&m.content, width, m.streaming, m.display_cursor);
         let content_line_count = ask_snapshot_line_count(&m.content, width);
         let lines = Arc::new(rendered);
         let mut lru = session.message_lines_cache.lock().unwrap();
@@ -459,7 +461,10 @@ pub fn build_message_lines(
 
         match item.kind {
             RenderItemKind::Thinking {
-                content, closed, duration, ..
+                content,
+                closed,
+                duration,
+                ..
             } => {
                 let visible = match session.display {
                     ThinkingDisplay::Show => m.thinking_visible,
@@ -544,7 +549,7 @@ pub fn build_message_lines(
             " ".repeat(width),
             Style::default().bg(user_bg),
         )));
-        }
+    }
 
     {
         let mut lru = session.message_lines_cache.lock().unwrap();
@@ -576,7 +581,12 @@ pub(crate) fn count_block_gaps(
     let mut offsets: Vec<usize> = thinking_segments
         .iter()
         .map(|s| s.offset)
-        .chain(tool_results.iter().filter(|t| has_renderable_content(t)).map(|t| t.content_offset))
+        .chain(
+            tool_results
+                .iter()
+                .filter(|t| has_renderable_content(t))
+                .map(|t| t.content_offset),
+        )
         .collect();
     offsets.sort();
     let mut gaps: u32 = 0;
@@ -637,12 +647,11 @@ pub(super) fn build_lines_viewport(
 
     // Binary search: find the first message that intersects [start_line, end_line).
     // line_offsets[i] = start line of message i; line_offsets[N] = total lines.
-    let first_visible = match session.line_offsets[..session.messages.len()]
-        .binary_search(&start_line)
-    {
-        Ok(i) => i,
-        Err(i) => i.saturating_sub(1),
-    };
+    let first_visible =
+        match session.line_offsets[..session.messages.len()].binary_search(&start_line) {
+            Ok(i) => i,
+            Err(i) => i.saturating_sub(1),
+        };
 
     for msg_idx in first_visible..session.messages.len() {
         let msg_start = session.line_offsets[msg_idx];

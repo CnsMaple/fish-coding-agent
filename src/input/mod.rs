@@ -552,7 +552,7 @@ pub fn render(area: Rect, buf: &mut Buffer, app: &mut crate::app::App) {
         title.spans.insert(
             0,
             Span::styled(
-format!("[!{}] | ", app.pending_events),
+                format!("[!{}] | ", app.pending_events),
                 Theme::status_warn(),
             ),
         );
@@ -638,7 +638,12 @@ format!("[!{}] | ", app.pending_events),
         }
         // cursor visual line = vis_before_cursor + vi (where vi is the visual line within the segment)
         // We want the cursor to be at the bottom, so we need enough visual lines above
-        let cursor_vis = vis_before_cursor + seg_vis.get(cursor_line_idx).copied().unwrap_or(1).saturating_sub(1);
+        let cursor_vis = vis_before_cursor
+            + seg_vis
+                .get(cursor_line_idx)
+                .copied()
+                .unwrap_or(1)
+                .saturating_sub(1);
         let target_vis = cursor_vis.saturating_sub(visible_vis.saturating_sub(1));
         find_segment_at_visual(&seg_vis, target_vis)
     };
@@ -724,8 +729,7 @@ format!("[!{}] | ", app.pending_events),
                 if local_end < chunk_len {
                     spans.push(Span::raw(chunk[local_end..].to_string()));
                 }
-            } else if cursor >= chunk_abs_start && cursor <= chunk_abs_end
-            {
+            } else if cursor >= chunk_abs_start && cursor <= chunk_abs_end {
                 let local = cursor - chunk_abs_start;
                 if local > 0 {
                     spans.push(Span::raw(chunk[..local].to_string()));
@@ -882,11 +886,13 @@ pub fn completion_candidates_for(input: &str) -> Vec<String> {
         // so we keep the exact prefix filter rather than fuzzy.
         let rest = rest.trim().to_lowercase();
         return match cmd {
-            "think" | "thinking" => vec!["off", "minimal", "low", "medium", "high", "xhigh", "adaptive", "max"]
-                .into_iter()
-                .filter(|c| c.starts_with(&rest) || rest.is_empty())
-                .map(|s| format!("/think {s}"))
-                .collect(),
+            "think" | "thinking" => vec![
+                "off", "minimal", "low", "medium", "high", "xhigh", "adaptive", "max",
+            ]
+            .into_iter()
+            .filter(|c| c.starts_with(&rest) || rest.is_empty())
+            .map(|s| format!("/think {s}"))
+            .collect(),
             "plan" => vec!["exit"]
                 .into_iter()
                 .filter(|c| c.starts_with(&rest) || rest.is_empty())
@@ -1015,4 +1021,3 @@ pub fn sidebar_tab_name(t: &SidebarTab) -> &'static str {
         SidebarTab::Hotkey => "hotkey",
     }
 }
-

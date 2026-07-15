@@ -123,9 +123,11 @@ impl Provider for AnthropicProvider {
                         merge_tool_use_start(&mut tool_calls, &v);
                         // Emit initial ToolArgDelta so the tool block
                         // appears immediately in the UI.
-                        let idx = v.get("index").and_then(|v| v.as_u64()).unwrap_or(
-                            tool_calls.len().saturating_sub(1) as u64,
-                        ) as usize;
+                        let idx = v
+                            .get("index")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(tool_calls.len().saturating_sub(1) as u64)
+                            as usize;
                         if idx < tool_calls.len() {
                             let _ = tx.send(ChatEvent::ToolArgDelta {
                                 index: idx,
@@ -260,7 +262,9 @@ fn anthropic_message(m: &super::ChatMessage) -> serde_json::Value {
                     }
                     let b64 = common::image_to_base64(&att.asset_path);
                     if b64.is_empty() {
-                        content.push(serde_json::json!({"type": "text", "text": "[image load failed]"}));
+                        content.push(
+                            serde_json::json!({"type": "text", "text": "[image load failed]"}),
+                        );
                         continue;
                     }
                     content.push(serde_json::json!({

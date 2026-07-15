@@ -46,7 +46,7 @@ pub(super) fn open_paste_preview(app: &mut App) {
     };
 
     let Ok(mut cb) = arboard::Clipboard::new() else {
-app.notify(ToastLevel::Warn, "clipboard unavailable");
+        app.notify(ToastLevel::Warn, "clipboard unavailable");
         return;
     };
 
@@ -88,11 +88,12 @@ app.notify(ToastLevel::Warn, "clipboard unavailable");
     }
 
     if state.text.is_none() && state.image.is_none() {
-app.notify(ToastLevel::Warn, "clipboard is empty");
+        app.notify(ToastLevel::Warn, "clipboard is empty");
         return;
     }
 
-    app.function.push(crate::function::SidebarTab::PastePreview(Box::new(state)));
+    app.function
+        .push(crate::function::SidebarTab::PastePreview(Box::new(state)));
     app.show_panel();
     app.acknowledge_panel();
 }
@@ -146,13 +147,22 @@ pub(super) fn infer_image_type(bytes: &[u8]) -> &'static str {
         return "image/gif";
     }
     if bytes.len() >= 8
-        && bytes[0] == 0x89 && bytes[1] == 0x50 && bytes[2] == 0x4E && bytes[3] == 0x47
+        && bytes[0] == 0x89
+        && bytes[1] == 0x50
+        && bytes[2] == 0x4E
+        && bytes[3] == 0x47
     {
         return "image/png";
     }
     if bytes.len() >= 12
-        && bytes[0] == 0x52 && bytes[1] == 0x49 && bytes[2] == 0x46 && bytes[3] == 0x46
-        && bytes[8] == 0x57 && bytes[9] == 0x45 && bytes[10] == 0x42 && bytes[11] == 0x50
+        && bytes[0] == 0x52
+        && bytes[1] == 0x49
+        && bytes[2] == 0x46
+        && bytes[3] == 0x46
+        && bytes[8] == 0x57
+        && bytes[9] == 0x45
+        && bytes[10] == 0x42
+        && bytes[11] == 0x50
     {
         return "image/webp";
     }
@@ -188,7 +198,7 @@ pub(super) fn try_insert_image_from_path(text: &str, app: &mut App) -> bool {
     };
     if let Err(e) = std::fs::create_dir_all(&assets_dir) {
         use crate::function::notifications::ToastLevel;
-app.notify(ToastLevel::Warn, format!("image: create assets dir: {e}"));
+        app.notify(ToastLevel::Warn, format!("image: create assets dir: {e}"));
         return false;
     }
     let extension = media_type.split('/').nth(1).unwrap_or("png");
@@ -197,7 +207,7 @@ app.notify(ToastLevel::Warn, format!("image: create assets dir: {e}"));
     if !asset_path.exists() {
         if let Err(e) = std::fs::write(&asset_path, &bytes) {
             use crate::function::notifications::ToastLevel;
-app.notify(ToastLevel::Warn, format!("image: write {filename}: {e}"));
+            app.notify(ToastLevel::Warn, format!("image: write {filename}: {e}"));
             return false;
         }
     }
@@ -217,7 +227,10 @@ app.notify(ToastLevel::Warn, format!("image: write {filename}: {e}"));
     app.input.insert_str(&marker);
     app.sync_completion();
     use crate::function::notifications::ToastLevel;
-app.notify(ToastLevel::Ok, format!("image #{idx} attached ({media_type})"));
+    app.notify(
+        ToastLevel::Ok,
+        format!("image #{idx} attached ({media_type})"),
+    );
     true
 }
 
@@ -318,7 +331,10 @@ pub(super) fn try_remove_image_marker(app: &mut App) -> bool {
     let before = &buf[..cursor];
     if let Some(start) = before.rfind("[image #") {
         let candidate = &buf[start..cursor];
-        if let Some(rest) = candidate.strip_prefix("[image #").and_then(|s| s.strip_suffix(']')) {
+        if let Some(rest) = candidate
+            .strip_prefix("[image #")
+            .and_then(|s| s.strip_suffix(']'))
+        {
             if !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()) {
                 let idx: usize = rest.parse().unwrap_or(0);
                 if idx > 0 && idx <= app.image_blocks.len() {
@@ -498,8 +514,10 @@ pub(super) fn try_extract_image_path_from_input(
     app.image_blocks.push_back(attachment.clone());
     image_parts.push(crate::session::ContentPart::Image(attachment));
     let idx = app.image_blocks.len();
-    app.notify(crate::function::notifications::ToastLevel::Ok,
-        format!("image #{idx} loaded from path ({media_type})"));
+    app.notify(
+        crate::function::notifications::ToastLevel::Ok,
+        format!("image #{idx} loaded from path ({media_type})"),
+    );
     true
 }
 

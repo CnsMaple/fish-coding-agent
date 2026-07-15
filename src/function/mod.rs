@@ -523,7 +523,9 @@ impl App {
         self.session_title = crate::session::store::default_title(&self.cwd);
         self.image_blocks.clear();
         // Remove the todo tab when the session is cleared.
-        self.function.tabs.retain(|t| !matches!(t, SidebarTab::Todo(_)));
+        self.function
+            .tabs
+            .retain(|t| !matches!(t, SidebarTab::Todo(_)));
         if self.function.active >= self.function.tabs.len() {
             self.function.active = self.function.tabs.len().saturating_sub(1);
         }
@@ -605,13 +607,15 @@ impl App {
                     self.status.set_model(m);
                 }
                 if let Some(ref t) = stored.thinking {
-                    self.status.set_thinking(crate::config::ReasoningMode::parse(t));
+                    self.status
+                        .set_thinking(crate::config::ReasoningMode::parse(t));
                 }
                 if let Some(total) = stored.token_total {
                     self.status.update_token_usage(total);
                 }
                 if stored.context_window_known && stored.context_window_tokens > 0 {
-                    self.status.set_context_window_tokens(stored.context_window_tokens);
+                    self.status
+                        .set_context_window_tokens(stored.context_window_tokens);
                 }
                 if stored.max_output_tokens > 0 {
                     self.status.set_max_output_tokens(stored.max_output_tokens);
@@ -703,13 +707,15 @@ impl App {
                     self.status.set_model(m);
                 }
                 if let Some(ref t) = stored.thinking {
-                    self.status.set_thinking(crate::config::ReasoningMode::parse(t));
+                    self.status
+                        .set_thinking(crate::config::ReasoningMode::parse(t));
                 }
                 if let Some(total) = stored.token_total {
                     self.status.update_token_usage(total);
                 }
                 if stored.context_window_known && stored.context_window_tokens > 0 {
-                    self.status.set_context_window_tokens(stored.context_window_tokens);
+                    self.status
+                        .set_context_window_tokens(stored.context_window_tokens);
                 }
                 if stored.max_output_tokens > 0 {
                     self.status.set_max_output_tokens(stored.max_output_tokens);
@@ -879,14 +885,20 @@ impl App {
             }
             self.function.active = i;
         } else {
-            self.function.push(SidebarTab::Ask(AskState::new(question, options)));
+            self.function
+                .push(SidebarTab::Ask(AskState::new(question, options)));
         }
         self.show_panel();
         self.acknowledge_panel();
     }
 
     pub fn open_todo_tab(&mut self) {
-        if !self.function.tabs.iter().any(|t| matches!(t, SidebarTab::Todo(_))) {
+        if !self
+            .function
+            .tabs
+            .iter()
+            .any(|t| matches!(t, SidebarTab::Todo(_)))
+        {
             self.function.push(SidebarTab::Todo(TodoTabState::new()));
         }
         if !self.function_visible {
@@ -978,10 +990,20 @@ impl App {
         let ts = chrono::Utc::now().format("%Y%m%d-%H%M%S").to_string();
         let slug: String = title
             .chars()
-            .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' })
+            .map(|c| {
+                if c.is_ascii_alphanumeric() {
+                    c.to_ascii_lowercase()
+                } else {
+                    '-'
+                }
+            })
             .collect();
         let slug = slug.trim_matches('-');
-        let slug = if slug.is_empty() { "plan".to_string() } else { slug.to_string() };
+        let slug = if slug.is_empty() {
+            "plan".to_string()
+        } else {
+            slug.to_string()
+        };
         let filename = format!("{ts}-{slug}.md");
         let path = dir.join(filename);
         let body = format!(
@@ -999,10 +1021,7 @@ impl App {
                 Some(path)
             }
             Err(e) => {
-                self.notify(
-                    ToastLevel::Warn,
-                    format!("plan: could not write file: {e}"),
-                );
+                self.notify(ToastLevel::Warn, format!("plan: could not write file: {e}"));
                 None
             }
         }
@@ -1088,9 +1107,11 @@ impl App {
     /// when the panel actually disappears; if other tabs remain visible
     /// the focus stays where it is (the user can switch with Alt+L).
     pub fn maybe_hide_panel(&mut self) {
-        let has_non_trivial = self.function.tabs.iter().any(|t| {
-            !matches!(t, SidebarTab::Notifications)
-        });
+        let has_non_trivial = self
+            .function
+            .tabs
+            .iter()
+            .any(|t| !matches!(t, SidebarTab::Notifications));
         if !has_non_trivial {
             self.focus_target = FocusTarget::Input;
             self.function_panel_cursor = None;

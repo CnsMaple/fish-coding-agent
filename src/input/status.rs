@@ -269,7 +269,10 @@ impl StatusBar {
         if self.auto_compact {
             if self.compact_triggered {
                 spans.push(Span::raw(" | "));
-                spans.push(Span::styled("cmp:triggered".to_string(), Theme::status_warn()));
+                spans.push(Span::styled(
+                    "cmp:triggered".to_string(),
+                    Theme::status_warn(),
+                ));
             } else if let Some(pct) = self.compact_pct {
                 spans.push(Span::raw(" | cmp:"));
                 spans.push(Span::styled(

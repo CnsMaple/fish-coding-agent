@@ -186,7 +186,9 @@ fn resolve_command(command: &[String]) -> (String, Vec<String>) {
     #[cfg(windows)]
     {
         let first = &command[0];
-        let ext = std::path::Path::new(first).extension().and_then(|e| e.to_str());
+        let ext = std::path::Path::new(first)
+            .extension()
+            .and_then(|e| e.to_str());
         if ext.is_none() || matches!(ext, Some("cmd" | "bat")) {
             let full = command.join(" ");
             ("cmd.exe".to_string(), vec!["/c".to_string(), full])
@@ -254,11 +256,10 @@ pub async fn connect_local(
         }
     }
 
-    let (transport, _stderr) =
-        rmcp::transport::child_process::TokioChildProcess::builder(cmd)
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .map_err(|e| ClientError::Spawn(format!("spawn {program_label}: {e}")))?;
+    let (transport, _stderr) = rmcp::transport::child_process::TokioChildProcess::builder(cmd)
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| ClientError::Spawn(format!("spawn {program_label}: {e}")))?;
     let pid = transport.id();
 
     let running = tokio::time::timeout(timeout, ().serve(transport))
@@ -355,9 +356,9 @@ pub async fn connect(
             oauth,
             ..
         } => {
-            let auth_token = auth_store.get(name).and_then(|e| {
-                e.tokens.map(|t| t.access_token)
-            });
+            let auth_token = auth_store
+                .get(name)
+                .and_then(|e| e.tokens.map(|t| t.access_token));
             connect_remote(name, url, headers, oauth, timeout, auth_token).await
         }
     }

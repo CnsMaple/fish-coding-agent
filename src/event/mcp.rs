@@ -1,7 +1,7 @@
+use super::AppMsg;
 use crate::app::App;
 use crate::function::CancelState;
 use anyhow::Result;
-use super::AppMsg;
 /// Run the full OAuth authorization flow for a remote MCP server:
 ///
 /// 1. Start a local TCP callback server
@@ -32,9 +32,9 @@ pub(super) async fn run_mcp_oauth(
         .ok_or_else(|| format!("server `{server_name}` not configured"))?;
     let (server_url, oauth_cfg) = match cfg {
         crate::mcp::McpServerConfig::Remote { url, oauth, .. } => {
-            let oauth = oauth.as_ref().ok_or_else(|| {
-                format!("server `{server_name}` has no OAuth config")
-            })?;
+            let oauth = oauth
+                .as_ref()
+                .ok_or_else(|| format!("server `{server_name}` has no OAuth config"))?;
             (url.clone(), oauth)
         }
         _ => return Err(format!("server `{server_name}` is not a remote server")),
@@ -75,14 +75,17 @@ pub(super) async fn run_mcp_oauth(
     // unreserved chars.
     let code_verifier: String = code_verifier.chars().filter(|c| *c != '-').collect();
     let code_challenge_hash = sha2::Sha256::digest(code_verifier.as_bytes());
-    let code_challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(code_challenge_hash);
+    let code_challenge =
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(code_challenge_hash);
 
     // 4. Build the redirect URI.
     let port = crate::mcp::oauth_callback::DEFAULT_OAUTH_CALLBACK_PORT;
-    let redirect_uri = oauth_cfg
-        .redirect_uri
-        .clone()
-        .unwrap_or_else(|| format!("http://127.0.0.1:{port}{}", crate::mcp::oauth_callback::OAUTH_CALLBACK_PATH));
+    let redirect_uri = oauth_cfg.redirect_uri.clone().unwrap_or_else(|| {
+        format!(
+            "http://127.0.0.1:{port}{}",
+            crate::mcp::oauth_callback::OAUTH_CALLBACK_PATH
+        )
+    });
 
     // 5. Determine client_id: use configured value or try dynamic
     //    client registration.
@@ -91,9 +94,7 @@ pub(super) async fn run_mcp_oauth(
     } else {
         // TODO: dynamic client registration (POST to registration endpoint)
         // For now, require configured client_id.
-        return Err(
-            "no client_id configured; add `oauth.client_id` to your config".into(),
-        );
+        return Err("no client_id configured; add `oauth.client_id` to your config".into());
     };
 
     // 6. Generate a random state token for CSRF protection.

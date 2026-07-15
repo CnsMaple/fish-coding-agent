@@ -173,16 +173,17 @@ mod content_line_count_tests {
         );
         // Thinking segment at an offset that splits the table
         // (inside the header area, after "text\n\n| A | B |").
-        asst.thinking_segments.push(crate::session::ThinkingSegment {
-            offset: "text\n\n| A | B |".len(),
-            content: "thinking content".to_string(),
-            closed: false,
-            tool_results_len_at_open: 0,
-            cached_line_count_expanded: None,
-            cached_line_count_collapsed: None,
-            started_at: None,
-            ended_at: None,
-        });
+        asst.thinking_segments
+            .push(crate::session::ThinkingSegment {
+                offset: "text\n\n| A | B |".len(),
+                content: "thinking content".to_string(),
+                closed: false,
+                tool_results_len_at_open: 0,
+                cached_line_count_expanded: None,
+                cached_line_count_collapsed: None,
+                started_at: None,
+                ended_at: None,
+            });
         asst.thinking_visible = true;
         s.push(asst);
 
@@ -283,9 +284,11 @@ mod tool_block_count_tests {
             content_offset: 0,
             visible: true,
             running: false,
-            failed: false,            call_id: String::new(),
+            failed: false,
+            call_id: String::new(),
             pruned: false,
-            streaming_input: String::new(), cached_line_count_visible: None,
+            streaming_input: String::new(),
+            cached_line_count_visible: None,
             cached_line_count_collapsed: None,
         }
     }
@@ -349,7 +352,8 @@ mod tool_block_count_tests {
         let asst_lines = lines_for_msg(&s, 1, width as usize).len() as u32;
         let expected = user_lines + asst_lines + s.messages.len() as u32;
         assert_eq!(
-            total, expected,
+            total,
+            expected,
             "total={total} but user={user_lines} + asst={asst_lines} + gaps({}) = {expected}",
             s.messages.len()
         );
@@ -617,9 +621,7 @@ mod tool_block_count_tests {
         let width = 80;
         let rendered = build_message_lines(&s, 1, width);
         let text = lines_to_text(&rendered);
-        let tool_idx = text
-            .find("Edit [")
-            .expect("tool block missing");
+        let tool_idx = text.find("Edit [").expect("tool block missing");
         let think_idx = text.find("Thinking").expect("Thinking block missing");
         assert!(
             tool_idx < think_idx,
@@ -648,8 +650,8 @@ mod tool_block_count_tests {
                 tool_results_len_at_open: 0,
                 cached_line_count_expanded: None,
                 cached_line_count_collapsed: None,
-            started_at: None,
-            ended_at: None,
+                started_at: None,
+                ended_at: None,
             });
         s.messages[1] = asst;
         assert_eq!(s.messages[1].thinking_segments.len(), 1);
@@ -691,9 +693,11 @@ mod tool_block_count_tests {
                 content_offset: 0,
                 visible: true,
                 running: false,
-            failed: false,            call_id: String::new(),
+                failed: false,
+                call_id: String::new(),
                 pruned: false,
-                streaming_input: String::new(), cached_line_count_visible: None,
+                streaming_input: String::new(),
+                cached_line_count_visible: None,
                 cached_line_count_collapsed: None,
             });
 
@@ -707,8 +711,14 @@ mod tool_block_count_tests {
         );
         assert!(s.messages[1].thinking_segments[0].closed);
         assert!(!s.messages[1].thinking_segments[1].closed);
-        assert_eq!(s.messages[1].thinking_segments[0].content, "Let me run the tool first.");
-        assert_eq!(s.messages[1].thinking_segments[1].content, "Good, that worked.");
+        assert_eq!(
+            s.messages[1].thinking_segments[0].content,
+            "Let me run the tool first."
+        );
+        assert_eq!(
+            s.messages[1].thinking_segments[1].content,
+            "Good, that worked."
+        );
     }
 
     /// End-to-end: a tool call that lands between two reasoning
@@ -743,9 +753,11 @@ mod tool_block_count_tests {
                 content_offset: 0,
                 visible: true,
                 running: false,
-            failed: false,            call_id: String::new(),
+                failed: false,
+                call_id: String::new(),
                 pruned: false,
-                streaming_input: String::new(), cached_line_count_visible: None,
+                streaming_input: String::new(),
+                cached_line_count_visible: None,
                 cached_line_count_collapsed: None,
             });
 
@@ -817,8 +829,7 @@ mod skill_block_count_tests {
         );
         msg.skill_ref = Some(SkillRef {
             name: "commit-and-push-all".to_string(),
-            context_path: "C:/Users/me/.agents/skills/commit-and-push-all/SKILL.md"
-                .to_string(),
+            context_path: "C:/Users/me/.agents/skills/commit-and-push-all/SKILL.md".to_string(),
             args: args.map(|s| s.to_string()),
         });
         msg
@@ -836,7 +847,8 @@ mod skill_block_count_tests {
         let asst_lines = build_message_lines(&s, 1, width).len();
         let expected = user_lines + asst_lines + s.messages.len();
         assert_eq!(
-            total, expected,
+            total,
+            expected,
             "compute_total_lines returned {total} but actual rendered lines = \
              user({user_lines}) + asst({asst_lines}) + gaps({}) = {expected}",
             s.messages.len()
@@ -915,7 +927,8 @@ mod skill_block_count_tests {
         // lines_before(1) = user message lines + gap after user message.
         let user_lines = build_message_lines(&s, 0, 120).len() as u32;
         assert_eq!(
-            n, user_lines + 1,
+            n,
+            user_lines + 1,
             "lines_before(1) = {n} but user message ({user_lines} lines) + 1 gap = {}",
             user_lines + 1
         );
@@ -934,14 +947,20 @@ mod skill_block_count_tests {
         s.push(Message::new(Role::User, "first question"));
         // Message 1: assistant with lots of content (many lines)
         let mut asst1 = Message::new(Role::Assistant, "");
-        asst1.content = (0..50).map(|i| format!("Line {i}")).collect::<Vec<_>>().join("\n");
+        asst1.content = (0..50)
+            .map(|i| format!("Line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         asst1.display_cursor = usize::MAX;
         s.push(asst1);
         // Message 2: user
         s.push(Message::new(Role::User, "second question"));
         // Message 3: assistant with more content
         let mut asst2 = Message::new(Role::Assistant, "");
-        asst2.content = (0..50).map(|i| format!("More {i}")).collect::<Vec<_>>().join("\n");
+        asst2.content = (0..50)
+            .map(|i| format!("More {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         asst2.display_cursor = usize::MAX;
         s.push(asst2);
 
@@ -957,7 +976,8 @@ mod skill_block_count_tests {
         // pending_scroll_top should be set with the correct lines_before.
         let msg_start = s.line_offsets.get(2).copied().unwrap_or(0);
         assert_eq!(
-            s.pending_scroll_top, Some(msg_start),
+            s.pending_scroll_top,
+            Some(msg_start),
             "pending_scroll_top should be line_offsets[2] = {msg_start}, got {:?}",
             s.pending_scroll_top
         );
@@ -965,7 +985,9 @@ mod skill_block_count_tests {
         // Simulate render-time computation with the real inner_h.
         let real_inner_h = 20u32; // taller viewport (panel hidden)
         let lines_before = s.pending_scroll_top.take().unwrap();
-        let scroll = total.saturating_sub(real_inner_h).saturating_sub(lines_before);
+        let scroll = total
+            .saturating_sub(real_inner_h)
+            .saturating_sub(lines_before);
         let actual_start = total.saturating_sub(real_inner_h).saturating_sub(scroll);
         assert_eq!(
             actual_start, msg_start,
@@ -976,7 +998,8 @@ mod skill_block_count_tests {
         s.jump_to_message(3, None, viewport_h, width);
         let msg_start = s.line_offsets.get(3).copied().unwrap_or(0);
         assert_eq!(
-            s.pending_scroll_top, Some(msg_start),
+            s.pending_scroll_top,
+            Some(msg_start),
             "pending_scroll_top should be line_offsets[3] = {msg_start}, got {:?}",
             s.pending_scroll_top
         );
@@ -989,7 +1012,10 @@ mod skill_block_count_tests {
         use crate::session::ToolResultBlock;
         let mut s = Session::default();
         s.push(Message::new(Role::User, "go"));
-        let mut asst = Message::new(Role::Assistant, "Here is some text.\nMore text.\nEven more.");
+        let mut asst = Message::new(
+            Role::Assistant,
+            "Here is some text.\nMore text.\nEven more.",
+        );
         asst.display_cursor = usize::MAX;
         asst.tool_results.push(ToolResultBlock {
             name: "shell_command".into(),
@@ -1017,7 +1043,10 @@ mod skill_block_count_tests {
 
         let msg_start = s.line_offsets.get(1).copied().unwrap_or(0);
         // pending_scroll_top should be set.
-        assert!(s.pending_scroll_top.is_some(), "pending_scroll_top should be set for tool jump");
+        assert!(
+            s.pending_scroll_top.is_some(),
+            "pending_scroll_top should be set for tool jump"
+        );
         let lines_before = s.pending_scroll_top.take().unwrap();
         // The tool offset within the message should be > 0 (there's
         // content before it), so lines_before > msg_start.
@@ -1095,7 +1124,12 @@ mod tests {
         s.update_tool_input_delta(1, "callB", "webfetch", r#"{"url":"xy"}"#);
 
         let m = &s.messages[1];
-        assert_eq!(m.tool_results.len(), 2, "expected exactly 2 blocks, got {}", m.tool_results.len());
+        assert_eq!(
+            m.tool_results.len(),
+            2,
+            "expected exactly 2 blocks, got {}",
+            m.tool_results.len()
+        );
         assert_eq!(m.tool_results[0].call_id, "callA");
         assert_eq!(m.tool_results[1].call_id, "callB");
         assert_eq!(m.tool_results[0].streaming_input, r#"{"query":"ab"}"#);
@@ -1103,12 +1137,20 @@ mod tests {
 
         // Final results must route to the matching block by call_id.
         s.update_last_tool_content(
-            "websearch".into(), "search".into(), "result A".into(),
-            "callA".into(), String::new(), false,
+            "websearch".into(),
+            "search".into(),
+            "result A".into(),
+            "callA".into(),
+            String::new(),
+            false,
         );
         s.update_last_tool_content(
-            "webfetch".into(), "fetch".into(), "result B".into(),
-            "callB".into(), String::new(), false,
+            "webfetch".into(),
+            "fetch".into(),
+            "result B".into(),
+            "callB".into(),
+            String::new(),
+            false,
         );
         let m = &s.messages[1];
         assert_eq!(m.tool_results[0].content, "result A");
@@ -1193,7 +1235,10 @@ mod tests {
         let text = lines_to_text(&lines);
         assert!(text.contains("real result"), "real block dropped:\n{text}");
         // The stray empty block should not produce a titled box header.
-        assert!(!text.contains("webfetch"), "empty placeholder leaked:\n{text}");
+        assert!(
+            !text.contains("webfetch"),
+            "empty placeholder leaked:\n{text}"
+        );
     }
 
     #[test]
@@ -1265,7 +1310,10 @@ mod tests {
             cached_line_count_collapsed: None,
         };
         let rows = build_tool_block_rows(&tool, true, 10, 100);
-        assert!(rows.is_empty(), "ask tool block must be empty, got {rows:?}");
+        assert!(
+            rows.is_empty(),
+            "ask tool block must be empty, got {rows:?}"
+        );
     }
 
     /// The snapshot message (pushed by `flush_ask_snapshot`) must
@@ -1282,8 +1330,7 @@ mod tests {
             "q2: 你偏好什么语言?\n",
             "   - 中文\n",
         );
-        let lines =
-            render_ask_snapshot_message(body, 60, false, 0);
+        let lines = render_ask_snapshot_message(body, 60, false, 0);
         let text = lines_to_text(&lines);
         assert!(text.contains("Ask"), "missing header:\n{text}");
         assert!(text.contains("q1:"), "missing q1:\n{text}");
@@ -1309,9 +1356,11 @@ mod tests {
             content_offset: 0,
             visible: true,
             running: false,
-            failed: false,            call_id: String::new(),
+            failed: false,
+            call_id: String::new(),
             pruned: false,
-            streaming_input: String::new(), cached_line_count_visible: None,
+            streaming_input: String::new(),
+            cached_line_count_visible: None,
             cached_line_count_collapsed: None,
         };
         let rows = build_tool_block_rows(&tool, true, 10, 100);
@@ -1319,7 +1368,10 @@ mod tests {
         assert!(text.contains("hello"), "body missing:\n{text}");
         assert!(text.contains("body"), "body missing:\n{text}");
         assert!(!text.contains("{\"ok\":"), "json envelope leaked:\n{text}");
-        assert!(!text.contains("\"kind\":\"plan\""), "raw inner JSON leaked:\n{text}");
+        assert!(
+            !text.contains("\"kind\":\"plan\""),
+            "raw inner JSON leaked:\n{text}"
+        );
     }
 
     #[test]
@@ -1339,9 +1391,11 @@ mod tests {
             content_offset: 0,
             visible: true,
             running: false,
-            failed: false,            call_id: String::new(),
+            failed: false,
+            call_id: String::new(),
             pruned: false,
-            streaming_input: String::new(), cached_line_count_visible: None,
+            streaming_input: String::new(),
+            cached_line_count_visible: None,
             cached_line_count_collapsed: None,
         };
         let rows = build_tool_block_rows(&tool, true, 10, 80);
@@ -1475,7 +1529,7 @@ mod tests {
                 thinking_segments: Vec::new(),
                 thinking_visible: false,
                 tool_results: Vec::new(),
-tool_calls: Vec::new(),
+                tool_calls: Vec::new(),
                 attachments: Vec::new(),
                 display_cursor: usize::MAX,
                 ts: chrono::Utc::now(),
@@ -1633,9 +1687,11 @@ tool_calls: Vec::new(),
             content_offset: 0,
             visible: true,
             running: false,
-            failed: false,            call_id: String::new(),
+            failed: false,
+            call_id: String::new(),
             pruned: false,
-            streaming_input: String::new(), cached_line_count_visible: None,
+            streaming_input: String::new(),
+            cached_line_count_visible: None,
             cached_line_count_collapsed: None,
         });
         s.push(asst);
@@ -1903,11 +1959,7 @@ mod code_block_content_width_tests {
         let mut code_line_widths = Vec::new();
         let mut in_code = false;
         for line in rendered.iter() {
-            let joined: String = line
-                .spans
-                .iter()
-                .map(|s| s.content.as_ref())
-                .collect();
+            let joined: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
             if joined.contains('+') && joined.contains('-') && joined.contains("code") {
                 in_code = true;
                 continue;
@@ -1999,24 +2051,16 @@ Some text.
         let width = 80;
         let bg = Color::Reset;
         let rows = build_output_block_rows(
-            " Skill ",
-            content,
-            "",
-            true,   // visible
-            10,     // preview_lines
-            width,
-            bg,
+            " Skill ", content, "", true, // visible
+            10,   // preview_lines
+            width, bg,
         );
 
         assert!(!rows.is_empty(), "no output rows");
 
         let first_w = rows[0].width();
         for (i, row) in rows.iter().enumerate() {
-            let joined: String = row
-                .spans
-                .iter()
-                .map(|s| s.content.as_ref())
-                .collect();
+            let joined: String = row.spans.iter().map(|s| s.content.as_ref()).collect();
             let line_w = row.width();
             assert_eq!(
                 line_w, first_w,
@@ -2053,11 +2097,15 @@ mod border_fix_tests {
             for (i, row) in rows.iter().enumerate() {
                 let line_w = row.width();
                 assert_eq!(
-                    line_w, first_w,
+                    line_w,
+                    first_w,
                     "width {width}: row {i} has width {line_w} != {first_w}\n  spans: {:?}",
                     row.spans
                         .iter()
-                        .map(|s| (s.content.as_ref(), UnicodeWidthStr::width(s.content.as_ref())))
+                        .map(|s| (
+                            s.content.as_ref(),
+                            UnicodeWidthStr::width(s.content.as_ref())
+                        ))
                         .collect::<Vec<_>>()
                 );
             }
@@ -2078,11 +2126,15 @@ mod border_fix_tests {
             let line = diff_box_row_line(&diff, width, Color::Reset, "rust");
             let line_w = line.width();
             assert_eq!(
-                line_w, width,
+                line_w,
+                width,
                 "diff row width {line_w} != {width}\n  spans: {:?}",
                 line.spans
                     .iter()
-                    .map(|s| (s.content.as_ref(), UnicodeWidthStr::width(s.content.as_ref())))
+                    .map(|s| (
+                        s.content.as_ref(),
+                        UnicodeWidthStr::width(s.content.as_ref())
+                    ))
                     .collect::<Vec<_>>()
             );
         }
@@ -2134,13 +2186,16 @@ mod border_fix_tests {
         for width in [30usize, 50, 80] {
             let rows = build_thinking_block_rows(
                 &long_text,
-                true,  // visible
+                true, // visible
                 10,
                 width,
                 Color::Reset,
                 None,
             );
-            assert!(rows.len() > 2, "expected more than 2 rows for width {width}");
+            assert!(
+                rows.len() > 2,
+                "expected more than 2 rows for width {width}"
+            );
 
             // All body rows (excluding top/bottom borders) must have width == width
             for (i, row) in rows.iter().enumerate() {
@@ -2155,7 +2210,8 @@ mod border_fix_tests {
             }
 
             // Check that we can see the end of the text (not truncated)
-            let last_body = rows[rows.len() - 2].spans
+            let last_body = rows[rows.len() - 2]
+                .spans
                 .iter()
                 .map(|s| s.content.as_ref())
                 .collect::<String>();
@@ -2175,7 +2231,7 @@ mod border_fix_tests {
 
         for width in [80usize, 100, 120, 140, 150, 160] {
             let max_cmd_width = width.saturating_sub(6);
-        let cmd_lines = wrap_line(cmd, max_cmd_width);
+            let cmd_lines = wrap_line(cmd, max_cmd_width);
             for (i, line) in cmd_lines.iter().enumerate() {
                 let line_w = visible_width(line);
                 let spans = crate::session::markdown::highlight_line(line, "sh");
@@ -2212,9 +2268,9 @@ mod border_fix_tests {
     /// check the `|` is at the rightmost column for every body row.
     #[test]
     fn full_session_skill_tool_block_right_border() {
+        use crate::session::{Message, Role, Session, ToolResultBlock};
         use ratatui::buffer::Buffer;
         use ratatui::layout::Rect;
-        use crate::session::{Message, Role, Session, ToolResultBlock};
 
         let skill_body = "\
 6. Just execute this prompt and Copilot will handle the commit for you in the terminal.
@@ -2255,9 +2311,11 @@ mod border_fix_tests {
                 content_offset: 0,
                 visible: true,
                 running: false,
-            failed: false,                call_id: String::new(),
+                failed: false,
+                call_id: String::new(),
                 pruned: false,
-                streaming_input: String::new(), cached_line_count_visible: None,
+                streaming_input: String::new(),
+                cached_line_count_visible: None,
                 cached_line_count_collapsed: None,
             });
             session.push(msg);

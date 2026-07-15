@@ -110,7 +110,10 @@ impl McpAuthStore {
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::PermissionsExt;
-                    let _ = std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(FILE_MODE));
+                    let _ = std::fs::set_permissions(
+                        &self.path,
+                        std::fs::Permissions::from_mode(FILE_MODE),
+                    );
                 }
             }
         }
@@ -139,7 +142,9 @@ impl McpAuthStore {
 }
 
 fn default_path() -> Option<PathBuf> {
-    crate::config::paths::config_dir().ok().map(|p| p.join(FILE_NAME))
+    crate::config::paths::config_dir()
+        .ok()
+        .map(|p| p.join(FILE_NAME))
 }
 
 #[cfg(test)]

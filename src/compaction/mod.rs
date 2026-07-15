@@ -333,11 +333,7 @@ pub fn build_prompt(previous_summary: Option<&str>, context: &[String]) -> Strin
 /// `messages` are the serialized model messages (the same ones that
 /// will be sent to the API). Returns `false` when context window is
 /// unknown or auto-compaction is disabled.
-pub fn compact_if_needed(
-    messages: &[String],
-    system_prompt: &str,
-    inp: CompactionInputs,
-) -> bool {
+pub fn compact_if_needed(messages: &[String], system_prompt: &str, inp: CompactionInputs) -> bool {
     if !inp.auto_enabled || inp.ctx_window == 0 {
         return false;
     }
@@ -405,12 +401,7 @@ pub fn plan_cutoff_force(messages: &[Message]) -> Option<(usize, usize)> {
 /// Returns `min(start, end)` (i.e. `end`) when even a single message
 /// exceeds the limit — the caller should treat that as "skip
 /// compaction".
-pub fn trim_to_size(
-    messages: &[Message],
-    start: usize,
-    end: usize,
-    max_chars: usize,
-) -> usize {
+pub fn trim_to_size(messages: &[Message], start: usize, end: usize, max_chars: usize) -> usize {
     let overhead = SUMMARY_PROMPT.len() + 50;
     let max_content = max_chars.saturating_sub(overhead);
     let mut total = 0usize;
@@ -422,7 +413,11 @@ pub fn trim_to_size(
             crate::session::Role::Assistant => 9,
             crate::session::Role::System => 6,
         };
-        let body = if m.content.is_empty() { "<empty>" } else { &m.content };
+        let body = if m.content.is_empty() {
+            "<empty>"
+        } else {
+            &m.content
+        };
         let msg_len = role_len + body.len() + 10;
         total += msg_len;
         if total > max_content {
@@ -492,9 +487,11 @@ mod tests {
             content_offset: 0,
             visible: true,
             running: false,
-            failed: false,            call_id: String::new(),
+            failed: false,
+            call_id: String::new(),
             pruned: false,
-            streaming_input: String::new(), cached_line_count_visible: None,
+            streaming_input: String::new(),
+            cached_line_count_visible: None,
             cached_line_count_collapsed: None,
         }
     }
@@ -532,7 +529,10 @@ mod tests {
             !msgs[0].tool_results[0].pruned,
             "skill output must never be pruned"
         );
-        assert!(msgs[0].tool_results[1].pruned, "read output should be pruned");
+        assert!(
+            msgs[0].tool_results[1].pruned,
+            "read output should be pruned"
+        );
     }
 
     #[test]
@@ -741,12 +741,7 @@ mod tests {
     #[test]
     fn select_splits_on_budget() {
         // 4 messages: ~3+4+3+4 = 14 tokens, budget of 5 keeps the last
-        let msgs = vec![
-            user("a"),
-            assistant("bb"),
-            user("c"),
-            assistant("dd"),
-        ];
+        let msgs = vec![user("a"), assistant("bb"), user("c"), assistant("dd")];
         let result = select(&msgs, 5);
         assert!(result.is_some());
         let (head, recent) = result.unwrap();
@@ -766,10 +761,7 @@ mod tests {
 
     #[test]
     fn build_prompt_updates_previous_summary() {
-        let prompt = build_prompt(
-            Some("old summary"),
-            &["new content".to_string()],
-        );
+        let prompt = build_prompt(Some("old summary"), &["new content".to_string()]);
         assert!(prompt.contains("Update the anchored summary"));
         assert!(prompt.contains("<previous-summary>"));
         assert!(prompt.contains("old summary"));
@@ -807,8 +799,12 @@ mod tests {
         assert!(is_context_overflow_error("context_length_exceeded"));
         assert!(is_context_overflow_error("input length too long"));
         assert!(is_context_overflow_error("token limit exceeded"));
-        assert!(is_context_overflow_error("range of input length should be [1, 1000000]"));
-        assert!(is_context_overflow_error("reduce the length of the messages"));
+        assert!(is_context_overflow_error(
+            "range of input length should be [1, 1000000]"
+        ));
+        assert!(is_context_overflow_error(
+            "reduce the length of the messages"
+        ));
         assert!(!is_context_overflow_error("network timeout"));
         assert!(!is_context_overflow_error("auth failed"));
     }

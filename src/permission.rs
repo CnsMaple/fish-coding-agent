@@ -185,11 +185,9 @@ pub fn check(agent: Agent, tool: &str) -> Action {
         .iter()
         .find(|(name, _)| *name == tool)
         .map(|(_, a)| *a)
-        .unwrap_or_else(|| {
-            match agent {
-                Agent::Build => Action::Allow,
-                Agent::Plan => Action::Deny,
-            }
+        .unwrap_or_else(|| match agent {
+            Agent::Build => Action::Allow,
+            Agent::Plan => Action::Deny,
         })
 }
 
@@ -279,36 +277,75 @@ mod tests {
 
     #[test]
     fn explore_denies_write_tools() {
-        assert_eq!(check_sub_agent(SubAgent::Explore, tool::WRITE_FILE), Action::Deny);
-        assert_eq!(check_sub_agent(SubAgent::Explore, tool::WRITE), Action::Deny);
-        assert_eq!(check_sub_agent(SubAgent::Explore, tool::SHELL_COMMAND), Action::Deny);
+        assert_eq!(
+            check_sub_agent(SubAgent::Explore, tool::WRITE_FILE),
+            Action::Deny
+        );
+        assert_eq!(
+            check_sub_agent(SubAgent::Explore, tool::WRITE),
+            Action::Deny
+        );
+        assert_eq!(
+            check_sub_agent(SubAgent::Explore, tool::SHELL_COMMAND),
+            Action::Deny
+        );
     }
 
     #[test]
     fn explore_allows_read_tools() {
-        assert_eq!(check_sub_agent(SubAgent::Explore, tool::READ_FILE), Action::Allow);
-        assert_eq!(check_sub_agent(SubAgent::Explore, tool::GREP), Action::Allow);
-        assert_eq!(check_sub_agent(SubAgent::Explore, tool::GLOB), Action::Allow);
-        assert_eq!(check_sub_agent(SubAgent::Explore, tool::WEB_FETCH), Action::Allow);
+        assert_eq!(
+            check_sub_agent(SubAgent::Explore, tool::READ_FILE),
+            Action::Allow
+        );
+        assert_eq!(
+            check_sub_agent(SubAgent::Explore, tool::GREP),
+            Action::Allow
+        );
+        assert_eq!(
+            check_sub_agent(SubAgent::Explore, tool::GLOB),
+            Action::Allow
+        );
+        assert_eq!(
+            check_sub_agent(SubAgent::Explore, tool::WEB_FETCH),
+            Action::Allow
+        );
     }
 
     #[test]
     fn explore_denies_interaction_tools() {
         assert_eq!(check_sub_agent(SubAgent::Explore, tool::PLAN), Action::Deny);
         assert_eq!(check_sub_agent(SubAgent::Explore, tool::ASK), Action::Deny);
-        assert_eq!(check_sub_agent(SubAgent::Explore, tool::TODO_WRITE), Action::Deny);
-        assert_eq!(check_sub_agent(SubAgent::Explore, tool::SKILL), Action::Deny);
+        assert_eq!(
+            check_sub_agent(SubAgent::Explore, tool::TODO_WRITE),
+            Action::Deny
+        );
+        assert_eq!(
+            check_sub_agent(SubAgent::Explore, tool::SKILL),
+            Action::Deny
+        );
     }
 
     #[test]
     fn no_sub_agent_allows_recursion() {
-        assert_eq!(check_sub_agent(SubAgent::General, tool::SUB_AGENT), Action::Deny);
-        assert_eq!(check_sub_agent(SubAgent::Explore, tool::SUB_AGENT), Action::Deny);
+        assert_eq!(
+            check_sub_agent(SubAgent::General, tool::SUB_AGENT),
+            Action::Deny
+        );
+        assert_eq!(
+            check_sub_agent(SubAgent::Explore, tool::SUB_AGENT),
+            Action::Deny
+        );
     }
 
     #[test]
     fn general_allows_write_tools() {
-        assert_eq!(check_sub_agent(SubAgent::General, tool::WRITE_FILE), Action::Allow);
-        assert_eq!(check_sub_agent(SubAgent::General, tool::SHELL_COMMAND), Action::Allow);
+        assert_eq!(
+            check_sub_agent(SubAgent::General, tool::WRITE_FILE),
+            Action::Allow
+        );
+        assert_eq!(
+            check_sub_agent(SubAgent::General, tool::SHELL_COMMAND),
+            Action::Allow
+        );
     }
 }

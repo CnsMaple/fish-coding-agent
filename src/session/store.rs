@@ -102,16 +102,11 @@ pub struct SaveMeta {
     pub mcp_summary: Option<String>,
 }
 
-pub fn save(
-    id: &str,
-    title: &str,
-    cwd: &Path,
-    session: &Session,
-    meta: SaveMeta,
-) -> Result<()> {
+pub fn save(id: &str, title: &str, cwd: &Path, session: &Session, meta: SaveMeta) -> Result<()> {
     let dir = sessions_dir()?;
     let session_dir = dir.join(sanitize_id(id));
-    std::fs::create_dir_all(&session_dir).with_context(|| format!("create {}", session_dir.display()))?;
+    std::fs::create_dir_all(&session_dir)
+        .with_context(|| format!("create {}", session_dir.display()))?;
     let path = session_dir.join("session.json");
     let now = Utc::now();
     let created_at = load(id).map(|s| s.created_at).unwrap_or(now);
@@ -268,7 +263,8 @@ pub fn list(scope_cwd: Option<&Path>) -> Result<Vec<SessionSummary>> {
 fn write_stored(stored: &StoredSession) -> Result<()> {
     let dir = sessions_dir()?;
     let session_dir = dir.join(sanitize_id(&stored.id));
-    std::fs::create_dir_all(&session_dir).with_context(|| format!("create {}", session_dir.display()))?;
+    std::fs::create_dir_all(&session_dir)
+        .with_context(|| format!("create {}", session_dir.display()))?;
     let path = session_dir.join("session.json");
     let raw = serde_json::to_string_pretty(stored)?;
     std::fs::write(&path, raw).with_context(|| format!("write {}", path.display()))?;

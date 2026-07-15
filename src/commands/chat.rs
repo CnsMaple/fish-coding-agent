@@ -7,9 +7,11 @@ use crate::session::{Message, Role};
 use serde_json::json;
 use std::time::Duration;
 
-use super::utils::{is_doom_loop, parse_tool_result_display, tool_result_title, parse_text_tool_calls};
-use super::{open_settings, build_agents_content, system_prompt, compact_now};
-use super::{MSG_REQUEST_IN_FLIGHT, MSG_PROVIDER_INVALID};
+use super::utils::{
+    is_doom_loop, parse_text_tool_calls, parse_tool_result_display, tool_result_title,
+};
+use super::{build_agents_content, compact_now, open_settings, system_prompt};
+use super::{MSG_PROVIDER_INVALID, MSG_REQUEST_IN_FLIGHT};
 pub fn send_chat(app: &mut App, user_text: String, image_parts: Vec<crate::session::ContentPart>) {
     let mut msg = Message::new(Role::User, user_text);
     // Extract ImageAttachment from ContentPart to store on the Message.
@@ -177,11 +179,15 @@ pub fn send_message(app: &mut App, user_msg: Message) {
                     content: m.content.clone(),
                     content_parts: Vec::new(),
                     tool_call_id: None,
-                    tool_calls: m.tool_calls.iter().map(|tc| crate::providers::ToolCall {
-                        id: tc.id.clone(),
-                        name: tc.name.clone(),
-                        arguments: tc.arguments.clone(),
-                    }).collect(),
+                    tool_calls: m
+                        .tool_calls
+                        .iter()
+                        .map(|tc| crate::providers::ToolCall {
+                            id: tc.id.clone(),
+                            name: tc.name.clone(),
+                            arguments: tc.arguments.clone(),
+                        })
+                        .collect(),
                 });
                 // Emit a tool result message for each tool result.
                 for tr in &m.tool_results {
@@ -252,13 +258,13 @@ pub fn send_message(app: &mut App, user_msg: Message) {
     };
 
     if let Some(tx) = app.msg_tx.clone() {
-let client = app.stream_client.clone();
-    let cwd = app.cwd.clone();
-    let agent = app.active_agent;
-    // Defer the actual `tokio::spawn` until after the next
-    // `terminal.draw(...)` returns, so the freshly-pushed user
-    // message is on screen before the HTTP request goes out. The
-    // main event loop pulls this in `flush_pending_request`.
+        let client = app.stream_client.clone();
+        let cwd = app.cwd.clone();
+        let agent = app.active_agent;
+        // Defer the actual `tokio::spawn` until after the next
+        // `terminal.draw(...)` returns, so the freshly-pushed user
+        // message is on screen before the HTTP request goes out. The
+        // main event loop pulls this in `flush_pending_request`.
         app.pending_request = Some(crate::function::PendingRequest::Chat(
             crate::function::ChatPending {
                 client,
@@ -450,7 +456,9 @@ pub async fn run_chat_stream(
                 // in the notification list. Use {e:#} to show the full
                 // error chain including the underlying cause.
                 let warn = if is_rate_limit {
-                    format!("rate limit hit, stream retry {stream_retries}/3 (wait {delay}s): {e:#}")
+                    format!(
+                        "rate limit hit, stream retry {stream_retries}/3 (wait {delay}s): {e:#}"
+                    )
                 } else {
                     format!("stream retry {stream_retries}/3 ({delay}s): {e:#}")
                 };
@@ -467,7 +475,9 @@ pub async fn run_chat_stream(
         // Stream completed (either via Done event or graceful EOF
         // without error). Reset the retry counter so a subsequent
         // failure starts from 1/3, not from the stale count.
-        send_msg(crate::event::AppMsg::ChatWarnClear("rate limit hit".to_string()));
+        send_msg(crate::event::AppMsg::ChatWarnClear(
+            "rate limit hit".to_string(),
+        ));
         stream_retries = 0;
 
         if tool_calls.is_empty() && !assistant_content.is_empty() {
@@ -528,7 +538,8 @@ pub async fn run_chat_stream(
         // Spawn a task per parallel tool call. Each task owns its own
         // `tx`/`cancel_rx` clones and routes `ToolStarted`/`ToolDelta`/
         // `ChatToolResult` to the correct block via `call_id`.
-        let mut parallel_handles: Vec<tokio::task::JoinHandle<(usize, String, String)>> = Vec::new();
+        let mut parallel_handles: Vec<tokio::task::JoinHandle<(usize, String, String)>> =
+            Vec::new();
         for (i, call) in tool_calls.iter().enumerate() {
             if is_serial(&call.name) {
                 continue;
@@ -706,19 +717,20 @@ pub(super) async fn run_sub_agent(
 ) -> String {
     let args: serde_json::Value = match serde_json::from_str(args) {
         Ok(v) => v,
-        Err(e) => return json!({"ok": false, "error": format!("invalid sub_agent args: {e}")}).to_string(),
+        Err(e) => {
+            return json!({"ok": false, "error": format!("invalid sub_agent args: {e}")})
+                .to_string()
+        }
     };
     let sub_type = args
         .get("subagent_type")
         .and_then(|v| v.as_str())
         .unwrap_or("");
     let Some(sub) = crate::permission::SubAgent::parse(sub_type) else {
-        return json!({"ok": false, "error": format!("unknown subagent_type: {sub_type}")}).to_string();
+        return json!({"ok": false, "error": format!("unknown subagent_type: {sub_type}")})
+            .to_string();
     };
-    let prompt = args
-        .get("prompt")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let prompt = args.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
     if prompt.trim().is_empty() {
         return json!({"ok": false, "error": "prompt is empty"}).to_string();
     }
@@ -782,7 +794,8 @@ pub(super) async fn run_sub_agent(
                 tools: req.tools.clone(),
             };
             let call = tokio::spawn(async move {
-                p.chat_stream(&client_c, &base_c, &key_c, req_c, chat_tx).await
+                p.chat_stream(&client_c, &base_c, &key_c, req_c, chat_tx)
+                    .await
             });
 
             text.clear();
@@ -817,7 +830,11 @@ pub(super) async fn run_sub_agent(
                         .to_string();
                 }
                 let delay = retry_delays[(stream_retries - 1) as usize];
-                let label = if is_rate_limit { "rate limit hit" } else { "stream retry" };
+                let label = if is_rate_limit {
+                    "rate limit hit"
+                } else {
+                    "stream retry"
+                };
                 let _ = tx.send(crate::event::AppMsg::ToolDelta {
                     call_id: String::new(),
                     content: format!(
@@ -836,14 +853,19 @@ pub(super) async fn run_sub_agent(
                     }
                     Ok(Err(e)) => {
                         let e_str = format!("{e:#}");
-                        let is_rate_limit = e_str.contains("status 429") || e_str.contains("insufficient_quota");
+                        let is_rate_limit =
+                            e_str.contains("status 429") || e_str.contains("insufficient_quota");
                         stream_retries += 1;
                         if stream_retries >= 3 {
                             return json!({"ok": false, "error": format!("sub-agent stream failed after {stream_retries} retries: {e:#}")})
                                 .to_string();
                         }
                         let delay = retry_delays[(stream_retries - 1) as usize];
-                        let label = if is_rate_limit { "rate limit hit" } else { "stream retry" };
+                        let label = if is_rate_limit {
+                            "rate limit hit"
+                        } else {
+                            "stream retry"
+                        };
                         let _ = tx.send(crate::event::AppMsg::ToolDelta {
                             call_id: String::new(),
                             content: format!(
@@ -856,14 +878,19 @@ pub(super) async fn run_sub_agent(
                     }
                     Err(e) => {
                         let e_str = format!("{e:#}");
-                        let is_rate_limit = e_str.contains("status 429") || e_str.contains("insufficient_quota");
+                        let is_rate_limit =
+                            e_str.contains("status 429") || e_str.contains("insufficient_quota");
                         stream_retries += 1;
                         if stream_retries >= 3 {
                             return json!({"ok": false, "error": format!("sub-agent task failed after {stream_retries} retries: {e:#}")})
                                 .to_string();
                         }
                         let delay = retry_delays[(stream_retries - 1) as usize];
-                        let label = if is_rate_limit { "rate limit hit" } else { "stream retry" };
+                        let label = if is_rate_limit {
+                            "rate limit hit"
+                        } else {
+                            "stream retry"
+                        };
                         let _ = tx.send(crate::event::AppMsg::ToolDelta {
                             call_id: String::new(),
                             content: format!(
@@ -878,14 +905,20 @@ pub(super) async fn run_sub_agent(
             }
 
             break;
-            }
+        }
 
-        let _ = tx.send(crate::event::AppMsg::ChatWarnClear("rate limit hit".to_string()));
+        let _ = tx.send(crate::event::AppMsg::ChatWarnClear(
+            "rate limit hit".to_string(),
+        ));
 
         if tool_calls.is_empty() {
             let _ = tx.send(crate::event::AppMsg::ToolDelta {
                 call_id: String::new(),
-                content: format!("[sub_agent:{}] done ({steps} steps)\n", sub.as_str(), steps = step + 1),
+                content: format!(
+                    "[sub_agent:{}] done ({steps} steps)\n",
+                    sub.as_str(),
+                    steps = step + 1
+                ),
             });
             return json!({"ok": true, "result": text}).to_string();
         }
@@ -915,7 +948,12 @@ pub(super) async fn run_sub_agent(
 
             let _ = tx.send(crate::event::AppMsg::ToolDelta {
                 call_id: String::new(),
-                content: format!("[sub_agent:{}] step {step}: {tool}\n", sub.as_str(), step = step + 1, tool = tool_result_title(tc)),
+                content: format!(
+                    "[sub_agent:{}] step {step}: {tool}\n",
+                    sub.as_str(),
+                    step = step + 1,
+                    tool = tool_result_title(tc)
+                ),
             });
 
             let result = crate::tools::execute_tool_with_agent(
@@ -939,7 +977,10 @@ pub(super) async fn run_sub_agent(
     json!({"ok": false, "error": format!("sub-agent exceeded max steps ({max_steps})")}).to_string()
 }
 
-pub(super) fn sub_agent_system_prompt(sub: crate::permission::SubAgent, max_steps: usize) -> String {
+pub(super) fn sub_agent_system_prompt(
+    sub: crate::permission::SubAgent,
+    max_steps: usize,
+) -> String {
     let now = chrono::Local::now();
     let date = now.format("%Y-%m-%d %A").to_string();
     let cwd = std::env::current_dir()

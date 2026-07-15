@@ -42,10 +42,7 @@ async fn spawn_test_server(stream: DuplexStream) -> RunningService<RoleServer, T
 
 async fn attach_client(
     stream: DuplexStream,
-) -> (
-    Arc<Peer<RoleClient>>,
-    RunningService<RoleClient, ()>,
-) {
+) -> (Arc<Peer<RoleClient>>, RunningService<RoleClient, ()>) {
     let running = tokio::time::timeout(std::time::Duration::from_secs(5), ().serve(stream))
         .await
         .expect("client handshake timed out")
@@ -71,7 +68,13 @@ async fn config_local_roundtrip() {
     }"#;
     let cfg: McpServerConfig = serde_json::from_str(raw).unwrap();
     match cfg {
-        McpServerConfig::Local { command, environment, enabled, timeout_ms, .. } => {
+        McpServerConfig::Local {
+            command,
+            environment,
+            enabled,
+            timeout_ms,
+            ..
+        } => {
             assert_eq!(command, vec!["npx", "-y", "mcp-fs"]);
             assert_eq!(environment.get("FOO").map(String::as_str), Some("bar"));
             assert!(enabled);
@@ -119,11 +122,7 @@ async fn in_process_call_unknown_tool_errors() {
 #[tokio::test]
 async fn empty_config_produces_empty_snapshot() {
     let cfg: HashMap<String, McpEntry> = HashMap::new();
-    let svc = McpService::init_from_config(
-        &cfg,
-        std::env::current_dir().unwrap_or_default(),
-    )
-    .await;
+    let svc = McpService::init_from_config(&cfg, std::env::current_dir().unwrap_or_default()).await;
     let snap: StateSnapshot = svc.snapshot().await;
     assert!(snap.config.is_empty());
     assert!(snap.status.is_empty());
@@ -145,11 +144,7 @@ async fn disabled_entries_stay_disabled() {
             timeout_ms: 30_000,
         }),
     );
-    let svc = McpService::init_from_config(
-        &cfg,
-        std::env::current_dir().unwrap_or_default(),
-    )
-    .await;
+    let svc = McpService::init_from_config(&cfg, std::env::current_dir().unwrap_or_default()).await;
     let snap = svc.snapshot().await;
     assert_eq!(snap.config.len(), 1);
     let status = svc.status_of("echo").await;
@@ -199,10 +194,7 @@ fn mcp_tool_specs_aggregate_with_builtins() {
 #[test]
 fn render_text_concatenates_text_blocks() {
     let mut result = CallToolResult::default();
-    result.content = vec![
-        ContentBlock::text("hello"),
-        ContentBlock::text("world"),
-    ];
+    result.content = vec![ContentBlock::text("hello"), ContentBlock::text("world")];
     assert_eq!(McpClientHandle::render_text(&result), "hello\nworld");
 }
 

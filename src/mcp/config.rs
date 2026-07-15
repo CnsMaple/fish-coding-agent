@@ -192,7 +192,13 @@ mod tests {
         }"#;
         let cfg: McpServerConfig = serde_json::from_str(raw).unwrap();
         match cfg {
-            McpServerConfig::Local { command, environment, enabled, timeout_ms, .. } => {
+            McpServerConfig::Local {
+                command,
+                environment,
+                enabled,
+                timeout_ms,
+                ..
+            } => {
                 assert_eq!(command, vec!["npx", "-y", "mcp-fs"]);
                 assert_eq!(environment.get("FOO").map(String::as_str), Some("bar"));
                 assert!(enabled);
@@ -213,7 +219,13 @@ mod tests {
         }"#;
         let cfg: McpServerConfig = serde_json::from_str(raw).unwrap();
         match cfg {
-            McpServerConfig::Remote { url, headers, oauth, enabled, timeout_ms } => {
+            McpServerConfig::Remote {
+                url,
+                headers,
+                oauth,
+                enabled,
+                timeout_ms,
+            } => {
                 assert_eq!(url, "https://example.com/mcp");
                 assert_eq!(headers.get("X-Token").map(String::as_str), Some("abc"));
                 let oauth = oauth.unwrap();

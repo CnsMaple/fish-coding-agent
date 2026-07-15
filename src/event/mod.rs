@@ -1,7 +1,10 @@
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use crossterm::event::{
+    Event, EventStream, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
+    MouseEventKind,
+};
 use futures_util::StreamExt;
 use ratatui::backend::Backend;
 use ratatui::Terminal;
@@ -12,13 +15,13 @@ use crate::app::App;
 use crate::function::CancelState;
 use crate::ui::screen_y_to_doc_line;
 
+mod mcp;
 mod paste;
 mod pickers;
-mod mcp;
 
+use mcp::*;
 use paste::*;
 use pickers::*;
-use mcp::*;
 
 #[cfg(test)]
 mod tests;
@@ -114,14 +117,22 @@ pub enum AppMsg {
         failed: bool,
     },
     /// Final usage arrived for a completed stream.
-    ChatUsage { seq: u64, usage: crate::providers::Usage },
+    ChatUsage {
+        seq: u64,
+        usage: crate::providers::Usage,
+    },
     /// Stream finished successfully. `seq` matches
     /// `App::current_request_seq` at the time the request started;
     /// the handler drops stale events from previous requests so a
     /// slow-finishing background task can't clobber the new inflight.
-    ChatDone { seq: u64 },
+    ChatDone {
+        seq: u64,
+    },
     /// Stream errored. See `ChatDone` for the `seq` semantics.
-    ChatError { seq: u64, error: String },
+    ChatError {
+        seq: u64,
+        error: String,
+    },
     /// Models list fetched successfully.
     ModelsFetched {
         provider: crate::config::ProviderKind,
@@ -174,7 +185,9 @@ pub enum AppMsg {
     /// or server went up/down). Triggers re-aggregation of the
     /// `openai_tool_specs` / `anthropic_tool_specs` view and an
     /// immediate redraw of the status bar.
-    McpToolsChanged { server: String },
+    McpToolsChanged {
+        server: String,
+    },
     /// MCP status changed for a server. Used to refresh the
     /// `/mcp` picker without forcing a re-aggregation of tools.
     McpStatusChanged {
@@ -191,14 +204,21 @@ pub enum AppMsg {
     },
     /// The browser failed to open for an MCP auth URL; the TUI
     /// already showed the URL in a toast, so the user can copy it.
-    McpBrowserOpenFailed { server: String, url: String },
+    McpBrowserOpenFailed {
+        server: String,
+        url: String,
+    },
     /// A connected MCP server's client closed unexpectedly. The
     /// service has already marked the server as `Failed`; the
     /// TUI uses this to surface a toast and update the picker.
-    McpClientClosed { server: String },
+    McpClientClosed {
+        server: String,
+    },
     /// Manual request to start the OAuth dance for a remote MCP
     /// server. Issued by `/mcp-auth <name>`.
-    McpStartAuth { server: String },
+    McpStartAuth {
+        server: String,
+    },
     /// Auto or `/compact` finished: the LLM returned a summary for
     /// the slice `Session::messages[start..end]`. The handler calls
     /// `Session::apply_compaction` and (for auto-triggers) flags
@@ -210,7 +230,9 @@ pub enum AppMsg {
     },
     /// The compaction stream errored out. The session is left
     /// untouched. Surfaces as a `Fail` toast.
-    CompactionFailed { error: String },
+    CompactionFailed {
+        error: String,
+    },
 }
 
 pub struct EventChannels {
@@ -263,7 +285,11 @@ where
 
     loop {
         // Throttled draw: at least once per DRAW_INTERVAL.
-        if needs_draw && last_draw.elapsed() >= DRAW_INTERVAL {
+        // During inflight (chat/tool execution), skip the throttle so
+        // intermediate states (e.g. each parallel tool result arriving)
+        // are rendered immediately instead of being coalesced into one
+        // frame after all tools finish.
+        if needs_draw && (app.inflight.is_some() || last_draw.elapsed() >= DRAW_INTERVAL) {
             let was_full = app.force_full_repaint;
             if app.force_full_repaint {
                 let _ = terminal.hide_cursor();
@@ -301,80 +327,80 @@ where
         }
 
         tokio::select! {
-            biased;
-            evt = events.next() => {
-                needs_draw = true;
-                let Some(evt) = evt else { break; };
-                match evt? {
-                    Event::Key(k) if k.kind == KeyEventKind::Press => {
-                        // Intercept Alt+V to open paste preview.
-                        let is_alt_v = k.modifiers.contains(KeyModifiers::ALT)
-                            && matches!(k.code, KeyCode::Char('v') | KeyCode::Char('V'));
-                        if is_alt_v {
-                            open_paste_preview(app);
-                            continue;
-                        }
+                    biased;
+                    evt = events.next() => {
+                        needs_draw = true;
+                        let Some(evt) = evt else { break; };
+                        match evt? {
+                            Event::Key(k) if k.kind == KeyEventKind::Press => {
+                                // Intercept Alt+V to open paste preview.
+                                let is_alt_v = k.modifiers.contains(KeyModifiers::ALT)
+                                    && matches!(k.code, KeyCode::Char('v') | KeyCode::Char('V'));
+                                if is_alt_v {
+                                    open_paste_preview(app);
+                                    continue;
+                                }
 
-                        // All other key events go through handle_key directly.
-                        // Burst paste detection is removed in favor of the
-                        // explicit paste preview panel.
-                        for k in try_consume_burst(k, &mut events).await {
-                            handle_key(k, app).await;
+                                // All other key events go through handle_key directly.
+                                // Burst paste detection is removed in favor of the
+                                // explicit paste preview panel.
+                                for k in try_consume_burst(k, &mut events).await {
+                                    handle_key(k, app).await;
+                                }
+                            }
+                            Event::Mouse(m) => {
+                                handle_mouse(m, app);
+                            }
+                            Event::Paste(text) => {
+                                handle_paste(text, app).await;
+                            }
+        Event::Resize(_, _) => {}
+                            _ => {}
                         }
                     }
-                    Event::Mouse(m) => {
-                        handle_mouse(m, app);
+                    msg = channels.rx.recv() => {
+                        needs_draw = true;
+                        if let Some(m) = msg { handle_msg(m, app); }
                     }
-                    Event::Paste(text) => {
-                        handle_paste(text, app).await;
+                    _ = scroll_tick.tick() => {
+                        // Clear the 1-frame gating window set by the most
+                        // recent wheel event. In instant-scroll mode this is
+                        // a no-op for the view (the view already jumped on
+                        // the event frame) — it only re-arms `animating` to
+                        // `false` so the next wheel event can start a new
+                        // gesture.
+                        if app.session_scroll.animating {
+                            let _ = app.session_scroll.step(Instant::now());
+                        }
+                        if app.input_scroll.animating {
+                            let _ = app.input_scroll.step(Instant::now());
+                        }
                     }
-Event::Resize(_, _) => {}
-                    _ => {}
-                }
-            }
-            msg = channels.rx.recv() => {
-                needs_draw = true;
-                if let Some(m) = msg { handle_msg(m, app); }
-            }
-            _ = scroll_tick.tick() => {
-                // Clear the 1-frame gating window set by the most
-                // recent wheel event. In instant-scroll mode this is
-                // a no-op for the view (the view already jumped on
-                // the event frame) — it only re-arms `animating` to
-                // `false` so the next wheel event can start a new
-                // gesture.
-                if app.session_scroll.animating {
-                    let _ = app.session_scroll.step(Instant::now());
-                }
-                if app.input_scroll.animating {
-                    let _ = app.input_scroll.step(Instant::now());
-                }
-            }
-            _ = tick.tick() => {
-                // Always render on tick while inflight so the spinner
-                // animates smoothly and the display cursor advances
-                // even when no new data arrives between API chunks.
-                if app.inflight.is_some() {
-                    needs_draw = true;
-                    // 2s timeout: revert "esc again" back to
-                    // "esc to interrupt" if user doesn't follow through.
-                    if let CancelState::Confirming(since) = app.cancel_state {
-                        if since.elapsed() >= Duration::from_secs(2) {
-                            app.cancel_state = CancelState::Idle;
+                    _ = tick.tick() => {
+                        // Always render on tick while inflight so the spinner
+                        // animates smoothly and the display cursor advances
+                        // even when no new data arrives between API chunks.
+                        if app.inflight.is_some() {
+                            needs_draw = true;
+                            // 2s timeout: revert "esc again" back to
+                            // "esc to interrupt" if user doesn't follow through.
+                            if let CancelState::Confirming(since) = app.cancel_state {
+                                if since.elapsed() >= Duration::from_secs(2) {
+                                    app.cancel_state = CancelState::Idle;
+                                }
+                            }
+                        }
+                        // display_cursor is kept up-to-date in append_to_last,
+                        // so content is immediately visible during streaming.
+                        // The tick handler still triggers re-renders for the
+                        // spinner animation above.
+                        if last_status_refresh.elapsed() >= Duration::from_millis(500) {
+                            app.status.update_hit(&app.hit_rate);
+                            last_status_refresh = std::time::Instant::now();
+                            needs_draw = true;
                         }
                     }
                 }
-                // display_cursor is kept up-to-date in append_to_last,
-                // so content is immediately visible during streaming.
-                // The tick handler still triggers re-renders for the
-                // spinner animation above.
-                if last_status_refresh.elapsed() >= Duration::from_millis(500) {
-                    app.status.update_hit(&app.hit_rate);
-                    last_status_refresh = std::time::Instant::now();
-                    needs_draw = true;
-                }
-            }
-        }
 
         // Detect scroll changes to force a full repaint (every cell
         // marked AlwaysUpdate) on the next draw. This works around
@@ -394,7 +420,6 @@ Event::Resize(_, _) => {}
 
     Ok(())
 }
-
 
 /// Spawn any request that was prepared by `submit_input` /
 /// `commands::send_message` but held back so the user message could
@@ -455,7 +480,6 @@ fn drain_post_compaction_prompt(app: &mut App) {
     }
     crate::commands::send_chat(app, text, Vec::new());
 }
-
 
 /// Heuristic: treat text as a paste if it spans multiple lines or is long enough.
 /// Path-like text needs more characters to avoid fragmenting long file paths
@@ -727,7 +751,8 @@ fn handle_msg(msg: AppMsg, app: &mut App) {
                 handle_todowrite_result(app, &content);
             }
             open_tool_function_panel(app, &name, &content);
-            app.session.update_last_tool_content(name, title, content, call_id, metadata, failed);
+            app.session
+                .update_last_tool_content(name, title, content, call_id, metadata, failed);
         }
         AppMsg::AssistantToolCalls(tool_calls) => {
             if let Some(id) = app.session.streaming_id {
@@ -748,7 +773,8 @@ fn handle_msg(msg: AppMsg, app: &mut App) {
                 handle_todowrite_result(app, &content);
             }
             open_tool_function_panel(app, &name, &content);
-            app.session.push_tool_result_message(name, title, content, metadata, failed);
+            app.session
+                .push_tool_result_message(name, title, content, metadata, failed);
             if let Some(context) = context {
                 app.session.push(crate::session::Message::new(
                     crate::session::Role::User,
@@ -823,7 +849,10 @@ fn handle_msg(msg: AppMsg, app: &mut App) {
                 && app.config.auto_compact
                 && !app.compacting
             {
-                app.notify(ToastLevel::Info, "context overflow — compacting and retrying...");
+                app.notify(
+                    ToastLevel::Info,
+                    "context overflow — compacting and retrying...",
+                );
                 // Pop the error message we just pushed
                 app.session.messages.pop();
                 // Remove the streaming assistant placeholder
@@ -886,8 +915,14 @@ fn handle_msg(msg: AppMsg, app: &mut App) {
                 }
             }
             app.model_cache.save(&app.model_cache_path);
-            let ctx_count = models.iter().filter(|m| m.context_window_tokens.is_some()).count();
-            let missing_count = models.iter().filter(|m| m.context_window_tokens.is_none()).count();
+            let ctx_count = models
+                .iter()
+                .filter(|m| m.context_window_tokens.is_some())
+                .count();
+            let missing_count = models
+                .iter()
+                .filter(|m| m.context_window_tokens.is_none())
+                .count();
             use crate::function::notifications::ToastLevel;
             let mut msg = format!("fetched {} models for {}", models.len(), provider.as_str());
             if ctx_count > 0 {
@@ -1047,7 +1082,11 @@ fn handle_msg(msg: AppMsg, app: &mut App) {
                 }
             });
         }
-        AppMsg::CompactionSummaryReady { start, end, summary } => {
+        AppMsg::CompactionSummaryReady {
+            start,
+            end,
+            summary,
+        } => {
             use crate::function::notifications::ToastLevel;
             app.inflight = None;
             app.cancel_state = CancelState::Idle;
@@ -1130,9 +1169,10 @@ fn maybe_trigger_auto_compact(app: &mut App) {
     // Verify that the compaction range is not empty after trimming
     // to the API input limit. If it is, skip this cycle — the
     // prompt is too large to compact in one shot.
-    let Some((start, end)) =
-        crate::compaction::plan_cutoff(&app.session.messages, crate::compaction::DEFAULT_TAIL_TURNS)
-    else {
+    let Some((start, end)) = crate::compaction::plan_cutoff(
+        &app.session.messages,
+        crate::compaction::DEFAULT_TAIL_TURNS,
+    ) else {
         return;
     };
     let adjusted = crate::compaction::trim_to_size(
@@ -1338,9 +1378,7 @@ async fn handle_key(k: crossterm::event::KeyEvent, app: &mut App) {
             // Only applies when focus is on Input — when focus is on
             // the FunctionPanel or AgentsCheckbox, Esc closes the
             // active tab / returns focus to Input instead.
-            if app.focus_target == crate::function::FocusTarget::Input
-                && app.inflight.is_some()
-            {
+            if app.focus_target == crate::function::FocusTarget::Input && app.inflight.is_some() {
                 match app.cancel_state {
                     CancelState::Idle => {
                         app.cancel_state = CancelState::Confirming(Instant::now());
@@ -1556,8 +1594,18 @@ async fn handle_key(k: crossterm::event::KeyEvent, app: &mut App) {
                 app.input.move_right();
             }
         }
-        KeyCode::Home => app.input.move_home(),
-        KeyCode::End => app.input.move_end(),
+        KeyCode::Home => {
+            scroll_session_to_top(app);
+        }
+        KeyCode::End => {
+            app.set_scroll_anchored(0);
+        }
+        KeyCode::PageUp => {
+            scroll_session_page(app, true);
+        }
+        KeyCode::PageDown => {
+            scroll_session_page(app, false);
+        }
         KeyCode::Up => {
             if completion_is_focused(app) {
                 if let Some(idx) = completion_idx(app) {
@@ -1585,8 +1633,6 @@ async fn handle_key(k: crossterm::event::KeyEvent, app: &mut App) {
         _ => {}
     }
 }
-
-
 
 /// Returns the index of the Completion sidebar tab, if any.
 fn completion_idx(app: &App) -> Option<usize> {
@@ -1786,6 +1832,50 @@ enum ToggleTarget {
     Tool(usize, usize),
 }
 
+/// Scroll the session to the very top (oldest content).
+/// `session.scroll` is an offset from the bottom, so "top" = max_scroll.
+fn scroll_session_to_top(app: &mut App) {
+    let max_scroll = session_max_scroll(app);
+    app.set_scroll_anchored(max_scroll);
+}
+
+/// Scroll the session up or down by one viewport page.
+/// `up = true` means towards older content (increase scroll).
+fn scroll_session_page(app: &mut App, up: bool) {
+    let viewport_h = session_viewport_height(app);
+    if viewport_h == 0 {
+        return;
+    }
+    let max_scroll = session_max_scroll(app);
+    let new_scroll = if up {
+        app.session
+            .scroll
+            .saturating_add(viewport_h)
+            .min(max_scroll)
+    } else {
+        app.session.scroll.saturating_sub(viewport_h)
+    };
+    app.set_scroll_anchored(new_scroll);
+}
+
+/// The number of visible lines in the session viewport.
+fn session_viewport_height(app: &App) -> u32 {
+    app.session_area
+        .map(|area| area.height.saturating_sub(2) as u32)
+        .unwrap_or(0)
+}
+
+/// The maximum scroll value (= total - viewport_height).
+fn session_max_scroll(app: &mut App) -> u32 {
+    if let Some(area) = app.session_area {
+        let inner_h = area.height.saturating_sub(2) as u32;
+        let total = app.session.count_all_lines_with_width(area.width as usize);
+        total.saturating_sub(inner_h)
+    } else {
+        0
+    }
+}
+
 fn handle_mouse(m: MouseEvent, app: &mut App) {
     let prompt = app.input_prompt_area;
     let prefix_width = unicode_width::UnicodeWidthStr::width(" > ") as u16;
@@ -1836,8 +1926,15 @@ fn handle_mouse(m: MouseEvent, app: &mut App) {
                     return;
                 }
                 let inner_h = (input_area.height.saturating_sub(2)).max(1) as usize;
-                let visible_count = (app.input.buffer.split('\n').count() as u16).min(inner_h as u16).max(1) as usize;
-                let max_scroll = app.input.buffer.split('\n').count().saturating_sub(visible_count) as f32;
+                let visible_count = (app.input.buffer.split('\n').count() as u16)
+                    .min(inner_h as u16)
+                    .max(1) as usize;
+                let max_scroll = app
+                    .input
+                    .buffer
+                    .split('\n')
+                    .count()
+                    .saturating_sub(visible_count) as f32;
                 // Input scroll: offset from top. ScrollUp → see older
                 // lines → decrease offset (negative delta).
                 // ScrollDown → see newer lines → increase offset.
@@ -1938,28 +2035,23 @@ fn handle_mouse(m: MouseEvent, app: &mut App) {
                 }
             } else {
                 // Tool block toggle.
-                let width = app
-                    .session_area
-                    .map(|a| a.width as usize)
-                    .unwrap_or(120);
+                let width = app.session_area.map(|a| a.width as usize).unwrap_or(120);
                 let preview_lines = app.session.tool_preview_lines;
                 let old_delta = if let Some(msg) = app.session.messages.get(msg_idx) {
                     if let Some(tool) = msg.tool_results.get(tool_idx) {
                         let old_vis = tool.visible;
-                        let old_h =
-                            crate::session::render::tool_block_line_count(
-                                tool,
-                                old_vis,
-                                preview_lines,
-                                width,
-                            ) as u32;
-                        let new_h =
-                            crate::session::render::tool_block_line_count(
-                                tool,
-                                !old_vis,
-                                preview_lines,
-                                width,
-                            ) as u32;
+                        let old_h = crate::session::render::tool_block_line_count(
+                            tool,
+                            old_vis,
+                            preview_lines,
+                            width,
+                        ) as u32;
+                        let new_h = crate::session::render::tool_block_line_count(
+                            tool,
+                            !old_vis,
+                            preview_lines,
+                            width,
+                        ) as u32;
                         Some(new_h as i64 - old_h as i64)
                     } else {
                         None
@@ -1976,15 +2068,9 @@ fn handle_mouse(m: MouseEvent, app: &mut App) {
                 app.session.invalidate_layout_cache();
                 if let Some(delta) = old_delta {
                     if delta > 0 {
-                        app.session.scroll = app
-                            .session
-                            .scroll
-                            .saturating_add(delta as u32);
+                        app.session.scroll = app.session.scroll.saturating_add(delta as u32);
                     } else if delta < 0 {
-                        app.session.scroll = app
-                            .session
-                            .scroll
-                            .saturating_sub((-delta) as u32);
+                        app.session.scroll = app.session.scroll.saturating_sub((-delta) as u32);
                     }
                     // Sync last_rendered_total to the new total so
                     // pin_scroll_for_total on the next frame does NOT
@@ -2001,7 +2087,7 @@ fn handle_mouse(m: MouseEvent, app: &mut App) {
         }
     }
 
-match m.kind {
+    match m.kind {
         MouseEventKind::Down(MouseButton::Left) => {
             // Clear any prior selection but DO NOT create a new one yet.
             // We only commit a TUI selection when the user actually drags,
@@ -2035,7 +2121,8 @@ match m.kind {
                     if let Some(area) = app.session_area {
                         let width = area.width as usize;
                         let total = app.session.count_all_lines_with_width(width);
-                        let doc_start = screen_y_to_doc_line(start.1, &area, app.session.scroll, total);
+                        let doc_start =
+                            screen_y_to_doc_line(start.1, &area, app.session.scroll, total);
                         let col_start = start.0.saturating_sub(area.x);
                         app.tui_selection = Some(crate::function::Selection {
                             doc_start,
@@ -2115,7 +2202,6 @@ pub fn cycle_sidebar_forward(app: &mut App) {
     }
 }
 
-
 fn submit_input(app: &mut App) {
     // Hide the agents splash area once the user sends input.
     app.agents_visible = false;
@@ -2135,7 +2221,9 @@ fn submit_input(app: &mut App) {
     // the markers), then expand paste blocks.
     let raw = app.input.take();
     let (clean_text, mut image_parts) = expand_image_blocks(&raw, &mut app.image_blocks);
-    if image_parts.is_empty() && try_extract_image_path_from_input(&clean_text, &mut image_parts, app) {
+    if image_parts.is_empty()
+        && try_extract_image_path_from_input(&clean_text, &mut image_parts, app)
+    {
         // Image path was extracted and loaded; text is now empty.
         app.sync_completion();
         return;
@@ -2144,11 +2232,10 @@ fn submit_input(app: &mut App) {
     if raw.is_empty() && image_parts.is_empty() {
         return;
     }
-    if image_parts.is_empty()
-        && submit_direct_tool_input(app, &raw) {
-            app.sync_completion();
-            return;
-        }
+    if image_parts.is_empty() && submit_direct_tool_input(app, &raw) {
+        app.sync_completion();
+        return;
+    }
     if let Some(rest) = raw.strip_prefix('/') {
         let mut parts = rest.splitn(2, char::is_whitespace);
         let cmd: String = parts.next().unwrap_or("").to_lowercase();
@@ -2182,7 +2269,6 @@ fn submit_input(app: &mut App) {
     // The buffer is now empty, so the completion tab (if any) should close.
     app.sync_completion();
 }
-
 
 /// What pressing Enter (or Shift+Enter) should do, given the configured
 /// `EnterBehavior`. Extracted into its own helper so the contract is
@@ -2218,7 +2304,6 @@ fn enter_action(behavior: crate::config::EnterBehavior, shift: bool) -> EnterAct
         }
     }
 }
-
 
 /// Ctrl+N: dedicated shortcut for the Notifications tab.
 ///   - No Notifications tab: create it, show panel, acknowledge
@@ -2258,4 +2343,3 @@ pub(crate) fn handle_ctrl_n(app: &mut App) {
         app.acknowledge_panel();
     }
 }
-

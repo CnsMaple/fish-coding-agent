@@ -1,9 +1,9 @@
+use super::blocks::{build_thinking_block_rows, build_tool_block_rows, get_thinking_segments};
+use super::message_has_thinking;
 use crate::session::{Message, Role, Session, ThinkingSegment, ToolResultBlock};
 use crate::theme::active_colors;
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
-use super::blocks::{build_thinking_block_rows, build_tool_block_rows, get_thinking_segments};
-use super::message_has_thinking;
 
 pub fn strip_legacy_markers(s: &str) -> String {
     s.lines()
@@ -31,16 +31,14 @@ pub(super) fn render_content_segment(text: &str, width: usize, out: &mut Vec<Lin
     // text contains no tool-call markers at all. During streaming,
     // the vast majority of content segments have no markers, so this
     // avoids two full String allocations + line scans per call.
-    let text: std::borrow::Cow<str> = if text.contains("[tool:")
-        || text.contains(">>>")
-        || text.contains("<<<")
-    {
-        let stripped = strip_legacy_markers(text);
-        let stripped = crate::session::strip_text_tool_calls(&stripped);
-        std::borrow::Cow::Owned(stripped)
-    } else {
-        std::borrow::Cow::Borrowed(text)
-    };
+    let text: std::borrow::Cow<str> =
+        if text.contains("[tool:") || text.contains(">>>") || text.contains("<<<") {
+            let stripped = strip_legacy_markers(text);
+            let stripped = crate::session::strip_text_tool_calls(&stripped);
+            std::borrow::Cow::Owned(stripped)
+        } else {
+            std::borrow::Cow::Borrowed(text)
+        };
     if text.trim().is_empty() {
         return;
     }

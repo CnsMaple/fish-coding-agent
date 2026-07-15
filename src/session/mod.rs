@@ -525,7 +525,15 @@ impl Session {
     /// Matches the block by `call_id` (stable identity for parallel tool
     /// calls); falls back to the most recent running block with the same
     /// `name` when `call_id` is empty (legacy / direct-tool-input path).
-    pub fn update_last_tool_content(&mut self, name: String, title: String, content: String, call_id: String, metadata: String, failed: bool) {
+    pub fn update_last_tool_content(
+        &mut self,
+        name: String,
+        title: String,
+        content: String,
+        call_id: String,
+        metadata: String,
+        failed: bool,
+    ) {
         if let Some(id) = self.streaming_id {
             if let Some(m) = self.messages.get_mut(id) {
                 if let Some(last) = m.thinking_segments.last_mut() {
@@ -572,7 +580,14 @@ impl Session {
         self.append_tool_to_last(name, title, content, metadata, failed);
     }
 
-    pub fn append_tool_to_last(&mut self, name: String, title: String, content: String, metadata: String, failed: bool) {
+    pub fn append_tool_to_last(
+        &mut self,
+        name: String,
+        title: String,
+        content: String,
+        metadata: String,
+        failed: bool,
+    ) {
         if let Some(id) = self.streaming_id {
             if let Some(m) = self.messages.get_mut(id) {
                 if let Some(last) = m.thinking_segments.last_mut() {
@@ -617,9 +632,7 @@ impl Session {
                 // parallel tool call updates the right block instead
                 // of pushing a duplicate.
                 let pos = if !call_id.is_empty() {
-                    m.tool_results
-                        .iter()
-                        .rposition(|t| t.call_id == call_id)
+                    m.tool_results.iter().rposition(|t| t.call_id == call_id)
                 } else {
                     m.tool_results
                         .iter()
@@ -669,9 +682,7 @@ impl Session {
                 let pos = if !call_id.is_empty() {
                     m.tool_results.iter().rposition(|t| t.call_id == call_id)
                 } else {
-                    m.tool_results
-                        .iter()
-                        .rposition(|t| t.running)
+                    m.tool_results.iter().rposition(|t| t.running)
                 };
                 if let Some(pos) = pos {
                     let tool = &mut m.tool_results[pos];
@@ -698,7 +709,13 @@ impl Session {
     /// tool executes. Routing by `call_id` (rather than "the last block")
     /// is what makes parallel tool calls render correctly: each tool
     /// call always updates its own block instead of pushing duplicates.
-    pub fn update_tool_input_delta(&mut self, _index: usize, call_id: &str, name: &str, args: &str) {
+    pub fn update_tool_input_delta(
+        &mut self,
+        _index: usize,
+        call_id: &str,
+        name: &str,
+        args: &str,
+    ) {
         if let Some(id) = self.streaming_id {
             if let Some(m) = self.messages.get_mut(id) {
                 let pos = if !call_id.is_empty() {
@@ -754,7 +771,14 @@ impl Session {
         }
     }
 
-    pub fn push_tool_result_message(&mut self, name: String, title: String, content: String, metadata: String, failed: bool) {
+    pub fn push_tool_result_message(
+        &mut self,
+        name: String,
+        title: String,
+        content: String,
+        metadata: String,
+        failed: bool,
+    ) {
         let visible = name == "plan" || self.expand_new_tool_results;
         let msg = Message {
             role: Role::Assistant,
@@ -1008,7 +1032,8 @@ impl Session {
         let summary_msg = Message::new(Role::System, summary);
         // Drop everything in [start, end), then insert the summary
         // at `start`. Indices >= end shift by `(end - start) - 1`.
-        self.messages.splice(start..end, std::iter::once(summary_msg));
+        self.messages
+            .splice(start..end, std::iter::once(summary_msg));
         // The splice moved every index >= end down by
         // `(end - start) - 1`. Invalidate their render caches so
         // a stale LRU entry cannot be reused.
@@ -1236,10 +1261,7 @@ impl Session {
             // User messages: background padding + skill block.
             if m.role == Role::User {
                 if let Some(skill_ref) = &m.skill_ref {
-                    n += crate::session::render::skill_block_line_count(
-                        skill_ref,
-                        width as usize,
-                    );
+                    n += crate::session::render::skill_block_line_count(skill_ref, width as usize);
                 }
                 n += 2;
             }
@@ -1284,11 +1306,7 @@ impl Session {
         } else {
             self.count_all_lines_with_width(w)
         };
-        let lines_before = self
-            .line_offsets
-            .get(last_user)
-            .copied()
-            .unwrap_or(0);
+        let lines_before = self.line_offsets.get(last_user).copied().unwrap_or(0);
         let target = total.saturating_sub(lines_before + inner_h);
         self.scroll = target;
     }
@@ -1339,9 +1357,7 @@ impl Session {
 
         let lines_before = msg_start + tool_offset;
         self.pending_scroll_top = Some(lines_before);
-        self.scroll = total
-            .saturating_sub(inner_h)
-            .saturating_sub(lines_before);
+        self.scroll = total.saturating_sub(inner_h).saturating_sub(lines_before);
     }
 
     /// Compute the rendered line offset of a tool block's top border
@@ -1350,12 +1366,7 @@ impl Session {
     /// content segments before the tool, leading gaps, and any
     /// thinking/tool blocks that sort before it.
     #[allow(unused_assignments)]
-    fn tool_line_offset_within_message(
-        &self,
-        msg_idx: usize,
-        tool_idx: usize,
-        width: u16,
-    ) -> u32 {
+    fn tool_line_offset_within_message(&self, msg_idx: usize, tool_idx: usize, width: u16) -> u32 {
         let Some(m) = self.messages.get(msg_idx) else {
             return 0;
         };
@@ -1367,7 +1378,7 @@ impl Session {
         }
 
         let raw = m.visible_content();
-        use crate::session::render::{clamp_char_boundary, strip_legacy_markers, count_md_segment};
+        use crate::session::render::{clamp_char_boundary, count_md_segment, strip_legacy_markers};
 
         // Build sorted items matching build_message_lines.
         enum Item {
@@ -1450,12 +1461,10 @@ impl Session {
             match item {
                 Item::Thinking(si) => {
                     let seg = &segments[*si];
-                    let expanded =
-                        (self.display == crate::config::ThinkingDisplay::Show
-                            && m.thinking_visible)
-                            || (self.display
-                                == crate::config::ThinkingDisplay::ShowWhileStreaming
-                                && (m.streaming || m.thinking_visible));
+                    let expanded = (self.display == crate::config::ThinkingDisplay::Show
+                        && m.thinking_visible)
+                        || (self.display == crate::config::ThinkingDisplay::ShowWhileStreaming
+                            && (m.streaming || m.thinking_visible));
                     let lines = if expanded {
                         seg.cached_line_count_expanded.unwrap_or(0)
                     } else {
@@ -1519,8 +1528,8 @@ impl Session {
                 n += crate::session::render::attachment_block_line_count(&m.attachments);
             }
             let mut thinking_blocks: u32 = 0;
-            let show = m.role == Role::Assistant
-               && self.display != crate::config::ThinkingDisplay::Hide;
+            let show =
+                m.role == Role::Assistant && self.display != crate::config::ThinkingDisplay::Hide;
             if show {
                 let expanded = (self.display == crate::config::ThinkingDisplay::Show
                     && m.thinking_visible)
@@ -1558,7 +1567,10 @@ impl Session {
                     tool_blocks += 1;
                 }
             }
-            let first_offset = m.thinking_segments.iter().map(|s| s.offset)
+            let first_offset = m
+                .thinking_segments
+                .iter()
+                .map(|s| s.offset)
                 .chain(m.tool_results.iter().map(|t| t.content_offset))
                 .min();
             if first_offset.is_some_and(|off| off > 0) && (thinking_blocks > 0 || tool_blocks > 0) {
@@ -1792,11 +1804,7 @@ mod tests {
         };
         s.pin_scroll_for_total(80, 100);
         s.pin_scroll_for_total(80, 200);
-        assert_eq!(
-            s.scroll,
-            u32::MAX,
-            "scroll must saturate, never overflow"
-        );
+        assert_eq!(s.scroll, u32::MAX, "scroll must saturate, never overflow");
     }
 
     /// Width-keyed baseline: a stale entry at a different width must

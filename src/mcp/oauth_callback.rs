@@ -23,9 +23,9 @@ const CALLBACK_TIMEOUT: Duration = Duration::from_secs(5 * 60); // 5 minutes
 /// The caller provides the expected `state` value so we can reject
 /// mismatched CSRF tokens.
 pub async fn wait_for_callback(expected_state: &str) -> Result<String, String> {
-    let port = pick_free_port().await.ok_or_else(|| {
-        "no free port available in the callback range".to_string()
-    })?;
+    let port = pick_free_port()
+        .await
+        .ok_or_else(|| "no free port available in the callback range".to_string())?;
     let addr = format!("127.0.0.1:{port}");
     let listener = TcpListener::bind(&addr)
         .await
@@ -72,7 +72,11 @@ pub async fn wait_for_callback(expected_state: &str) -> Result<String, String> {
         if let Some(query) = path.split('?').nth(1) {
             let params = parse_query(query);
 
-            if let Some(code) = params.iter().find(|(k, _)| k == "code").map(|(_, v)| v.clone()) {
+            if let Some(code) = params
+                .iter()
+                .find(|(k, _)| k == "code")
+                .map(|(_, v)| v.clone())
+            {
                 let state_val = params
                     .iter()
                     .find(|(k, _)| k == "state")
@@ -89,7 +93,7 @@ pub async fn wait_for_callback(expected_state: &str) -> Result<String, String> {
         }
 
         // Unknown path — show help page
-let callback_url = format!("http://127.0.0.1:{port}{OAUTH_CALLBACK_PATH}");
+        let callback_url = format!("http://127.0.0.1:{port}{OAUTH_CALLBACK_PATH}");
         let body = format!(
             r#"<html><body><h1>MCP OAuth Callback</h1>
             <p>Waiting for authorization redirect from the MCP server.</p>
@@ -144,7 +148,11 @@ async fn send_html_response(stream: &mut tokio::net::TcpStream, status: u16) -> 
     send_html_response_raw(stream, status, body).await
 }
 
-async fn send_html_response_raw(stream: &mut tokio::net::TcpStream, status: u16, body: &str) -> String {
+async fn send_html_response_raw(
+    stream: &mut tokio::net::TcpStream,
+    status: u16,
+    body: &str,
+) -> String {
     let status_line = match status {
         200 => "200 OK",
         400 => "400 Bad Request",

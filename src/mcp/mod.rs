@@ -47,16 +47,12 @@ impl McpEventSink for AppMsgEventSink {
             McpEvent::StatusChanged { name, status } => {
                 crate::event::AppMsg::McpStatusChanged { name, status }
             }
-            McpEvent::AuthRequired { server, error } => {
-                crate::event::AppMsg::McpAuthRequired {
-                    server,
-                    url: String::new(),
-                    error,
-                }
-            }
-            McpEvent::ClientClosed { server } => {
-                crate::event::AppMsg::McpClientClosed { server }
-            }
+            McpEvent::AuthRequired { server, error } => crate::event::AppMsg::McpAuthRequired {
+                server,
+                url: String::new(),
+                error,
+            },
+            McpEvent::ClientClosed { server } => crate::event::AppMsg::McpClientClosed { server },
         };
         let _ = self.tx.send(msg);
     }

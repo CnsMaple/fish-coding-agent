@@ -1,10 +1,10 @@
 use crate::config::Config;
 use crate::session::TodoItem;
+use crate::theme::Theme;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget};
-use crate::theme::Theme;
 
 /// Shared context passed to every [`TabWidget`] render call.
 /// Contains read-only references to app-level data that tabs may need.
@@ -31,16 +31,25 @@ pub trait TabWidget {
 
     /// Footer hint text. Empty = no hint row. Override `render_hint`
     /// for dynamic hints.
-    fn hint(&self) -> &str { "" }
+    fn hint(&self) -> &str {
+        ""
+    }
 
     /// Whether this tab has a search/filter input row.
-    fn has_search(&self) -> bool { false }
+    fn has_search(&self) -> bool {
+        false
+    }
 
     /// Number of content lines the body needs. Used for dynamic height.
     fn content_height(&self, ctx: &TabCtx) -> usize;
 
     /// Render the search row into `buf`. Returns cursor position if focused.
-    fn render_search(&mut self, _area: Rect, _buf: &mut Buffer, _ctx: &TabCtx) -> Option<(u16, u16)> {
+    fn render_search(
+        &mut self,
+        _area: Rect,
+        _buf: &mut Buffer,
+        _ctx: &TabCtx,
+    ) -> Option<(u16, u16)> {
         None
     }
 
@@ -54,8 +63,7 @@ pub trait TabWidget {
     fn render_hint(&self, area: Rect, buf: &mut Buffer, _ctx: &TabCtx) {
         let h = self.hint();
         if !h.is_empty() {
-            Paragraph::new(Line::from(Span::styled(h, Theme::dim())))
-                .render(area, buf);
+            Paragraph::new(Line::from(Span::styled(h, Theme::dim()))).render(area, buf);
         }
     }
 

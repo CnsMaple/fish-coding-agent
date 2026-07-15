@@ -1,8 +1,8 @@
+use self::exec::handle_exec_server_message;
+use self::proto::*;
 use super::{ChatEvent, ChatRequest, Provider, ProviderError, Usage};
 use crate::config::ProviderKind;
 use crate::function::notifications::ModelInfo;
-use self::exec::handle_exec_server_message;
-use self::proto::*;
 use anyhow::Result;
 use async_trait::async_trait;
 use futures_util::StreamExt;
@@ -16,7 +16,10 @@ mod auth;
 mod exec;
 mod proto;
 
-pub use auth::{generate_auth_params, open_browser, poll_auth, refresh_token, CursorAuthParams, CursorAuthTokens};
+pub use auth::{
+    generate_auth_params, open_browser, poll_auth, refresh_token, CursorAuthParams,
+    CursorAuthTokens,
+};
 
 const CURSOR_CLIENT_VERSION: &str = "cli-2026.01.09-231024f";
 const CONNECT_END_STREAM_FLAG: u8 = 0b0000_0010;
@@ -394,38 +397,38 @@ pub(super) async fn handle_server_message(
     blob_store: &mut HashMap<Vec<u8>, Vec<u8>>,
     last_block_kind: &mut Option<&'static str>,
 ) -> Result<CursorServerOutcome> {
-        match msg.message {
-            Some(agent_server_message::Message::InteractionUpdate(update)) => match update.message {
-                Some(interaction_update::Message::TextDelta(v)) => {
-                    if !v.text.is_empty() {
-                        cursor_debug(
-                            tx,
-                            format!("event text_delta chars={}", v.text.chars().count()),
-                        );
-                        if *last_block_kind == Some("thinking") {
-                            let _ = tx.send(ChatEvent::ContentBlockStart("text".to_string()));
-                        }
-                        *last_block_kind = Some("text");
-                        let _ = tx.send(ChatEvent::Delta(v.text));
-                        return Ok(CursorServerOutcome::TextOutput);
+    match msg.message {
+        Some(agent_server_message::Message::InteractionUpdate(update)) => match update.message {
+            Some(interaction_update::Message::TextDelta(v)) => {
+                if !v.text.is_empty() {
+                    cursor_debug(
+                        tx,
+                        format!("event text_delta chars={}", v.text.chars().count()),
+                    );
+                    if *last_block_kind == Some("thinking") {
+                        let _ = tx.send(ChatEvent::ContentBlockStart("text".to_string()));
                     }
-                    Ok(CursorServerOutcome::Continue)
+                    *last_block_kind = Some("text");
+                    let _ = tx.send(ChatEvent::Delta(v.text));
+                    return Ok(CursorServerOutcome::TextOutput);
                 }
-                Some(interaction_update::Message::ThinkingDelta(v)) => {
-                    if !v.text.is_empty() {
-                        cursor_debug(
-                            tx,
-                            format!("event thinking_delta chars={}", v.text.chars().count()),
-                        );
-                        if *last_block_kind == Some("text") {
-                            let _ = tx.send(ChatEvent::ContentBlockStart("thinking".to_string()));
-                        }
-                        *last_block_kind = Some("thinking");
-                        let _ = tx.send(ChatEvent::ThinkingDelta(v.text));
-                        return Ok(CursorServerOutcome::Meaningful);
+                Ok(CursorServerOutcome::Continue)
+            }
+            Some(interaction_update::Message::ThinkingDelta(v)) => {
+                if !v.text.is_empty() {
+                    cursor_debug(
+                        tx,
+                        format!("event thinking_delta chars={}", v.text.chars().count()),
+                    );
+                    if *last_block_kind == Some("text") {
+                        let _ = tx.send(ChatEvent::ContentBlockStart("thinking".to_string()));
                     }
-                    Ok(CursorServerOutcome::Continue)
+                    *last_block_kind = Some("thinking");
+                    let _ = tx.send(ChatEvent::ThinkingDelta(v.text));
+                    return Ok(CursorServerOutcome::Meaningful);
                 }
+                Ok(CursorServerOutcome::Continue)
+            }
             Some(interaction_update::Message::TokenDelta(v)) => {
                 cursor_debug(tx, format!("event token_delta tokens={}", v.tokens));
                 usage.output_tokens = usage.output_tokens.saturating_add(v.tokens.max(0) as u64);
@@ -671,4 +674,3 @@ fn format_model_token(token: &str) -> String {
         _ => token.to_string(),
     }
 }
-

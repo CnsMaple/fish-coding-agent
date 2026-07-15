@@ -202,7 +202,10 @@ fn thinking_picker_ensure_cursor_visible_scrolls_down() {
     let mut s = ThinkingPickerState::new();
     s.cursor = 4;
     crate::ui::function_panel::ensure_cursor_visible(s.cursor, &mut s.scroll, 3);
-    assert_eq!(s.scroll, 2, "scroll should jump so cursor is last visible row");
+    assert_eq!(
+        s.scroll, 2,
+        "scroll should jump so cursor is last visible row"
+    );
 }
 
 #[test]

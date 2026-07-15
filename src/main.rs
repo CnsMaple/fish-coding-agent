@@ -18,13 +18,11 @@ async fn main() -> Result<()> {
     install_panic_hook();
 
     tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-                // Default: fish-coding-agent at info, everything else at warn.
-                // Users can override via RUST_LOG env var.
-                "warn,fish_coding_agent=info".parse().unwrap()
-            }),
-        )
+        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+            // Default: fish-coding-agent at info, everything else at warn.
+            // Users can override via RUST_LOG env var.
+            "warn,fish_coding_agent=info".parse().unwrap()
+        }))
         .with_writer(std::io::stderr)
         .init();
 
@@ -56,11 +54,7 @@ async fn main() -> Result<()> {
         let cwd_for_mcp = cwd.clone();
         // `.await` is critical — without it the future is dropped
         // and the service never initialises.
-        fish_coding_agent::mcp::McpService::init_from_config(
-            &mcp_cfg,
-            cwd_for_mcp,
-        )
-        .await;
+        fish_coding_agent::mcp::McpService::init_from_config(&mcp_cfg, cwd_for_mcp).await;
     }
     let mut app = App::new(cfg, config_path, cwd);
 

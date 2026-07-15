@@ -1,11 +1,11 @@
-use super::*;
 use super::file::{
-    read_file, write_file, grep_text, list_path, plan_review, ask_question, todowrite,
-    glob_search, write_new_file, skill_load, split_edit_diff,
+    ask_question, glob_search, grep_text, list_path, plan_review, read_file, skill_load,
+    split_edit_diff, todowrite, write_file, write_new_file,
 };
 use super::web::{
-    run_command, run_python_command, webfetch, websearch, strip_ansi, windows_shell_program,
+    run_command, run_python_command, strip_ansi, webfetch, websearch, windows_shell_program,
 };
+use super::*;
 
 pub async fn execute_tool(name: &str, args: &str, cwd: &Path) -> String {
     execute_tool_with_agent(crate::permission::Agent::Build, name, args, cwd).await
@@ -31,7 +31,7 @@ pub async fn execute_tool_with_agent(
     }
     let result = match name {
         t::READ_FILE => read_file(args, cwd).await,
-t::WRITE_FILE => write_file(args, cwd).await,
+        t::WRITE_FILE => write_file(args, cwd).await,
         t::SHELL_COMMAND | "command" => run_command(args, cwd).await,
         t::PYTHON_COMMAND => run_python_command(args, cwd).await,
         t::GREP => grep_text(args, cwd).await,
@@ -44,7 +44,9 @@ t::WRITE_FILE => write_file(args, cwd).await,
         t::SKILL => skill_load(args).await,
         t::WEB_FETCH => webfetch(args).await,
         t::WEB_SEARCH => websearch(args).await,
-        t::SUB_AGENT => Err(anyhow!("sub_agent must be executed from within the chat stream loop")),
+        t::SUB_AGENT => Err(anyhow!(
+            "sub_agent must be executed from within the chat stream loop"
+        )),
         _ => Err(anyhow!("unknown tool: {name}")),
     };
 
@@ -256,20 +258,48 @@ pub(super) async fn run_python_streaming_inner(
 ) -> Result<String> {
     #[cfg(windows)]
     {
-        match run_shell_streaming_impl("python", &["-X", "utf8", "-c", code], cwd, call_id, tx.clone(), timeout_secs).await
+        match run_shell_streaming_impl(
+            "python",
+            &["-X", "utf8", "-c", code],
+            cwd,
+            call_id,
+            tx.clone(),
+            timeout_secs,
+        )
+        .await
         {
             Ok(output) => Ok(output),
             Err(_) => {
-                run_shell_streaming_impl("py", &["-3", "-X", "utf8", "-c", code], cwd, call_id, tx, timeout_secs).await
+                run_shell_streaming_impl(
+                    "py",
+                    &["-3", "-X", "utf8", "-c", code],
+                    cwd,
+                    call_id,
+                    tx,
+                    timeout_secs,
+                )
+                .await
             }
         }
     }
 
     #[cfg(not(windows))]
     {
-        match run_shell_streaming_impl("python3", &["-c", code], cwd, call_id, tx.clone(), timeout_secs).await {
+        match run_shell_streaming_impl(
+            "python3",
+            &["-c", code],
+            cwd,
+            call_id,
+            tx.clone(),
+            timeout_secs,
+        )
+        .await
+        {
             Ok(output) => Ok(output),
-            Err(_) => run_shell_streaming_impl("python", &["-c", code], cwd, call_id, tx, timeout_secs).await,
+            Err(_) => {
+                run_shell_streaming_impl("python", &["-c", code], cwd, call_id, tx, timeout_secs)
+                    .await
+            }
         }
     }
 }

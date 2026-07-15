@@ -87,7 +87,11 @@ pub struct TodoTabState {
 
 impl TodoTabState {
     pub fn new() -> Self {
-        Self { scroll: 0, cursor: 0, editing: None }
+        Self {
+            scroll: 0,
+            cursor: 0,
+            editing: None,
+        }
     }
 }
 
@@ -130,9 +134,13 @@ impl SidebarTab {
     pub fn content_lines(&self, app: &crate::function::App) -> usize {
         match self {
             Self::PastePreview(s) => {
-                if s.image.is_some() { 2 }
-                else if let Some(ref text) = s.text { text.lines().count().min(5) }
-                else { 1 }
+                if s.image.is_some() {
+                    2
+                } else if let Some(ref text) = s.text {
+                    text.lines().count().min(5)
+                } else {
+                    1
+                }
             }
             Self::Notifications => {
                 if app.notifications.searching {
@@ -151,16 +159,32 @@ impl SidebarTab {
                 }
             }
             Self::ProviderPicker(s) => {
-                if s.entries.is_empty() || s.filtered.is_empty() { 1 } else { s.filtered.len() }
+                if s.entries.is_empty() || s.filtered.is_empty() {
+                    1
+                } else {
+                    s.filtered.len()
+                }
             }
             Self::ThinkingPicker(s) => {
-                if s.filtered.is_empty() { 1 } else { s.filtered.len() }
+                if s.filtered.is_empty() {
+                    1
+                } else {
+                    s.filtered.len()
+                }
             }
             Self::TimelinePicker(s) => {
-                if s.entries.is_empty() || s.filtered.is_empty() { 1 } else { s.filtered.len() }
+                if s.entries.is_empty() || s.filtered.is_empty() {
+                    1
+                } else {
+                    s.filtered.len()
+                }
             }
             Self::SessionPicker(s) => {
-                if s.entries.is_empty() || s.filtered.is_empty() { 1 } else { s.filtered.len() }
+                if s.entries.is_empty() || s.filtered.is_empty() {
+                    1
+                } else {
+                    s.filtered.len()
+                }
             }
             Self::SessionRename(_) => 1,
             Self::Plan(_) => 3,
@@ -169,7 +193,10 @@ impl SidebarTab {
                 match s.phase {
                     AskPhase::Asking => {
                         let active = s.active.min(s.items.len().saturating_sub(1));
-                        s.items.get(active).map(|it| 1 + it.options.len() + 1).unwrap_or(1)
+                        s.items
+                            .get(active)
+                            .map(|it| 1 + it.options.len() + 1)
+                            .unwrap_or(1)
                     }
                     AskPhase::Reviewing => s.items.len() * 2,
                 }
@@ -183,11 +210,12 @@ impl SidebarTab {
     pub fn has_search(&self) -> bool {
         matches!(
             self,
-            Self::Notifications | Self::ModelPicker(_)
-            | Self::ProviderPicker(_)
-            | Self::ThinkingPicker(_)
-            | Self::TimelinePicker(_)
-            | Self::SessionPicker(_)
+            Self::Notifications
+                | Self::ModelPicker(_)
+                | Self::ProviderPicker(_)
+                | Self::ThinkingPicker(_)
+                | Self::TimelinePicker(_)
+                | Self::SessionPicker(_)
         )
     }
 
@@ -198,10 +226,16 @@ impl SidebarTab {
     pub fn hint(&self) -> &'static str {
         match self {
             Self::Notifications => " ",
-            Self::ModelPicker(_) => " Enter: select | Ctrl+R: refresh | Ctrl+M: manual | Ctrl+E: edit | Esc: close ",
-            Self::ProviderPicker(_) => " Enter: pick | Up/Down: nav | type to filter | Ctrl+E: edit | Esc: close ",
+            Self::ModelPicker(_) => {
+                " Enter: select | Ctrl+R: refresh | Ctrl+M: manual | Ctrl+E: edit | Esc: close "
+            }
+            Self::ProviderPicker(_) => {
+                " Enter: pick | Up/Down: nav | type to filter | Ctrl+E: edit | Esc: close "
+            }
             Self::ThinkingPicker(_) => "",
-            Self::TimelinePicker(_) => " Enter: jump to message | Up/Down: nav | Ctrl+E: edit | Esc: close ",
+            Self::TimelinePicker(_) => {
+                " Enter: jump to message | Up/Down: nav | Ctrl+E: edit | Esc: close "
+            }
             Self::SessionPicker(_) => " ",
             Self::SessionRename(_) => " Enter: save | Ctrl+E: edit | Esc: close ",
             Self::Plan(_) => " Enter: approve | R: reject | S: save | Esc: close ",
@@ -218,8 +252,12 @@ impl SidebarTab {
     /// row (0 or 1) + hint row (0 or 1).
     pub fn overhead(&self) -> u16 {
         let mut oh = 2u16;
-        if self.has_search() { oh += 1; }
-        if !self.hint().is_empty() { oh += 1; }
+        if self.has_search() {
+            oh += 1;
+        }
+        if !self.hint().is_empty() {
+            oh += 1;
+        }
         oh
     }
 
@@ -242,7 +280,9 @@ pub fn settings_body_lines(
     let mut lines: Vec<ratatui::text::Line<'static>> = Vec::new();
     match &s.level {
         SettingsLevel::TopLevel => {
-            for _ in 0..8 { lines.push(ratatui::text::Line::raw("")); }
+            for _ in 0..8 {
+                lines.push(ratatui::text::Line::raw(""));
+            }
         }
         SettingsLevel::ProviderList => {
             lines.push(ratatui::text::Line::raw(""));
@@ -271,14 +311,17 @@ pub fn settings_body_lines(
                 lines.push(ratatui::text::Line::raw(""));
             }
         }
-        SettingsLevel::ThinkingDisplayList
-        | SettingsLevel::ToolResultDisplayList => {
-            for _ in 0..3 { lines.push(ratatui::text::Line::raw("")); }
+        SettingsLevel::ThinkingDisplayList | SettingsLevel::ToolResultDisplayList => {
+            for _ in 0..3 {
+                lines.push(ratatui::text::Line::raw(""));
+            }
         }
         SettingsLevel::EnterBehaviorList
         | SettingsLevel::BorderTypeList
         | SettingsLevel::AutoCompact => {
-            for _ in 0..2 { lines.push(ratatui::text::Line::raw("")); }
+            for _ in 0..2 {
+                lines.push(ratatui::text::Line::raw(""));
+            }
         }
         SettingsLevel::ThemeList => {
             for _ in 0..crate::theme::ThemeVariant::all().len() {
@@ -530,7 +573,7 @@ impl SettingsLevel {
             | SettingsLevel::ToolResultDisplayList
             | SettingsLevel::EnterBehaviorList
             | SettingsLevel::BorderTypeList
-            |             SettingsLevel::ThemeList => "Up/Down: nav | Enter: select | Esc: back",
+            | SettingsLevel::ThemeList => "Up/Down: nav | Enter: select | Esc: back",
             SettingsLevel::AutoCompact => "Up/Down: nav | Enter: select | Esc: back",
             SettingsLevel::ToolPreviewLines => "Up/Down: ±1 | Esc: back",
         }
@@ -643,7 +686,7 @@ impl SettingsState {
             SettingsLevel::EnterBehaviorList => 2,   // enter sends, enter newline
             SettingsLevel::BorderTypeList => 2,      // ascii, rounded
             SettingsLevel::ThemeList => crate::theme::ThemeVariant::all().len(),
-            SettingsLevel::AutoCompact => 2, // on, off
+            SettingsLevel::AutoCompact => 2,      // on, off
             SettingsLevel::ToolPreviewLines => 1, // single-row stepper, the value lives in cfg
         }
     }
@@ -883,7 +926,9 @@ impl ThinkingPickerState {
         s
     }
 
-    pub const LEVELS: &'static [&'static str] = &["off", "minimal", "low", "medium", "high", "xhigh", "adaptive", "max"];
+    pub const LEVELS: &'static [&'static str] = &[
+        "off", "minimal", "low", "medium", "high", "xhigh", "adaptive", "max",
+    ];
 
     pub fn selected(&self) -> Option<&'static str> {
         self.filtered
@@ -907,8 +952,7 @@ impl ThinkingPickerState {
             self.scroll = self.cursor;
         }
     }
-
-    }
+}
 
 impl Default for ThinkingPickerState {
     fn default() -> Self {
@@ -1029,7 +1073,10 @@ fn snapshot_session(session: &Session) -> Vec<TimelineEntry> {
                 continue;
             }
             let offset = t.content_offset.min(raw.len());
-            items.push(SnapItem { offset, tool_idx: ti });
+            items.push(SnapItem {
+                offset,
+                tool_idx: ti,
+            });
         }
         // Sort by offset; at the same offset, tools are sorted by index.
         // (Thinking segments are not shown as separate timeline entries.)
@@ -1431,12 +1478,9 @@ impl AskState {
         let mut out = String::from("(Ask round dismissed by the user.)\n");
         for (i, it) in self.items.iter().enumerate() {
             match &it.answered {
-                Some(ans) => out.push_str(&format!(
-                    "\nQ{}. {}\n   A. {}\n",
-                    i + 1,
-                    it.question,
-                    ans
-                )),
+                Some(ans) => {
+                    out.push_str(&format!("\nQ{}. {}\n   A. {}\n", i + 1, it.question, ans))
+                }
                 None => out.push_str(&format!(
                     "\nQ{}. {}\n   A. (dismissed — no explicit answer)\n",
                     i + 1,

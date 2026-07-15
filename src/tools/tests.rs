@@ -94,8 +94,7 @@ async fn build_mode_allows_write_file() {
     })
     .to_string();
     let result =
-        execute_tool_with_agent(crate::permission::Agent::Build, "edit", &args, &dir)
-            .await;
+        execute_tool_with_agent(crate::permission::Agent::Build, "edit", &args, &dir).await;
     let v: serde_json::Value = serde_json::from_str(&result).unwrap();
     assert_eq!(v.get("ok").and_then(|s| s.as_bool()), Some(true));
     let _ = std::fs::remove_file(&target);
@@ -106,24 +105,31 @@ async fn write_file_old_string_with_null_content_deletes_match() {
     let dir = std::env::temp_dir().join("fish-coding-agent-no-content-test");
     let _ = std::fs::create_dir_all(&dir);
     let target = dir.join("no_content.txt");
-    std::fs::write(&target, "line1
+    std::fs::write(
+        &target,
+        "line1
 line2
-").unwrap();
+",
+    )
+    .unwrap();
     // oldString provided but content is missing (null) — should
     // delete the matched text (treat null as empty string).
     let args = serde_json::json!({
         "path": "no_content.txt",
         "oldString": "line1
-"
-    }).to_string();
+    "
+    })
+    .to_string();
     let result =
-        execute_tool_with_agent(crate::permission::Agent::Build, "edit", &args, &dir)
-            .await;
+        execute_tool_with_agent(crate::permission::Agent::Build, "edit", &args, &dir).await;
     let v: serde_json::Value = serde_json::from_str(&result).unwrap();
     assert_eq!(v.get("ok").and_then(|s| s.as_bool()), Some(true));
     // line1 + newline should be deleted
-    assert_eq!(std::fs::read_to_string(&target).unwrap(), "line2
-");
+    assert_eq!(
+        std::fs::read_to_string(&target).unwrap(),
+        "line2
+"
+    );
     let _ = std::fs::remove_file(&target);
 }
 
@@ -132,23 +138,29 @@ async fn write_file_new_string_alias_works() {
     let dir = std::env::temp_dir().join("fish-coding-agent-newstring-test");
     let _ = std::fs::create_dir_all(&dir);
     let target = dir.join("newstring.txt");
-    std::fs::write(&target, "foo
+    std::fs::write(
+        &target, "foo
 bar
-").unwrap();
+",
+    )
+    .unwrap();
     // Use `newString` instead of `content` — should work as alias.
     let args = serde_json::json!({
         "path": "newstring.txt",
         "oldString": "foo",
         "newString": "baz"
-    }).to_string();
+    })
+    .to_string();
     let result =
-        execute_tool_with_agent(crate::permission::Agent::Build, "edit", &args, &dir)
-            .await;
+        execute_tool_with_agent(crate::permission::Agent::Build, "edit", &args, &dir).await;
     let v: serde_json::Value = serde_json::from_str(&result).unwrap();
     assert_eq!(v.get("ok").and_then(|s| s.as_bool()), Some(true));
-    assert_eq!(std::fs::read_to_string(&target).unwrap(), "baz
+    assert_eq!(
+        std::fs::read_to_string(&target).unwrap(),
+        "baz
 bar
-");
+"
+    );
     let _ = std::fs::remove_file(&target);
 }
 
@@ -307,8 +319,19 @@ fn replace_string_crlf_file_with_lf_old_string() {
     // Simulates the most common edit-tool issue: user writes oldString
     // with \n but the file on disk uses \r\n line endings.
     let input = "pub consumed: bool,\r\npub other: bool,\r\n";
-    let result = replace_string(input, "pub consumed: bool,\n", "pub consumed: bool,\npub extra: bool,\n", false, None, None).unwrap();
-    assert_eq!(result, "pub consumed: bool,\r\npub extra: bool,\r\npub other: bool,\r\n");
+    let result = replace_string(
+        input,
+        "pub consumed: bool,\n",
+        "pub consumed: bool,\npub extra: bool,\n",
+        false,
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        result,
+        "pub consumed: bool,\r\npub extra: bool,\r\npub other: bool,\r\n"
+    );
 }
 
 #[test]
@@ -337,7 +360,6 @@ fn replace_string_multi_match_shows_context_crlf() {
     assert!(msg.contains("match 1 at line 1"));
     assert!(msg.contains("match 2 at line 4"));
 }
-
 
 // ── Fuzzy (trailing whitespace tolerant) matching tests ──
 

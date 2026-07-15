@@ -1,8 +1,8 @@
+use super::mcp::start_cursor_oauth;
+use super::paste::handle_paste_preview_key;
+use super::AppMsg;
 use crate::app::App;
 use crossterm::event::KeyModifiers;
-use super::AppMsg;
-use super::paste::handle_paste_preview_key;
-use super::mcp::start_cursor_oauth;
 /// Dispatch a key event to the per-tab handler for the currently active
 /// sidebar tab. The dispatch follows a "move out → call handler → decide
 /// what to do with the original" pattern:
@@ -66,7 +66,8 @@ pub(super) async fn dispatch_to_active_tab(k: crossterm::event::KeyEvent, app: &
                 app.function.active = app.function.tabs.len().saturating_sub(1);
             }
             app.maybe_hide_panel();
-        } else if matches!(&tab, crate::function::SidebarTab::SessionPicker(state) if state.consumed) {
+        } else if matches!(&tab, crate::function::SidebarTab::SessionPicker(state) if state.consumed)
+        {
             // The handler already closed the tab and resumed the session.
             // Don't restore it.
             app.function.tabs.remove(active);
@@ -99,10 +100,6 @@ pub(super) fn handle_notifications_key(k: crossterm::event::KeyEvent, app: &mut 
         }
         KeyCode::Down => {
             app.notifications.move_down();
-            let visible = 8usize;
-            if app.notifications.cursor >= app.notifications.scroll + visible {
-                app.notifications.scroll = app.notifications.cursor + 1 - visible;
-            }
             true
         }
         KeyCode::Backspace => {
@@ -216,8 +213,8 @@ pub(super) async fn handle_todo_key(
     app: &mut App,
     state: &mut crate::function::TodoTabState,
 ) -> bool {
-    use crossterm::event::KeyCode;
     use crate::session::TodoItem;
+    use crossterm::event::KeyCode;
     let total = app.session.todo_items.len();
 
     // If editing, handle Enter (confirm) and Esc (cancel)
@@ -235,12 +232,13 @@ pub(super) async fn handle_todo_key(
             KeyCode::Esc => {
                 // Remove the item if content is still empty
                 if edit_idx < app.session.todo_items.len()
-                    && app.session.todo_items[edit_idx].content.trim().is_empty() {
-                        app.session.todo_items.remove(edit_idx);
-                        if state.cursor > 0 && state.cursor >= app.session.todo_items.len() {
-                            state.cursor = state.cursor.saturating_sub(1);
-                        }
+                    && app.session.todo_items[edit_idx].content.trim().is_empty()
+                {
+                    app.session.todo_items.remove(edit_idx);
+                    if state.cursor > 0 && state.cursor >= app.session.todo_items.len() {
+                        state.cursor = state.cursor.saturating_sub(1);
                     }
+                }
                 state.editing = None;
                 app.session.invalidate_layout_cache();
                 return true;
@@ -293,10 +291,13 @@ pub(super) async fn handle_todo_key(
                     KeyCode::Char('i') => {
                         let text = app.input.buffer.trim().to_string();
                         let insert_at = (state.cursor + 1).min(total);
-                        app.session.todo_items.insert(insert_at, TodoItem {
-                            content: text,
-                            status: "pending".to_string(),
-                        });
+                        app.session.todo_items.insert(
+                            insert_at,
+                            TodoItem {
+                                content: text,
+                                status: "pending".to_string(),
+                            },
+                        );
                         state.cursor = insert_at;
                         state.editing = Some(insert_at);
                         app.session.invalidate_layout_cache();
@@ -305,10 +306,13 @@ pub(super) async fn handle_todo_key(
                     KeyCode::Char('I') => {
                         let text = app.input.buffer.trim().to_string();
                         let insert_at = state.cursor.min(total);
-                        app.session.todo_items.insert(insert_at, TodoItem {
-                            content: text,
-                            status: "pending".to_string(),
-                        });
+                        app.session.todo_items.insert(
+                            insert_at,
+                            TodoItem {
+                                content: text,
+                                status: "pending".to_string(),
+                            },
+                        );
                         state.cursor = insert_at;
                         state.editing = Some(insert_at);
                         app.session.invalidate_layout_cache();
@@ -568,8 +572,7 @@ pub(super) fn handle_session_rename_key(
         }
         KeyCode::Right => {
             if state.cursor < state.title.len() {
-                state.cursor = state
-                    .title[state.cursor..]
+                state.cursor = state.title[state.cursor..]
                     .char_indices()
                     .nth(1)
                     .map(|(i, _)| state.cursor + i)
@@ -589,8 +592,7 @@ pub(super) fn handle_session_rename_key(
         }
         KeyCode::Delete => {
             if state.cursor < state.title.len() {
-                let end = state
-                    .title[state.cursor..]
+                let end = state.title[state.cursor..]
                     .char_indices()
                     .nth(1)
                     .map(|(i, _)| state.cursor + i)
@@ -1054,19 +1056,23 @@ pub(super) fn trigger_picker_fetch(app: &mut App, state: &mut crate::function::M
             .entry(&active_id)
             .map(|c| c.name.clone())
             .unwrap_or_default();
-        let cache_path = app.model_cache_path.parent().unwrap_or(&app.model_cache_path).to_path_buf();
+        let cache_path = app
+            .model_cache_path
+            .parent()
+            .unwrap_or(&app.model_cache_path)
+            .to_path_buf();
         tokio::spawn(async move {
             match crate::providers::list_models(crate::providers::ListModelsArgs {
-                    client: &client,
-                    kind: p,
-                    base_url: &base,
-                    api_key: &key,
-                    access_key: &access_key,
-                    secret_key: &secret_key,
-                    cache_path: &cache_path,
-                    provider_name: &provider_name,
-                })
-                .await
+                client: &client,
+                kind: p,
+                base_url: &base,
+                api_key: &key,
+                access_key: &access_key,
+                secret_key: &secret_key,
+                cache_path: &cache_path,
+                provider_name: &provider_name,
+            })
+            .await
             {
                 Ok(models) => {
                     let _ = tx.send(AppMsg::ModelsFetched {
@@ -1113,18 +1119,14 @@ pub(super) fn handle_settings_key(
     ) {
         match k.code {
             KeyCode::Up => {
-                if app.config.tool_preview_lines
-                    > crate::config::TOOL_PREVIEW_LINES_MIN
-                {
+                if app.config.tool_preview_lines > crate::config::TOOL_PREVIEW_LINES_MIN {
                     app.config.tool_preview_lines -= 1;
                     app.save_config();
                 }
                 return true;
             }
             KeyCode::Down => {
-                if app.config.tool_preview_lines
-                    < crate::config::TOOL_PREVIEW_LINES_MAX
-                {
+                if app.config.tool_preview_lines < crate::config::TOOL_PREVIEW_LINES_MAX {
                     app.config.tool_preview_lines += 1;
                     app.save_config();
                 }
@@ -1402,7 +1404,7 @@ pub(super) fn handle_settings_enter(app: &mut App, state: &mut crate::function::
             // 0 = on, 1 = off. `auto_compact` defaults to `true` in
             // `Config`, so picking the first row turns it on, the
             // second row turns it off.
-let enabled = matches!(cursor, 0);
+            let enabled = matches!(cursor, 0);
             if app.config.auto_compact != enabled {
                 app.config.auto_compact = enabled;
                 app.status.set_auto_compact(enabled);
@@ -1589,19 +1591,23 @@ pub(super) fn settings_save_form(app: &mut App, form: crate::function::ConfigFor
                 .entry(&active_id)
                 .map(|c| c.name.clone())
                 .unwrap_or_default();
-            let cache_path = app.model_cache_path.parent().unwrap_or(&app.model_cache_path).to_path_buf();
+            let cache_path = app
+                .model_cache_path
+                .parent()
+                .unwrap_or(&app.model_cache_path)
+                .to_path_buf();
             if let Some(tx) = app.msg_tx.clone() {
                 tokio::spawn(async move {
                     match crate::providers::list_models(crate::providers::ListModelsArgs {
-                            client: &client,
-                            kind: k,
-                            base_url: &base,
-                            api_key: &key,
-                            access_key: &access_key,
-                            secret_key: &secret_key,
-                            cache_path: &cache_path,
-                            provider_name: &provider_name,
-                        })
+                        client: &client,
+                        kind: k,
+                        base_url: &base,
+                        api_key: &key,
+                        access_key: &access_key,
+                        secret_key: &secret_key,
+                        cache_path: &cache_path,
+                        provider_name: &provider_name,
+                    })
                     .await
                     {
                         Ok(models) => {
@@ -1763,7 +1769,7 @@ pub(super) fn handle_form_text(
             }
             _ => false,
         },
-ConfigField::SecretKey => match k.code {
+        ConfigField::SecretKey => match k.code {
             crossterm::event::KeyCode::Char(c) => {
                 form.secret_key.push(c);
                 true
@@ -1791,13 +1797,17 @@ pub(super) fn open_context_picker(
         .unwrap_or_default()
         .to_lowercase();
 
-    let cache_path = app.model_cache_path.parent().unwrap_or(&app.model_cache_path);
+    let cache_path = app
+        .model_cache_path
+        .parent()
+        .unwrap_or(&app.model_cache_path);
     let model_data_path = cache_path.join("model-data.json");
-    let model_data = crate::model_data::ModelData::load(&model_data_path)
-        .unwrap_or_else(|| crate::model_data::ModelData {
+    let model_data = crate::model_data::ModelData::load(&model_data_path).unwrap_or_else(|| {
+        crate::model_data::ModelData {
             models: std::collections::HashMap::new(),
             fetched_at: chrono::Utc::now(),
-        });
+        }
+    });
 
     let options = model_data.context_options_for_provider(&provider_name);
 
@@ -1858,7 +1868,10 @@ pub(super) fn handle_context_picker_key(
                         state.models[model_idx].context_window_tokens = Some(ctx);
                         state.models[model_idx].context_needs_pick = false;
                         // Save to custom cache
-                        let cache_path = app.model_cache_path.parent().unwrap_or(&app.model_cache_path);
+                        let cache_path = app
+                            .model_cache_path
+                            .parent()
+                            .unwrap_or(&app.model_cache_path);
                         let custom_cache_path = cache_path.join("context-cache.json");
                         let mut custom_cache =
                             crate::model_data::CustomContextCache::load(&custom_cache_path);
@@ -1881,7 +1894,10 @@ pub(super) fn handle_context_picker_key(
                         state.models[model_idx].context_window_tokens = Some(ctx);
                         state.models[model_idx].context_needs_pick = false;
                         // Save to custom cache
-                        let cache_path = app.model_cache_path.parent().unwrap_or(&app.model_cache_path);
+                        let cache_path = app
+                            .model_cache_path
+                            .parent()
+                            .unwrap_or(&app.model_cache_path);
                         let custom_cache_path = cache_path.join("context-cache.json");
                         let mut custom_cache =
                             crate::model_data::CustomContextCache::load(&custom_cache_path);
@@ -1906,14 +1922,12 @@ pub(super) fn handle_context_picker_key(
             true
         }
         KeyCode::Char(c) => {
-            if cp.focus == crate::function::ContextPickerFocus::CustomInput
-                && c.is_ascii_digit()
-            {
+            if cp.focus == crate::function::ContextPickerFocus::CustomInput && c.is_ascii_digit() {
                 cp.custom_input.push(c);
             }
             true
         }
-_ => false,
+        _ => false,
     }
 }
 pub fn commit_model(

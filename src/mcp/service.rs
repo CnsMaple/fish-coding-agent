@@ -98,10 +98,7 @@ impl McpService {
             for (name, entry) in cfg {
                 if let Some(cfg) = entry.as_config() {
                     state.config.insert(name.clone(), cfg.clone());
-                    state.status.insert(
-                        name.clone(),
-McpStatus::Disabled,
-                    );
+                    state.status.insert(name.clone(), McpStatus::Disabled);
                 }
             }
         }
@@ -207,7 +204,11 @@ McpStatus::Disabled,
 
     /// Invoke a tool by its combined key. Returns the rendered
     /// text result. Errors include the tool's `is_error` flag.
-    pub async fn call_tool(&self, key: &str, arguments: serde_json::Value) -> Result<String, ServiceError> {
+    pub async fn call_tool(
+        &self,
+        key: &str,
+        arguments: serde_json::Value,
+    ) -> Result<String, ServiceError> {
         let spec = self
             .lookup_tool(key)
             .await
@@ -320,10 +321,10 @@ McpStatus::Disabled,
         }
         drop(clients);
         let mut state = self.inner.write().await;
-        state.tools.retain(|k, _| !k.starts_with(&format!("{name}_")));
         state
-            .status
-            .insert(name.to_string(), McpStatus::Disabled);
+            .tools
+            .retain(|k, _| !k.starts_with(&format!("{name}_")));
+        state.status.insert(name.to_string(), McpStatus::Disabled);
     }
 
     /// Cancel every active client and tear down the service.
@@ -421,20 +422,10 @@ struct ServiceState {
 /// into `AppMsg`s via a user-supplied [`McpEventSink`].
 #[derive(Debug, Clone)]
 pub enum McpEvent {
-    ToolsChanged {
-        server: String,
-    },
-    StatusChanged {
-        name: String,
-        status: McpStatus,
-    },
-    AuthRequired {
-        server: String,
-        error: String,
-    },
-    ClientClosed {
-        server: String,
-    },
+    ToolsChanged { server: String },
+    StatusChanged { name: String, status: McpStatus },
+    AuthRequired { server: String, error: String },
+    ClientClosed { server: String },
 }
 
 /// Callback trait used by [`McpService`] to publish lifecycle

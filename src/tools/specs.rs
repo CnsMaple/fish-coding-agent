@@ -127,7 +127,11 @@ pub(super) fn mcp_tool_iter() -> Vec<(String, String, serde_json::Value)> {
                 desc = desc.chars().take(MCP_DESC_LIMIT).collect::<String>() + "…";
             }
             if desc.is_empty() {
-                desc = format!("MCP tool `{name}` (server: {server})", name = t.name, server = t.server);
+                desc = format!(
+                    "MCP tool `{name}` (server: {server})",
+                    name = t.name,
+                    server = t.server
+                );
             } else {
                 desc = format!("[mcp:{server}] {desc}", server = t.server);
             }

@@ -34,9 +34,17 @@ pub(super) async fn write_file(args: &str, cwd: &Path) -> Result<String> {
             args.end_line,
         )?;
         tokio::fs::write(&path, &updated).await?;
-        Ok(write_diff_result(&args.path, &original, &updated, "Edit applied successfully."))
+        Ok(write_diff_result(
+            &args.path,
+            &original,
+            &updated,
+            "Edit applied successfully.",
+        ))
     } else {
-        let content = args.content.as_ref().ok_or_else(|| anyhow!("content is required when oldString is omitted"))?;
+        let content = args
+            .content
+            .as_ref()
+            .ok_or_else(|| anyhow!("content is required when oldString is omitted"))?;
         let original = match tokio::fs::read_to_string(&path).await {
             Ok(text) => text,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
@@ -46,7 +54,12 @@ pub(super) async fn write_file(args: &str, cwd: &Path) -> Result<String> {
             tokio::fs::create_dir_all(parent).await?;
         }
         tokio::fs::write(&path, content).await?;
-        Ok(write_diff_result(&args.path, &original, content, "Wrote file successfully."))
+        Ok(write_diff_result(
+            &args.path,
+            &original,
+            content,
+            "Wrote file successfully.",
+        ))
     }
 }
 
@@ -65,7 +78,12 @@ pub(super) async fn write_new_file(args: &str, cwd: &Path) -> Result<String> {
         tokio::fs::create_dir_all(parent).await?;
     }
     tokio::fs::write(&path, &args.content).await?;
-    Ok(write_diff_result(&args.path, &original, &args.content, "Wrote file successfully."))
+    Ok(write_diff_result(
+        &args.path,
+        &original,
+        &args.content,
+        "Wrote file successfully.",
+    ))
 }
 
 fn write_diff_result(path: &str, old: &str, new: &str, ai_output: &str) -> String {
@@ -109,7 +127,11 @@ pub(super) fn split_edit_diff(name: &str, value: &str) -> (String, String) {
 pub fn extract_metadata(envelope: &str) -> String {
     serde_json::from_str::<serde_json::Value>(envelope)
         .ok()
-        .and_then(|v| v.get("metadata").and_then(|m| m.as_str()).map(str::to_string))
+        .and_then(|v| {
+            v.get("metadata")
+                .and_then(|m| m.as_str())
+                .map(str::to_string)
+        })
         .unwrap_or_default()
 }
 
@@ -216,7 +238,9 @@ pub(super) async fn plan_review(args: &str) -> Result<String> {
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
         .or_else(|| {
-            value.get("content").map(|v| serde_json::to_string_pretty(v).unwrap_or_default())
+            value
+                .get("content")
+                .map(|v| serde_json::to_string_pretty(v).unwrap_or_default())
         })
         .unwrap_or_else(|| {
             value
@@ -313,9 +337,18 @@ pub(super) async fn todowrite(args: &str) -> Result<String> {
             "status": status,
         }));
     }
-    let pending = validated.iter().filter(|v| v["status"] == "pending").count();
-    let in_progress = validated.iter().filter(|v| v["status"] == "in_progress").count();
-    let completed = validated.iter().filter(|v| v["status"] == "completed").count();
+    let pending = validated
+        .iter()
+        .filter(|v| v["status"] == "pending")
+        .count();
+    let in_progress = validated
+        .iter()
+        .filter(|v| v["status"] == "in_progress")
+        .count();
+    let completed = validated
+        .iter()
+        .filter(|v| v["status"] == "completed")
+        .count();
     Ok(json!({
         "kind": "todowrite",
         "action": "replace",
@@ -370,7 +403,11 @@ fn collect_glob_matches(
             if name == ".git" || name == "target" || name == "node_modules" {
                 continue;
             }
-            let rel = p.strip_prefix(search_root).unwrap_or(&p).display().to_string();
+            let rel = p
+                .strip_prefix(search_root)
+                .unwrap_or(&p)
+                .display()
+                .to_string();
             let rel_path = Path::new(&rel);
             if p.is_dir() {
                 collect_glob_matches(search_root, &p, pattern, out, limit)?;
@@ -389,8 +426,6 @@ fn collect_glob_matches(
     Ok(())
 }
 
-
-
 pub(super) async fn skill_load(args: &str) -> Result<String> {
     let args: SkillArgs = serde_json::from_str(args)?;
     let name = args.name.trim();
@@ -403,8 +438,8 @@ pub(super) async fn skill_load(args: &str) -> Result<String> {
             crate::skill::list_names().join(", ")
         ));
     };
-    let skill_dir = crate::skill::skill_path(name)
-        .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+    let skill_dir =
+        crate::skill::skill_path(name).and_then(|p| p.parent().map(|d| d.to_path_buf()));
     let mut file_list = Vec::new();
     if let Some(ref dir) = skill_dir {
         if let Ok(entries) = std::fs::read_dir(dir) {

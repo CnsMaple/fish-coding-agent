@@ -266,7 +266,10 @@ pub(super) fn resolve_cursor_path(cwd: &std::path::Path, path: &str) -> PathBuf 
     }
 }
 
-pub(super) fn build_ls_tree(path: &std::path::Path, depth: usize) -> std::io::Result<LsDirectoryTreeNode> {
+pub(super) fn build_ls_tree(
+    path: &std::path::Path,
+    depth: usize,
+) -> std::io::Result<LsDirectoryTreeNode> {
     let abs_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     let mut node = LsDirectoryTreeNode {
         abs_path: abs_path.display().to_string(),

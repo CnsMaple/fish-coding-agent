@@ -8,7 +8,10 @@ mod tests {
     fn doom_loop_triggers_on_third_identical_call() {
         let mut h: Vec<(String, String)> = Vec::new();
         h.push(("read".to_string(), "{\"path\":\"a\"}".to_string()));
-        assert!(!is_doom_loop(&h, "read", "{\"path\":\"a\"}"), "2nd call is fine");
+        assert!(
+            !is_doom_loop(&h, "read", "{\"path\":\"a\"}"),
+            "2nd call is fine"
+        );
         h.push(("read".to_string(), "{\"path\":\"a\"}".to_string()));
         assert!(
             is_doom_loop(&h, "read", "{\"path\":\"a\"}"),

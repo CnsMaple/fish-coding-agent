@@ -161,15 +161,21 @@ pub(super) fn tool_result_title(call: &ToolCall) -> String {
         return "Ask".to_string();
     }
 
-if call.name == "read" {
+    if call.name == "read" {
         if let Ok(val) = serde_json::from_str::<serde_json::Value>(&call.arguments) {
+            let path = val.get("path").and_then(|v| v.as_str()).unwrap_or("");
             let start = val.get("start_line").and_then(|v| v.as_u64());
             let end = val.get("end_line").and_then(|v| v.as_u64());
-            match (start, end) {
-                (Some(s), Some(e)) => return format!("read [{}:{}]", s, e),
-                (Some(s), None) => return format!("read [{}:]", s),
-                (None, Some(e)) => return format!("read [{}:]", e),
-                (None, None) => {}
+            let range = match (start, end) {
+                (Some(s), Some(e)) => format!("{}:{}", s, e),
+                (Some(s), None) => format!("{}:", s),
+                (None, Some(e)) => format!("{}:", e),
+                (None, None) => String::new(),
+            };
+            if !range.is_empty() {
+                return format!("read [{} {}]", path, range);
+            } else {
+                return format!("read [{}]", path);
             }
         }
     }
@@ -348,4 +354,3 @@ pub(super) fn parse_text_tool_calls(content: &str) -> Vec<ToolCall> {
     }
     calls
 }
-

@@ -1,12 +1,12 @@
+use super::utils::{
+    section_after, section_between, strip_control_chars, truncate_str_to_width, value_after_prefix,
+    visible_width, wrap_line,
+};
 use crate::session::{ImageAttachment, Message, SkillRef, ThinkingSegment, ToolResultBlock};
 use crate::theme::active_colors;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
-use super::utils::{
-    section_after, section_between, strip_control_chars, truncate_str_to_width,
-    value_after_prefix, visible_width, wrap_line,
-};
 
 pub(super) fn ensure_gap_before_block(msg_lines: &mut Vec<Line<'static>>) {
     if msg_lines.is_empty() {
@@ -297,6 +297,12 @@ pub(super) fn build_tool_block_rows(
         } else {
             return vec![];
         }
+    } else if tool.name == "read" {
+        if let Some(r) = build_read_rows(tool, visible, preview_lines, width, bg) {
+            r
+        } else {
+            return vec![];
+        }
     } else if tool.name == "ask" {
         vec![]
     } else if tool.name == "plan" || tool.name == "sub_agent" {
@@ -350,33 +356,41 @@ pub(super) fn build_tool_block_rows(
 /// Render a streaming tool block — the LLM is still generating the
 /// tool-call arguments. Extract partial fields from
 /// `streaming_input` (raw accumulated JSON) and show a live preview.
-fn build_streaming_tool_rows(tool: &ToolResultBlock, width: usize, bg: Color) -> Vec<Line<'static>> {
+fn build_streaming_tool_rows(
+    tool: &ToolResultBlock,
+    width: usize,
+    bg: Color,
+) -> Vec<Line<'static>> {
     let width = width.max(4);
     let args = &tool.streaming_input;
     match tool.name.as_str() {
         "shell_command" | "command" => {
-            let cmd = crate::commands::extract_partial_json_field(args, "command")
-                .unwrap_or_default();
+            let cmd =
+                crate::commands::extract_partial_json_field(args, "command").unwrap_or_default();
             build_streaming_shell_rows(&cmd, width, bg)
         }
         "python_command" => {
-            let code = crate::commands::extract_partial_json_field(args, "code")
-                .unwrap_or_default();
+            let code =
+                crate::commands::extract_partial_json_field(args, "code").unwrap_or_default();
             build_streaming_python_rows(&code, width, bg)
         }
         "edit" => {
-            let file_path = crate::commands::extract_partial_json_field(args, "file_path")
-                .unwrap_or_default();
-            let old_str = crate::commands::extract_partial_json_field(args, "old_string")
-                .unwrap_or_default();
-            let new_str = crate::commands::extract_partial_json_field(args, "new_string")
-                .unwrap_or_default();
+            let file_path =
+                crate::commands::extract_partial_json_field(args, "file_path").unwrap_or_default();
+            let old_str =
+                crate::commands::extract_partial_json_field(args, "old_string").unwrap_or_default();
+            let new_str =
+                crate::commands::extract_partial_json_field(args, "new_string").unwrap_or_default();
             build_streaming_edit_rows(&file_path, &old_str, &new_str, width, bg)
         }
         _ => {
             // For other tools, show a generic "generating..." block
             let mut rows = vec![border_line(width, bg)];
-            rows.extend(box_row_lines(&format!("generating {} tool call…", tool.name), width, bg));
+            rows.extend(box_row_lines(
+                &format!("generating {} tool call…", tool.name),
+                width,
+                bg,
+            ));
             rows.push(border_line(width, bg));
             rows
         }
@@ -414,8 +428,14 @@ fn build_streaming_shell_rows(cmd: &str, width: usize, bg: Color) -> Vec<Line<'s
         };
 
         let mut parts: Vec<Span<'static>> = Vec::new();
-        parts.push(Span::styled(base_str[..content_start].to_string(), dim_bg_style(bg)));
-        parts.push(Span::styled(base_str[content_start..cmd_start].to_string(), bg_style(bg)));
+        parts.push(Span::styled(
+            base_str[..content_start].to_string(),
+            dim_bg_style(bg),
+        ));
+        parts.push(Span::styled(
+            base_str[content_start..cmd_start].to_string(),
+            bg_style(bg),
+        ));
         for span in &hl_spans {
             parts.push(span.clone());
         }
@@ -462,7 +482,10 @@ fn build_streaming_python_rows(code: &str, width: usize, bg: Color) -> Vec<Line<
             let content_start = 2;
             let content_end = content_start + w.len();
             let mut parts: Vec<Span<'static>> = Vec::new();
-            parts.push(Span::styled(base_str[..content_start].to_string(), dim_bg_style(bg)));
+            parts.push(Span::styled(
+                base_str[..content_start].to_string(),
+                dim_bg_style(bg),
+            ));
             for span in &hl {
                 parts.push(span.clone());
             }
@@ -523,7 +546,10 @@ fn build_streaming_edit_rows(
             let sign_end = content_start + prefix_str.len();
             let w_end = sign_end + w.len();
             let mut parts: Vec<Span<'static>> = Vec::new();
-            parts.push(Span::styled(base_str[..content_start].to_string(), dim_bg_style(bg)));
+            parts.push(Span::styled(
+                base_str[..content_start].to_string(),
+                dim_bg_style(bg),
+            ));
             parts.push(Span::styled(
                 base_str[content_start..sign_end].to_string(),
                 Style::default().fg(sign_color).bg(bg),
@@ -561,7 +587,10 @@ fn build_streaming_edit_rows(
             let sign_end = content_start + prefix_str.len();
             let w_end = sign_end + w.len();
             let mut parts: Vec<Span<'static>> = Vec::new();
-            parts.push(Span::styled(base_str[..content_start].to_string(), dim_bg_style(bg)));
+            parts.push(Span::styled(
+                base_str[..content_start].to_string(),
+                dim_bg_style(bg),
+            ));
             parts.push(Span::styled(
                 base_str[content_start..sign_end].to_string(),
                 Style::default().fg(sign_color).bg(bg),
@@ -682,6 +711,137 @@ pub(super) fn build_shell_command_rows(
         rows.push(border_line_with_right_label(width, footer, bg));
     }
     rows
+}
+
+/// Render a `read` tool result with syntax highlighting based on the
+/// file extension extracted from the title (`read [path ...]`).
+#[allow(clippy::too_many_arguments)]
+fn build_read_rows(
+    tool: &ToolResultBlock,
+    visible: bool,
+    preview_lines: usize,
+    width: usize,
+    bg: Color,
+) -> Option<Vec<Line<'static>>> {
+    let width = width.max(4);
+    let inner_w = width.saturating_sub(4).max(1);
+    let (output, footer) = tool_display_content(tool);
+    let output = output.trim_end();
+
+    // Extract file path from the title to determine the syntax language.
+    // Title format: "read [path]" or "read [path start:end]".
+    let lang = extract_read_lang(&tool.title);
+
+    let mut rows = Vec::new();
+    rows.push(border_with_label_line(width, &tool.title, bg));
+
+    let body_lines: Vec<&str> = output.lines().collect();
+    let (skip, show) = if visible || body_lines.len() <= preview_lines {
+        (0, body_lines.len())
+    } else {
+        (body_lines.len() - preview_lines, preview_lines)
+    };
+
+    if body_lines.is_empty() {
+        rows.extend(box_row_lines("[no output]", width, bg));
+    } else if let Some(lang) = lang {
+        // Syntax-highlighted rendering.
+        let visible_refs: Vec<&str> = body_lines.iter().skip(skip).take(show).copied().collect();
+        let all_hl = crate::session::markdown::highlight_lines(&visible_refs, lang);
+        for (i, line) in visible_refs.iter().enumerate() {
+            let hl = spans_with_bg(&all_hl[i], bg);
+            let hl_total: usize = hl.iter().map(|s| s.content.len()).sum();
+            if hl_total == line.len() {
+                for wrapped in wrap_line(line, inner_w) {
+                    if wrapped == *line {
+                        rows.push(box_row_line_spans(hl.clone(), width, bg));
+                    } else {
+                        rows.extend(box_row_lines(&wrapped, width, bg));
+                    }
+                }
+            } else {
+                rows.extend(box_row_lines(line, width, bg));
+            }
+        }
+    } else {
+        // No language detected — plain rendering.
+        for line in body_lines.iter().skip(skip).take(show) {
+            rows.extend(box_row_lines(line, width, bg));
+        }
+    }
+
+    if !visible && skip > 0 {
+        rows.push(click_hint_line(skip, width, bg));
+    }
+    if !footer.is_empty() {
+        rows.extend(box_row_lines(&footer, width, bg));
+    }
+
+    rows.push(border_line(width, bg));
+    Some(rows)
+}
+
+/// Extract the file extension from a `read [path ...]` title and map
+/// it to a syntax language name understood by `highlight_lines`.
+fn extract_read_lang(title: &str) -> Option<&'static str> {
+    // Title format: "read [path]" or "read [path start:end]".
+    // Extract the path between "[" and the first space or "]".
+    let open = title.find('[')?;
+    let rest = &title[open + 1..];
+    let path_end = rest
+        .find(|c: char| c.is_whitespace() || c == ']')
+        .unwrap_or(rest.len());
+    let path = rest[..path_end].trim();
+    if path.is_empty() {
+        return None;
+    }
+    let ext = path.rsplit('.').next()?;
+    if ext.is_empty() || ext.len() > 10 || ext == path {
+        return None;
+    }
+    // `find_syntax_cached` matches by extension, but we return the
+    // extension itself and let it resolve the syntax.
+    // Use a static cache to avoid repeated lookups for the same ext.
+    Some(static_ext_lang(ext))
+}
+
+/// Map common file extensions to syntax language names.
+/// Returns a static str so the caller can use it as a cache key.
+fn static_ext_lang(ext: &str) -> &'static str {
+    // A small lookup for the most common extensions; everything else
+    // falls through to the ext itself which `find_syntax_cached` will
+    // try to match by extension (e.g. "rs", "py", "go", "ts").
+    // The `Box::leak` here is intentional: these are short-lived per
+    // call and the alternative (returning owned String) would force
+    // `highlight_lines` to take `&str` vs `&'static str`.
+    // But we avoid leaks by using a static table instead.
+    match ext.to_ascii_lowercase().as_str() {
+        "rs" => "rust",
+        "py" => "python",
+        "js" => "javascript",
+        "ts" => "typescript",
+        "sh" | "bash" => "sh",
+        "go" => "go",
+        "rb" => "ruby",
+        "cpp" | "cc" | "cxx" => "cpp",
+        "hpp" | "h" | "hh" => "cpp",
+        "cs" => "c#",
+        "java" => "java",
+        "kt" => "kotlin",
+        "swift" => "swift",
+        "php" => "php",
+        "lua" => "lua",
+        "sql" => "sql",
+        "html" | "htm" => "html",
+        "css" => "css",
+        "json" => "json",
+        "yaml" | "yml" => "yaml",
+        "toml" => "toml",
+        "xml" => "xml",
+        "md" => "markdown",
+        "c" => "c",
+        _ => "",
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -863,8 +1023,13 @@ fn box_row_line_two(left: &str, right: &str, width: usize, bg: Color) -> Line<'s
     let left = truncate_str_to_width(&left, left_max);
     let left_w = visible_width(&left);
     let pad = max_content.saturating_sub(left_w).saturating_sub(right_w);
-    let line_str = format!("| {}{}{} |", left, " ".repeat(pad), right);
-    Line::from(Span::styled(line_str, bg_style(bg)))
+    Line::from(vec![
+        Span::styled("| ", dim_bg_style(bg)),
+        Span::styled(left, bg_style(bg)),
+        Span::styled(" ".repeat(pad), bg_style(bg)),
+        Span::styled(right, bg_style(bg)),
+        Span::styled(" |", dim_bg_style(bg)),
+    ])
 }
 
 // ── Line-based helper functions for styled block rendering ──
@@ -897,8 +1062,12 @@ pub(super) fn box_row_line(text: &str, width: usize, bg: Color) -> Line<'static>
     let text = strip_control_chars(text);
     let text = truncate_str_to_width(&text, max_content);
     let pad = max_content.saturating_sub(visible_width(&text));
-    let line_str = format!("| {}{} |", text, " ".repeat(pad));
-    Line::from(Span::styled(line_str, bg_style(bg)))
+    Line::from(vec![
+        Span::styled("| ", dim_bg_style(bg)),
+        Span::styled(text, bg_style(bg)),
+        Span::styled(" ".repeat(pad), bg_style(bg)),
+        Span::styled(" |", dim_bg_style(bg)),
+    ])
 }
 
 fn box_row_line_dim(text: &str, width: usize) -> Line<'static> {
@@ -930,9 +1099,8 @@ fn box_row_line_spans(spans: Vec<Span<'static>>, width: usize, bg: Color) -> Lin
                 let truncated = truncate_str_to_width(cleaned_span.content.as_ref(), remaining);
                 if !truncated.is_empty() {
                     result_spans.push(Span::styled(truncated, span.style));
-                    content_width += UnicodeWidthStr::width(
-                        result_spans.last().unwrap().content.as_ref(),
-                    );
+                    content_width +=
+                        UnicodeWidthStr::width(result_spans.last().unwrap().content.as_ref());
                 }
             }
             break;
@@ -1169,8 +1337,6 @@ fn build_python_command_rows(
     Some(rows)
 }
 
-
-
 fn tool_display_content(tool: &ToolResultBlock) -> (String, String) {
     if tool.name == "shell_command" || tool.name == "command" {
         return command_display_content(&tool.content);
@@ -1284,7 +1450,12 @@ fn build_edit_diff_rows(
     Some(rows)
 }
 
-pub(super) fn diff_box_row_line(diff: &DiffLine, width: usize, bg: Color, lang: &str) -> Line<'static> {
+pub(super) fn diff_box_row_line(
+    diff: &DiffLine,
+    width: usize,
+    bg: Color,
+    lang: &str,
+) -> Line<'static> {
     let (line_bg, sign) = match diff.kind {
         DiffLineKind::Removed => (Color::Rgb(239, 154, 154), "-"),
         DiffLineKind::Added => (Color::Rgb(165, 214, 167), "+"),
@@ -1480,5 +1651,9 @@ fn format_wall_timeout_label(wall: &str, timeout: &str) -> String {
     let wall_secs = wall.parse::<f64>().map(|f| f.round() as u64).unwrap_or(0);
     let wall_dur = std::time::Duration::from_secs(wall_secs);
     let timeout_dur = std::time::Duration::from_secs(timeout.parse::<u64>().unwrap_or(300));
-    format!("[{}|{}]", format_duration(wall_dur), format_duration(timeout_dur))
+    format!(
+        "[{}|{}]",
+        format_duration(wall_dur),
+        format_duration(timeout_dur)
+    )
 }

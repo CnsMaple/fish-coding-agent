@@ -1,11 +1,11 @@
-mod specs;
 mod exec;
 mod file;
+mod specs;
 mod web;
 
-pub use specs::*;
 pub use exec::*;
 pub use file::*;
+pub use specs::*;
 pub use web::*;
 
 use std::path::{Path, PathBuf};
@@ -131,7 +131,11 @@ pub(super) fn resolve_workspace_path(cwd: &Path, path: &str) -> Result<PathBuf> 
     Ok(cwd.join(requested))
 }
 
-pub(super) fn select_lines(text: &str, start_line: Option<usize>, end_line: Option<usize>) -> Result<String> {
+pub(super) fn select_lines(
+    text: &str,
+    start_line: Option<usize>,
+    end_line: Option<usize>,
+) -> Result<String> {
     match (start_line, end_line) {
         (None, None) => Ok(text.to_string()),
         (Some(start), Some(end)) => {
@@ -181,7 +185,11 @@ pub(super) fn replace_string(
             normalized_old = normalized_old.replace('\r', "\n");
             normalized_new = normalized_new.replace('\r', "\n");
         }
-        (normalized_text.as_str(), normalized_old.as_str(), normalized_new.as_str())
+        (
+            normalized_text.as_str(),
+            normalized_old.as_str(),
+            normalized_new.as_str(),
+        )
     } else {
         (text, old_string, new_string)
     };
@@ -199,7 +207,10 @@ pub(super) fn replace_string(
                 lines.len()
             ));
         }
-        let offset = lines[..start - 1].iter().map(|l| l.len() + 1).sum::<usize>();
+        let offset = lines[..start - 1]
+            .iter()
+            .map(|l| l.len() + 1)
+            .sum::<usize>();
         let range_text = lines[start - 1..end].join("\n");
         (range_text, offset)
     } else {
@@ -244,11 +255,7 @@ pub(super) fn replace_string(
 
     if matches.is_empty() {
         if let (Some(s), Some(e)) = (start_line, end_line) {
-            return Err(anyhow!(
-                "oldString not found in lines [{}, {}]",
-                s,
-                e
-            ));
+            return Err(anyhow!("oldString not found in lines [{}, {}]", s, e));
         }
         return Err(anyhow!("oldString not found in file"));
     }
@@ -403,13 +410,19 @@ fn original_match_len(original: &str, offset: usize, old_ref: &str) -> usize {
             if is_last && !old_ref.ends_with('\n') {
                 // Last line, no trailing newline in old_ref: only replace
                 // the content characters, not trailing whitespace.
-                total += old_lines[i].trim_end().len().min(orig_line.trim_end().len());
+                total += old_lines[i]
+                    .trim_end()
+                    .len()
+                    .min(orig_line.trim_end().len());
             } else {
                 // Include the original line's trailing whitespace.
                 total += orig_line.len();
             }
         } else {
-            total += old_lines[i].trim_end().len().min(orig_line.trim_end().len());
+            total += old_lines[i]
+                .trim_end()
+                .len()
+                .min(orig_line.trim_end().len());
         }
 
         // Add newline between lines.
@@ -443,7 +456,6 @@ pub fn is_valid_tool(name: &str) -> bool {
             | "sub_agent"
     )
 }
-
 
 pub(super) fn truncate(mut text: String, limit: usize) -> String {
     if text.len() <= limit {

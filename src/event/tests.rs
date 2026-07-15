@@ -1,10 +1,10 @@
 use super::*;
-use std::collections::VecDeque;
 use crate::config::{make_id, Config, ProviderConfig, ProviderId, ProviderKind, ProviderMode};
 use crate::function::notifications::Notifications;
 use crate::function::SidebarTab;
 use crate::function::{FunctionPanel, ModelPickerState};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use std::collections::VecDeque;
 
 fn make_app() -> App {
     let mut cfg = Config::default();
@@ -130,10 +130,8 @@ fn paste_line_count_ignores_trailing_newline() {
 #[test]
 fn settings_save_form_creates_new_entry() {
     let mut app = make_app();
-    let form = crate::function::ConfigFormState::new_for_create(
-        ProviderKind::Openai,
-        ProviderMode::Key,
-    );
+    let form =
+        crate::function::ConfigFormState::new_for_create(ProviderKind::Openai, ProviderMode::Key);
     // form starts with empty base_url and key.
     settings_save_form(&mut app, form.clone());
     // make_app already has openai:key, so dedup creates openai:key-2.
@@ -225,10 +223,8 @@ fn config_form_enter_on_text_field_does_not_advance_focus() {
     use crate::function::SettingsLevel;
 
     let mut app = make_app();
-    let form = crate::function::ConfigFormState::new_for_create(
-        ProviderKind::Openai,
-        ProviderMode::Key,
-    );
+    let form =
+        crate::function::ConfigFormState::new_for_create(ProviderKind::Openai, ProviderMode::Key);
     // Caller has typed a base url, now sits on BaseUrl, presses Enter.
     let mut form = form;
     form.base_url = "https://api.openai.com/v1".to_string();
@@ -574,7 +570,10 @@ fn commit_model_picks_model_from_picker_list() {
         .any(|t| matches!(t, SidebarTab::ModelPicker(_))));
     let entry = app.config.entry(&id).unwrap();
     assert_eq!(entry.model, model_to_pick);
-    let _ = AppMsg::ChatError { seq: 0, error: String::new() }; // suppress unused
+    let _ = AppMsg::ChatError {
+        seq: 0,
+        error: String::new(),
+    }; // suppress unused
 }
 
 #[test]
@@ -595,10 +594,7 @@ fn commit_model_with_empty_function_panel_does_not_panic() {
 
     // After commit, the Notifications tab is created by save_config.
     assert_eq!(app.function.tabs.len(), 1);
-    assert!(matches!(
-        app.function.tabs[0],
-        SidebarTab::Notifications
-    ));
+    assert!(matches!(app.function.tabs[0], SidebarTab::Notifications));
     assert_eq!(app.function.active, 0);
 }
 
@@ -1107,8 +1103,7 @@ fn sync_completion_shows_skill_names_top_level() {
         .iter()
         .map(|c| c.trim_start_matches("/skill:").to_string())
         .collect();
-    let commit_skills: Vec<&String> =
-        names.iter().filter(|n| n.starts_with("commit")).collect();
+    let commit_skills: Vec<&String> = names.iter().filter(|n| n.starts_with("commit")).collect();
     assert!(
         !commit_skills.is_empty(),
         "expected at least one skill starting with 'commit' under ~/.agents/skills/, got: {names:?}",
@@ -1418,10 +1413,8 @@ fn settings_form_up_down_moves_focus() {
     use crate::function::{ConfigField, SettingsLevel};
 
     let mut app = make_app();
-    let form = crate::function::ConfigFormState::new_for_create(
-        ProviderKind::Openai,
-        ProviderMode::Key,
-    );
+    let form =
+        crate::function::ConfigFormState::new_for_create(ProviderKind::Openai, ProviderMode::Key);
     let mut state = crate::function::SettingsState::new(&app.config);
     state.level = SettingsLevel::ConfigForm(form);
     state.cursor = 0;
@@ -1992,7 +1985,10 @@ fn extract_selection_text_compacts_cjk_render_spacing() {
     use crate::ui::compact_render_spacing;
 
     let rendered = "使 用 command分 别 执 行 3 次 ls， 需 要 整 个 tree";
-    assert_eq!(compact_render_spacing(rendered), "使用 command分别执行 3次 ls，需要整个 tree");
+    assert_eq!(
+        compact_render_spacing(rendered),
+        "使用 command分别执行 3次 ls，需要整个 tree"
+    );
 }
 
 #[test]
@@ -2000,7 +1996,10 @@ fn extract_selection_text_compacts_short_ascii_before_cjk() {
     use crate::ui::compact_render_spacing;
 
     let rendered = "给 我 一 个 md的 代 码 块 示 例 和 表 格 示 例";
-    assert_eq!(compact_render_spacing(rendered), "给我一个md的代码块示例和表格示例");
+    assert_eq!(
+        compact_render_spacing(rendered),
+        "给我一个md的代码块示例和表格示例"
+    );
 }
 
 #[test]
@@ -2189,7 +2188,12 @@ async fn ask_esc_dismisses_and_emits_user_turn() {
         .iter()
         .any(|t| matches!(t, SidebarTab::Ask(_))));
 
-    let ask_idx = app.function.tabs.iter().position(|t| matches!(t, SidebarTab::Ask(_))).unwrap();
+    let ask_idx = app
+        .function
+        .tabs
+        .iter()
+        .position(|t| matches!(t, SidebarTab::Ask(_)))
+        .unwrap();
     let mut state = match app.function.tabs.remove(ask_idx) {
         SidebarTab::Ask(s) => s,
         _ => unreachable!(),
@@ -2230,7 +2234,12 @@ async fn ask_enter_marks_answered_and_advances() {
 
     let before = app.session.messages.len();
 
-    let ask_idx = app.function.tabs.iter().position(|t| matches!(t, SidebarTab::Ask(_))).unwrap();
+    let ask_idx = app
+        .function
+        .tabs
+        .iter()
+        .position(|t| matches!(t, SidebarTab::Ask(_)))
+        .unwrap();
     let mut state = match app.function.tabs.remove(ask_idx) {
         SidebarTab::Ask(s) => s,
         _ => unreachable!(),
@@ -2275,7 +2284,12 @@ async fn ask_enter_last_question_enters_reviewing() {
 
     // open_ask lands on the latest question; pull active back to
     // the first question so the test exercises the advance path.
-    let ask_idx = app.function.tabs.iter().position(|t| matches!(t, SidebarTab::Ask(_))).unwrap();
+    let ask_idx = app
+        .function
+        .tabs
+        .iter()
+        .position(|t| matches!(t, SidebarTab::Ask(_)))
+        .unwrap();
     match &mut app.function.tabs[ask_idx] {
         SidebarTab::Ask(s) => s.active = 0,
         _ => unreachable!(),
@@ -2310,7 +2324,12 @@ async fn ask_reviewing_enter_sends_summary() {
     let mut app = make_app_with_provider();
     app.open_ask("Q1?".to_string(), vec!["a".into()]);
     app.open_ask("Q2?".to_string(), vec!["x".into(), "y".into()]);
-    let ask_idx = app.function.tabs.iter().position(|t| matches!(t, SidebarTab::Ask(_))).unwrap();
+    let ask_idx = app
+        .function
+        .tabs
+        .iter()
+        .position(|t| matches!(t, SidebarTab::Ask(_)))
+        .unwrap();
     match &mut app.function.tabs[ask_idx] {
         SidebarTab::Ask(s) => s.active = 0,
         _ => unreachable!(),
@@ -2361,7 +2380,12 @@ async fn ask_reviewing_up_returns_to_asking() {
     let mut app = make_app_with_provider();
     app.open_ask("Q1?".to_string(), vec!["a".into()]);
     app.open_ask("Q2?".to_string(), vec!["x".into()]);
-    let ask_idx = app.function.tabs.iter().position(|t| matches!(t, SidebarTab::Ask(_))).unwrap();
+    let ask_idx = app
+        .function
+        .tabs
+        .iter()
+        .position(|t| matches!(t, SidebarTab::Ask(_)))
+        .unwrap();
     match &mut app.function.tabs[ask_idx] {
         SidebarTab::Ask(s) => s.active = 0,
         _ => unreachable!(),
@@ -2392,7 +2416,12 @@ async fn ask_esc_dismiss_summary_includes_answered_and_skipped() {
     let mut app = make_app_with_provider();
     app.open_ask("Q1?".to_string(), vec!["a".into()]);
     app.open_ask("Q2?".to_string(), vec!["x".into()]);
-    let ask_idx = app.function.tabs.iter().position(|t| matches!(t, SidebarTab::Ask(_))).unwrap();
+    let ask_idx = app
+        .function
+        .tabs
+        .iter()
+        .position(|t| matches!(t, SidebarTab::Ask(_)))
+        .unwrap();
     match &mut app.function.tabs[ask_idx] {
         SidebarTab::Ask(s) => s.active = 0,
         _ => unreachable!(),
@@ -2431,7 +2460,12 @@ async fn ask_esc_dismiss_summary_includes_answered_and_skipped() {
 async fn ask_up_down_moves_per_question_cursor() {
     let mut app = make_app_with_provider();
     app.open_ask("Q1?".to_string(), vec!["a".into(), "b".into()]);
-    let ask_idx = app.function.tabs.iter().position(|t| matches!(t, SidebarTab::Ask(_))).unwrap();
+    let ask_idx = app
+        .function
+        .tabs
+        .iter()
+        .position(|t| matches!(t, SidebarTab::Ask(_)))
+        .unwrap();
     let mut state = match app.function.tabs.remove(ask_idx) {
         SidebarTab::Ask(s) => s,
         _ => unreachable!(),
@@ -2481,7 +2515,12 @@ async fn ask_left_right_cycles_questions() {
     let mut app = make_app_with_provider();
     app.open_ask("Q1?".to_string(), vec!["a".into()]);
     app.open_ask("Q2?".to_string(), vec!["x".into()]);
-    let ask_idx = app.function.tabs.iter().position(|t| matches!(t, SidebarTab::Ask(_))).unwrap();
+    let ask_idx = app
+        .function
+        .tabs
+        .iter()
+        .position(|t| matches!(t, SidebarTab::Ask(_)))
+        .unwrap();
     let mut state = match app.function.tabs.remove(ask_idx) {
         SidebarTab::Ask(s) => s,
         _ => unreachable!(),
@@ -2530,7 +2569,12 @@ async fn ask_enter_on_option_records_and_advances_to_reviewing() {
     let mut app = make_app_with_provider();
     app.open_ask("Q1?".to_string(), vec!["a".into()]);
     app.open_ask("Q2?".to_string(), vec!["x".into()]);
-    let ask_idx = app.function.tabs.iter().position(|t| matches!(t, SidebarTab::Ask(_))).unwrap();
+    let ask_idx = app
+        .function
+        .tabs
+        .iter()
+        .position(|t| matches!(t, SidebarTab::Ask(_)))
+        .unwrap();
     match &mut app.function.tabs[ask_idx] {
         SidebarTab::Ask(s) => s.active = 0,
         _ => unreachable!(),
@@ -2620,20 +2664,12 @@ fn submit_chat_sets_pending_without_spawning() {
     // The user message and the empty streaming assistant must
     // already be in the session — the render that follows
     // submit_input will paint both of them.
-    let roles: Vec<_> = app
-        .session
-        .messages
-        .iter()
-        .map(|m| m.role)
-        .collect();
+    let roles: Vec<_> = app.session.messages.iter().map(|m| m.role).collect();
     assert!(
         roles.len() >= 2,
         "expected user + assistant to be pushed: got {roles:?}"
     );
-    assert!(matches!(
-        roles[roles.len() - 2],
-        crate::session::Role::User
-    ));
+    assert!(matches!(roles[roles.len() - 2], crate::session::Role::User));
     assert!(matches!(
         roles[roles.len() - 1],
         crate::session::Role::Assistant
@@ -2683,9 +2719,9 @@ fn esc_during_pending_silently_drops_request() {
     // arm directly keeps the test focused.
     let k = esc_key();
     let _ = k; // appease unused
-    // We can't easily drive `handle_key` without a renderer, so
-    // we replicate the Esc-on-pending branch inline. The branch
-    // is short and the test is the contract for it.
+               // We can't easily drive `handle_key` without a renderer, so
+               // we replicate the Esc-on-pending branch inline. The branch
+               // is short and the test is the contract for it.
     if app.pending_request.is_some() {
         app.pending_request = None;
         app.inflight = None;
@@ -2768,7 +2804,8 @@ fn continue_no_arg_sends_meaningful_cue_and_keeps_streaming_slot() {
     // Pretend the prior turn produced a partial assistant
     // response. `/continue` is meant to follow an Esc/abort.
     use crate::session::{Message, Role};
-    app.session.push(Message::new(Role::Assistant, "half".to_string()));
+    app.session
+        .push(Message::new(Role::Assistant, "half".to_string()));
     let seq_before = app.current_request_seq;
 
     app.input.buffer = "/continue".to_string();
@@ -2833,7 +2870,8 @@ fn continue_with_arg_appends_to_cue() {
     // assistant placeholder as the streaming target.
     let mut app = chat_app();
     use crate::session::{Message, Role};
-    app.session.push(Message::new(Role::Assistant, "half".to_string()));
+    app.session
+        .push(Message::new(Role::Assistant, "half".to_string()));
 
     app.input.buffer = "/continue foo".to_string();
     app.input.cursor = app.input.buffer.len();
@@ -2881,10 +2919,7 @@ fn stale_chat_done_is_dropped() {
         started_at: std::time::Instant::now(),
     });
 
-    handle_msg(
-        AppMsg::ChatDone { seq: old_seq },
-        &mut app,
-    );
+    handle_msg(AppMsg::ChatDone { seq: old_seq }, &mut app);
 
     // The stale event must be ignored — current inflight stays.
     assert!(
@@ -2989,7 +3024,10 @@ fn scroll_animator_gates_events_within_one_frame() {
     let target_after_start = a.target;
     // Without a `step` call yet, the gating window is still
     // active and the target must not change on its own.
-    assert!(a.animating, "gating window must be active right after begin_gesture");
+    assert!(
+        a.animating,
+        "gating window must be active right after begin_gesture"
+    );
     assert_eq!(a.target, target_after_start);
     // One tick clears the gating window.
     let (_, settled) = advance_animator(&mut a, 1, 16);
@@ -3020,7 +3058,10 @@ fn scroll_animator_does_not_overshoot_negative() {
     a.begin_gesture(-5.0, 3, Instant::now());
     assert_eq!(a.target, 0.0, "target must clamp at 0");
     assert_eq!(a.current, 0.0, "current must clamp at 0");
-    assert!(!a.animating, "negative gesture at floor is a snap, no gating window");
+    assert!(
+        !a.animating,
+        "negative gesture at floor is a snap, no gating window"
+    );
 }
 
 #[test]
@@ -3037,5 +3078,8 @@ fn scroll_animator_accumulates_consecutive_gestures() {
         a.target, 8.0,
         "second gesture must accumulate onto the first"
     );
-    assert_eq!(a.current, 8.0, "current must reflect the accumulated target");
+    assert_eq!(
+        a.current, 8.0,
+        "current must reflect the accumulated target"
+    );
 }

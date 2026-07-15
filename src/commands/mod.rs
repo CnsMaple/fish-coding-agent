@@ -1,15 +1,15 @@
 mod chat;
-mod utils;
 #[cfg(test)]
 mod tests;
+mod utils;
 
-pub use chat::{send_chat, send_message, run_chat_stream, run_compaction_stream};
-pub use utils::extract_partial_json_field;
 use crate::app::App;
 use crate::config::parse_id;
 use crate::function::notifications::ToastLevel;
 use crate::function::SidebarTab;
 use crate::session::{Message, Role};
+pub use chat::{run_chat_stream, run_compaction_stream, send_chat, send_message};
+pub use utils::extract_partial_json_field;
 
 pub(crate) const MSG_REQUEST_IN_FLIGHT: &str = "request in flight, please wait";
 pub(crate) const MSG_MCP_NOT_INIT: &str = "mcp service not initialised";
@@ -228,10 +228,7 @@ fn open_mcp(app: &mut App, arg: &str) {
             } else {
                 "configured".to_string()
             };
-            app.notify(
-                ToastLevel::Ok,
-                format!("mcp '{name}' is {status_label}"),
-            );
+            app.notify(ToastLevel::Ok, format!("mcp '{name}' is {status_label}"));
         }
         None => {
             let known = crate::mcp::builtin_names().join(", ");
@@ -266,7 +263,9 @@ fn open_mcp_auth(app: &mut App, arg: &str) {
             return;
         }
     };
-    let _ = tx.send(crate::event::AppMsg::McpStartAuth { server: name.to_string() });
+    let _ = tx.send(crate::event::AppMsg::McpStartAuth {
+        server: name.to_string(),
+    });
     app.notify(
         ToastLevel::Info,
         format!("starting OAuth for `{name}`... (see next notification)"),
@@ -442,22 +441,25 @@ pub fn compact_now(app: &mut App, _arg: &str) {
     if adjusted > start {
         app.notify(
             ToastLevel::Info,
-            format!("trimming {} oldest messages to fit compaction limit", adjusted - start),
+            format!(
+                "trimming {} oldest messages to fit compaction limit",
+                adjusted - start
+            ),
         );
         start = adjusted;
     }
     if start >= end {
-        app.notify(ToastLevel::Fail, "compaction prompt too large — try a shorter session");
+        app.notify(
+            ToastLevel::Fail,
+            "compaction prompt too large — try a shorter session",
+        );
         return;
     }
     let history: Vec<crate::session::Message> = app.session.messages[start..end].to_vec();
     let key = match app.config.effective_api_key(&active_id) {
         Some(k) if !k.is_empty() => k,
         _ => {
-            app.notify(
-                ToastLevel::Fail,
-                format!("missing api key for {active_id}"),
-            );
+            app.notify(ToastLevel::Fail, format!("missing api key for {active_id}"));
             return;
         }
     };
@@ -695,7 +697,10 @@ pub(super) fn build_agents_content(app: &App) -> String {
         }
         if let Ok(body) = std::fs::read_to_string(path) {
             if !body.trim().is_empty() {
-                out.push_str(&format!("\n\n## User instructions from {}\n\n{}\n", path, body));
+                out.push_str(&format!(
+                    "\n\n## User instructions from {}\n\n{}\n",
+                    path, body
+                ));
             }
         }
     }

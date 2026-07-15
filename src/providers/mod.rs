@@ -66,9 +66,7 @@ impl ChatEvent {
         match self {
             ChatEvent::Delta(s) => crate::event::AppMsg::ChatDelta(s),
             ChatEvent::ThinkingDelta(s) => crate::event::AppMsg::ChatThinkingDelta(s),
-            ChatEvent::ContentBlockStart(kind) => {
-                crate::event::AppMsg::ChatContentBlockStart(kind)
-            }
+            ChatEvent::ContentBlockStart(kind) => crate::event::AppMsg::ChatContentBlockStart(kind),
             ChatEvent::ToolArgDelta {
                 index,
                 call_id,
@@ -188,9 +186,21 @@ pub struct ListModelsArgs<'a> {
 pub async fn list_models(args: ListModelsArgs<'_>) -> Result<Vec<ModelInfo>> {
     let p = make_list_provider(args.kind);
     let mut models = p
-        .list_models(args.client, args.base_url, args.api_key, args.access_key, args.secret_key)
+        .list_models(
+            args.client,
+            args.base_url,
+            args.api_key,
+            args.access_key,
+            args.secret_key,
+        )
         .await?;
-    fill_context_windows(args.client, args.provider_name, &mut models, args.cache_path).await;
+    fill_context_windows(
+        args.client,
+        args.provider_name,
+        &mut models,
+        args.cache_path,
+    )
+    .await;
     Ok(models)
 }
 
@@ -265,9 +275,9 @@ fn make_chat_provider(kind: ProviderKind) -> Box<dyn Provider> {
 /// unlike `make_chat_provider` which maps it to `OpenAiProvider`.
 fn make_list_provider(kind: ProviderKind) -> Box<dyn Provider> {
     match kind {
-        ProviderKind::Openai
-        | ProviderKind::DeepSeek
-        | ProviderKind::MiniMax => Box::new(openai::OpenAiProvider),
+        ProviderKind::Openai | ProviderKind::DeepSeek | ProviderKind::MiniMax => {
+            Box::new(openai::OpenAiProvider)
+        }
         ProviderKind::Anthropic => Box::new(anthropic::AnthropicProvider),
         ProviderKind::Cursor => Box::new(cursor::CursorProvider),
         ProviderKind::Volcengine => Box::new(volcengine::VolcengineProvider),

@@ -7,7 +7,7 @@ use crate::ui::tab_widget::TabWidget;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap, Widget};
+use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Widget, Wrap};
 
 /// Keep the cursor inside the visible window while scrolling.
 pub fn ensure_cursor_visible(cursor: usize, scroll: &mut usize, visible_rows: usize) {
@@ -149,20 +149,60 @@ fn render_notifications(area: Rect, buf: &mut Buffer, app: &mut App) {
             .wrap(Wrap { trim: false })
             .render(list_area, buf);
     } else {
-        let filtered_len = filtered.len();
-        if filtered_len > 0 {
-            ensure_cursor_visible(app.notifications.cursor, &mut app.notifications.scroll, list_area.height as usize);
-        }
+        let viewport_h = list_area.height as usize;
         let width = list_area.width.saturating_sub(2).max(8) as usize;
-        let start = app.notifications.scroll.min(filtered_len);
+        let cursor = app.notifications.cursor.min(filtered.len() - 1);
+
+        // Compute display heights for all filtered items, and the
+        // display-line prefix sums so we can reason about which items
+        // are visible given a display-line scroll offset.
+        let mut heights: Vec<u16> = Vec::with_capacity(filtered.len());
+        for idx in &filtered {
+            let t = &app.notifications.items[*idx];
+            let prefix = "> ";
+            let head = format!("{}[{}] {}  ", prefix, t.level.tag(), t.format_time());
+            let text_width = width.saturating_sub(display_width(&head)).max(8);
+            let wrapped = wrap_plain_text(&t.text, text_width);
+            heights.push(wrapped.len().max(1) as u16);
+        }
+        // Prefix sums: item i starts at display line tops[i].
+        let mut tops: Vec<usize> = Vec::with_capacity(filtered.len());
+        let mut acc = 0usize;
+        for &h in &heights {
+            tops.push(acc);
+            acc += h as usize;
+        }
+        let total_display_lines = acc;
+
+        // Adjust scroll (display-line offset) so the cursor item is visible.
+        let cursor_top = tops[cursor];
+        let cursor_bot = cursor_top + heights[cursor] as usize;
+        let max_scroll = total_display_lines.saturating_sub(viewport_h);
+        let scroll = &mut app.notifications.scroll;
+        if *scroll > max_scroll {
+            *scroll = max_scroll;
+        }
+        if cursor_top < *scroll {
+            *scroll = cursor_top;
+        } else if cursor_bot > *scroll + viewport_h {
+            *scroll = cursor_bot.saturating_sub(viewport_h);
+        }
+        let scroll = (*scroll).min(max_scroll);
+
+        // Render visible items: those whose display lines intersect
+        // [scroll, scroll + viewport_h).
         let mut visible = Vec::new();
-        let mut row_count = 0u16;
-        for (row, idx) in filtered.iter().enumerate().skip(start) {
-            if row_count >= list_area.height {
+        for (row, idx) in filtered.iter().enumerate() {
+            let item_top = tops[row];
+            let item_bot = item_top + heights[row] as usize;
+            if item_bot <= scroll {
+                continue;
+            }
+            if item_top >= scroll + viewport_h {
                 break;
             }
             let t = &app.notifications.items[*idx];
-            let selected = row == app.notifications.cursor;
+            let selected = row == cursor;
             let level_style = match t.level {
                 crate::function::notifications::ToastLevel::Ok => Theme::status_ok(),
                 crate::function::notifications::ToastLevel::Info => Theme::status_info(),
@@ -196,11 +236,6 @@ fn render_notifications(area: Rect, buf: &mut Buffer, app: &mut App) {
                     Span::raw(cont),
                 ]));
             }
-            let item_height = lines.len() as u16;
-            if row_count + item_height > list_area.height && row_count > 0 {
-                break;
-            }
-            row_count = row_count.saturating_add(item_height.max(1));
             visible.push(ListItem::new(lines));
         }
         List::new(visible).render(list_area, buf);
@@ -272,7 +307,12 @@ pub fn render_new_provider_picker(
             .wrap(Wrap { trim: false })
             .render(list_area, buf);
     } else {
-        let range = visible_window(s.cursor, &mut s.scroll, list_area.height as usize, s.filtered.len());
+        let range = visible_window(
+            s.cursor,
+            &mut s.scroll,
+            list_area.height as usize,
+            s.filtered.len(),
+        );
         for row in range {
             let idx = s.filtered[row];
             let id = &s.entries[idx];

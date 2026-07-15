@@ -30,9 +30,7 @@ impl InlineStyle {
             InlineStyle::Bold => Theme::bold(),
             InlineStyle::Italic => Theme::dim().add_modifier(Modifier::ITALIC),
             InlineStyle::Underlined => Theme::underlined(),
-            InlineStyle::Strikethrough => {
-                Theme::dim().add_modifier(Modifier::CROSSED_OUT)
-            }
+            InlineStyle::Strikethrough => Theme::dim().add_modifier(Modifier::CROSSED_OUT),
         }
     }
 }
@@ -81,15 +79,25 @@ pub fn render_with_width(text: &str, width: usize) -> Vec<Line<'static>> {
     let has_invisible = text.contains(|c: char| {
         matches!(
             c,
-            '\u{200B}' | '\u{200C}' | '\u{200D}' | '\u{FEFF}'
-                | '\u{00AD}' | '\u{2060}' | '\u{2061}' | '\u{2062}'
-                | '\u{2063}' | '\u{2064}'
+            '\u{200B}'
+                | '\u{200C}'
+                | '\u{200D}'
+                | '\u{FEFF}'
+                | '\u{00AD}'
+                | '\u{2060}'
+                | '\u{2061}'
+                | '\u{2062}'
+                | '\u{2063}'
+                | '\u{2064}'
         )
     });
-    if !has_cr && !has_invisible && !text.lines().any(|l| {
-        let t = l.trim();
-        t.starts_with('|') && t.ends_with('|')
-    }) {
+    if !has_cr
+        && !has_invisible
+        && !text.lines().any(|l| {
+            let t = l.trim();
+            t.starts_with('|') && t.ends_with('|')
+        })
+    {
         return MdRenderer::new(width).render(text);
     }
 
@@ -536,7 +544,10 @@ fn highlight_code_lines(lines: &[&str], lang: Option<&str>) -> Vec<TableCell> {
 /// Returns styled spans with syntax coloring.
 /// Falls back to a plain span if the language is unknown.
 pub(crate) fn highlight_line(line: &str, lang: &str) -> Vec<Span<'static>> {
-    highlight_lines(&[line], lang).into_iter().next().unwrap_or_default()
+    highlight_lines(&[line], lang)
+        .into_iter()
+        .next()
+        .unwrap_or_default()
 }
 
 /// Highlight multiple lines of code using a single highlighter
@@ -613,8 +624,9 @@ fn find_syntax<'a>(ps: &'a SyntaxSet, lang: &str) -> Option<&'a syntect::parsing
 /// repeated `highlight_line` calls (e.g. per line in a diff block)
 /// only pay the lookup cost once.
 fn find_syntax_cached(lang: &str) -> Option<&'static syntect::parsing::SyntaxReference> {
-    static CACHE: std::sync::OnceLock<Mutex<HashMap<String, Option<&'static syntect::parsing::SyntaxReference>>>> =
-        std::sync::OnceLock::new();
+    static CACHE: std::sync::OnceLock<
+        Mutex<HashMap<String, Option<&'static syntect::parsing::SyntaxReference>>>,
+    > = std::sync::OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     {
         let cache = cache.lock().unwrap();
@@ -623,7 +635,9 @@ fn find_syntax_cached(lang: &str) -> Option<&'static syntect::parsing::SyntaxRef
         }
     }
     let ps = syntax_set();
-    let result = ps.find_syntax_by_token(lang).or_else(|| find_syntax(ps, lang));
+    let result = ps
+        .find_syntax_by_token(lang)
+        .or_else(|| find_syntax(ps, lang));
     {
         let mut cache = cache.lock().unwrap();
         cache.insert(lang.to_string(), result);
@@ -632,12 +646,11 @@ fn find_syntax_cached(lang: &str) -> Option<&'static syntect::parsing::SyntaxRef
 }
 
 fn syntect_style(style: SyntectStyle) -> Style {
-    let mut out = Style::default()
-        .fg(Color::Rgb(
-            style.foreground.r,
-            style.foreground.g,
-            style.foreground.b,
-        ));
+    let mut out = Style::default().fg(Color::Rgb(
+        style.foreground.r,
+        style.foreground.g,
+        style.foreground.b,
+    ));
     if style.font_style.contains(FontStyle::BOLD) {
         out = out.add_modifier(Modifier::BOLD);
     }
@@ -1004,11 +1017,7 @@ let x = 1;
         let mut code_line_widths = Vec::new();
         let mut in_code = false;
         for line in &lines {
-            let joined: String = line
-                .spans
-                .iter()
-                .map(|s| s.content.as_ref())
-                .collect();
+            let joined: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
             let is_border = joined.starts_with('+') && joined.contains('-');
             if is_border {
                 if !in_code {
@@ -1048,11 +1057,7 @@ let x = 1;
         let mut code_line_widths = Vec::new();
         let mut in_code = false;
         for line in &lines {
-            let joined: String = line
-                .spans
-                .iter()
-                .map(|s| s.content.as_ref())
-                .collect();
+            let joined: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
             let is_border = joined.starts_with('+') && joined.contains('-');
             if is_border {
                 if !in_code {
@@ -1093,11 +1098,7 @@ let x = 1;
         let mut code_line_widths = Vec::new();
         let mut in_code = false;
         for line in &lines {
-            let joined: String = line
-                .spans
-                .iter()
-                .map(|s| s.content.as_ref())
-                .collect();
+            let joined: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
             let is_border = joined.starts_with('+') && joined.contains('-');
             if is_border {
                 if !in_code {
@@ -1114,10 +1115,7 @@ let x = 1;
             }
         }
 
-        assert!(
-            !code_line_widths.is_empty(),
-            "no code block lines found"
-        );
+        assert!(!code_line_widths.is_empty(), "no code block lines found");
 
         let first = code_line_widths[0].1;
         for (i, (label, w)) in code_line_widths.iter().enumerate() {

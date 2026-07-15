@@ -16,9 +16,7 @@ fn webfetch_accept_header(format: &str) -> &'static str {
 }
 
 fn is_image_mime(mime: &str) -> bool {
-    mime.starts_with("image/")
-        && mime != "image/svg+xml"
-        && mime != "image/vnd.fastbidsheet"
+    mime.starts_with("image/") && mime != "image/svg+xml" && mime != "image/vnd.fastbidsheet"
 }
 
 fn is_textual_mime(mime: &str) -> bool {
@@ -101,7 +99,12 @@ pub(super) async fn webfetch(args: &str) -> Result<String> {
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_string();
-    let mime = content_type.split(';').next().unwrap_or("").trim().to_lowercase();
+    let mime = content_type
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_lowercase();
 
     if is_image_mime(&mime) {
         return Err(anyhow!("Unsupported fetched image content type: {mime}"));
@@ -206,40 +209,43 @@ pub(super) async fn websearch(args: &str) -> Result<String> {
         .timeout(Duration::from_secs(25))
         .build()?;
 
-    let (url, tool_name, arguments, extra_headers): (&str, &str, serde_json::Value, Vec<(&str, String)>) =
-        match provider {
-            "parallel" => {
-                let mut h: Vec<(&str, String)> =
-                    vec![("User-Agent", "opencode".to_string())];
-                if let Ok(k) = std::env::var("PARALLEL_API_KEY") {
-                    h.push(("Authorization", format!("Bearer {k}")));
-                }
-                (
-                    PARALLEL_URL,
-                    "web_search",
-                    serde_json::json!({
-                        "objective": query,
-                        "search_queries": [query],
-                    }),
-                    h,
-                )
+    let (url, tool_name, arguments, extra_headers): (
+        &str,
+        &str,
+        serde_json::Value,
+        Vec<(&str, String)>,
+    ) = match provider {
+        "parallel" => {
+            let mut h: Vec<(&str, String)> = vec![("User-Agent", "opencode".to_string())];
+            if let Ok(k) = std::env::var("PARALLEL_API_KEY") {
+                h.push(("Authorization", format!("Bearer {k}")));
             }
-            _ => {
-                let h: Vec<(&str, String)> = vec![];
-                (
-                    EXA_URL,
-                    "web_search_exa",
-                    serde_json::json!({
-                        "query": query,
-                        "type": search_type,
-                        "numResults": num_results,
-                        "livecrawl": livecrawl,
-                        "contextMaxCharacters": context_max_chars,
-                    }),
-                    h,
-                )
-            }
-        };
+            (
+                PARALLEL_URL,
+                "web_search",
+                serde_json::json!({
+                    "objective": query,
+                    "search_queries": [query],
+                }),
+                h,
+            )
+        }
+        _ => {
+            let h: Vec<(&str, String)> = vec![];
+            (
+                EXA_URL,
+                "web_search_exa",
+                serde_json::json!({
+                    "query": query,
+                    "type": search_type,
+                    "numResults": num_results,
+                    "livecrawl": livecrawl,
+                    "contextMaxCharacters": context_max_chars,
+                }),
+                h,
+            )
+        }
+    };
 
     let body = serde_json::json!({
         "jsonrpc": "2.0",
