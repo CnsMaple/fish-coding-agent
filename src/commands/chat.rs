@@ -322,7 +322,7 @@ pub async fn run_chat_stream(
         }
     };
     let mut stream_retries = 0u32;
-    let retry_delays = [3u64, 10, 60];
+    let retry_delays = [10u64, 30, 60];
     // Rolling record of recent tool calls (name, arguments) used by
     // the doom-loop detector: when the same tool is invoked 3 times
     // in a row with identical arguments, the loop is broken and the
@@ -443,7 +443,7 @@ pub async fn run_chat_stream(
             if let Some(e) = err {
                 let is_rate_limit = e.contains("status 429") || e.contains("insufficient_quota");
                 stream_retries += 1;
-                if stream_retries >= 3 {
+                if stream_retries > 3 {
                     // Show the full error chain in the final failure so
                     // the user sees both the surface message and its
                     // underlying cause (e.g. reqwest transport errors).
@@ -456,11 +456,9 @@ pub async fn run_chat_stream(
                 // in the notification list. Use {e:#} to show the full
                 // error chain including the underlying cause.
                 let warn = if is_rate_limit {
-                    format!(
-                        "rate limit hit, stream retry {stream_retries}/3 (wait {delay}s): {e:#}"
-                    )
+                    format!("rate limit hit, stream retry {stream_retries}/3 (wait {delay}s): {e}")
                 } else {
-                    format!("stream retry {stream_retries}/3 ({delay}s): {e:#}")
+                    format!("stream retry {stream_retries}/3 ({delay}s): {e}")
                 };
                 send_msg(crate::event::AppMsg::ChatWarn(warn));
                 // If an assistant message was pushed to req (we got tool calls),
@@ -840,7 +838,7 @@ pub(super) async fn run_sub_agent(
                 let _ = tx.send(crate::event::AppMsg::ToolDelta {
                     call_id: String::new(),
                     content: format!(
-                        "[sub_agent:{}] {label} {stream_retries}/3 ({delay}s): {e:#}\n",
+                        "[sub_agent:{}] {label} {stream_retries}/3 ({delay}s): {e}\n",
                         sub.as_str()
                     ),
                 });
@@ -871,7 +869,7 @@ pub(super) async fn run_sub_agent(
                         let _ = tx.send(crate::event::AppMsg::ToolDelta {
                             call_id: String::new(),
                             content: format!(
-                                "[sub_agent:{}] {label} {stream_retries}/3 ({delay}s): {e:#}\n",
+                                "[sub_agent:{}] {label} {stream_retries}/3 ({delay}s): {e}\n",
                                 sub.as_str()
                             ),
                         });
@@ -896,7 +894,7 @@ pub(super) async fn run_sub_agent(
                         let _ = tx.send(crate::event::AppMsg::ToolDelta {
                             call_id: String::new(),
                             content: format!(
-                                "[sub_agent:{}] {label} {stream_retries}/3 ({delay}s): {e:#}\n",
+                                "[sub_agent:{}] {label} {stream_retries}/3 ({delay}s): {e}\n",
                                 sub.as_str()
                             ),
                         });

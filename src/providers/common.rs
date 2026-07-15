@@ -80,13 +80,21 @@ pub(crate) fn response_meta(resp: &reqwest::Response) -> (reqwest::StatusCode, S
 }
 
 /// Format a non-success chat response into a `ProviderError`. Consumes
-/// the response body text.
+/// the response body text. The body is included verbatim so the caller
+/// sees the full upstream error payload without truncation.
 pub(crate) fn chat_response_error(
     status: reqwest::StatusCode,
     ct: &str,
     body: String,
 ) -> ProviderError {
     ProviderError::Other(format!("status {status} ct={ct} body={body}"))
+}
+
+/// Format a rate-limited response into a `ProviderError`. The full body
+/// is preserved in the error message so the user can see the upstream
+/// quota details.
+pub(crate) fn rate_limited_error(body: String) -> ProviderError {
+    ProviderError::RateLimited(body)
 }
 
 /// Check whether a chat response error looks like a rate/quota limit
