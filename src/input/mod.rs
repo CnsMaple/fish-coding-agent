@@ -16,6 +16,9 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 /// Each snapshot clones the full buffer, so the cap bounds memory usage.
 const UNDO_LIMIT: usize = 100;
 
+/// Snapshot of input state used for undo/redo.
+pub type InputSnapshot = (String, usize, Option<(usize, usize)>);
+
 #[derive(Debug)]
 pub struct InputState {
     pub buffer: String,
@@ -27,13 +30,12 @@ pub struct InputState {
     /// Active text selection within the buffer (byte indices, end exclusive).
     /// None means no selection; the tuple is always stored as (start, end) with start <= end.
     pub selection: Option<(usize, usize)>,
-    /// Undo history: each entry is a (buffer, cursor, selection) snapshot
-    /// captured *before* a mutating operation. Ctrl+Z pops the top entry
-    /// and restores it.
-    pub undo_stack: VecDeque<(String, usize, Option<(usize, usize)>)>,
+    /// Undo history: each entry is a snapshot captured *before* a mutating
+    /// operation. Ctrl+Z pops the top entry and restores it.
+    pub undo_stack: VecDeque<InputSnapshot>,
     /// Redo history: entries that were undone and can be re-applied with
     /// Ctrl+Y. Cleared whenever a new mutation occurs.
-    pub redo_stack: VecDeque<(String, usize, Option<(usize, usize)>)>,
+    pub redo_stack: VecDeque<InputSnapshot>,
 }
 
 impl InputState {

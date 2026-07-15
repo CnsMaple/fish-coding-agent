@@ -2024,8 +2024,8 @@ fn handle_mouse(m: MouseEvent, app: &mut App) {
         if let Some((msg_idx, tool_idx)) = app.pending_tool_toggle.take() {
             // If the user has an selection, do not toggle — they are
             // selecting text inside the block instead of clicking it.
-            if app.tui_selection.is_some() {
-                app.tui_selection.as_mut().map(|s| s.active = false);
+            if let Some(s) = app.tui_selection.as_mut() {
+                s.active = false;
                 return;
             }
             if tool_idx == usize::MAX {

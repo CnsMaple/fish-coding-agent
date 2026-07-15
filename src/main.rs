@@ -6,7 +6,7 @@ use crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
 };
 use crossterm::execute;
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode, Clear, ClearType};
+use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use fish_coding_agent::app::App;
 use fish_coding_agent::{config, event};
 use ratatui::backend::CrosstermBackend;
@@ -154,7 +154,12 @@ impl TerminalGuard {
     fn enter() -> Result<Self> {
         execute!(std::io::stdout(), SavePosition)?;
         enable_raw_mode()?;
-        execute!(std::io::stdout(), EnableMouseCapture, EnableBracketedPaste)?;
+        execute!(
+            std::io::stdout(),
+            crossterm::terminal::EnterAlternateScreen,
+            EnableMouseCapture,
+            EnableBracketedPaste
+        )?;
         Ok(Self)
     }
 }
@@ -162,12 +167,11 @@ impl Drop for TerminalGuard {
     fn drop(&mut self) {
         let _ = execute!(
             std::io::stdout(),
-            RestorePosition,
-            Clear(ClearType::FromCursorDown),
-            crossterm::cursor::MoveTo(0, 9999),
             DisableMouseCapture,
             DisableBracketedPaste,
             crossterm::cursor::Show,
+            crossterm::terminal::LeaveAlternateScreen,
+            RestorePosition,
         );
         let _ = disable_raw_mode();
     }

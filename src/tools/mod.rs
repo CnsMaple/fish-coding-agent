@@ -367,7 +367,7 @@ fn fuzzy_to_orig_offset(original: &str, fuzzy: &str, fuzzy_offset: usize) -> usi
     let mut fuzzy_pos = 0usize;
 
     for (i, fuzzy_line) in fuzzy_lines.iter().enumerate() {
-        let orig_line = orig_lines.get(i).map(|s| *s).unwrap_or("");
+        let orig_line = orig_lines.get(i).copied().unwrap_or("");
 
         // If the fuzzy offset falls within this line's range, the offset
         // within the line is the same in both strings (trailing whitespace
