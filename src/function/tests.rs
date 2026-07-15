@@ -84,6 +84,7 @@ fn make_test_app() -> App {
         pending_post_compaction_prompt: None,
         agents_visible: false,
         agents_cursor: 0,
+        load_duration: std::time::Duration::ZERO,
     }
 }
 

@@ -26,6 +26,8 @@ async fn main() -> Result<()> {
         .with_writer(std::io::stderr)
         .init();
 
+    let load_start = std::time::Instant::now();
+
     let config_path = config::paths::config_file_path()?;
     let cfg = match config::Config::load_or_init(&config_path) {
         Ok(c) => c,
@@ -56,7 +58,8 @@ async fn main() -> Result<()> {
         // and the service never initialises.
         fish_coding_agent::mcp::McpService::init_from_config(&mcp_cfg, cwd_for_mcp).await;
     }
-    let mut app = App::new(cfg, config_path, cwd);
+    let load_duration = load_start.elapsed();
+    let mut app = App::new(cfg, config_path, cwd, load_duration);
 
     let res = event::run(&mut terminal, &mut app).await;
 

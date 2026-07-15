@@ -197,6 +197,8 @@ pub struct App {
     pub agents_visible: bool,
     /// Cursor position in the agents checkbox list.
     pub agents_cursor: usize,
+    /// Time spent from process start to ready-to-render, shown in the splash area.
+    pub load_duration: std::time::Duration,
 }
 
 /// Mouse-driven text selection spanning the full TUI. Coordinates are
@@ -251,7 +253,12 @@ pub struct InflightHandle {
 }
 
 impl App {
-    pub fn new(config: Config, config_path: PathBuf, cwd: PathBuf) -> Self {
+    pub fn new(
+        config: Config,
+        config_path: PathBuf,
+        cwd: PathBuf,
+        load_duration: std::time::Duration,
+    ) -> Self {
         let mut status = crate::input::status::StatusBar::new();
         status.set_provider_name(&config.active_name());
         status.set_model(&config.active_model_display());
@@ -333,6 +340,7 @@ impl App {
             pending_post_compaction_prompt: None,
             agents_visible: true,
             agents_cursor: 0,
+            load_duration,
         };
         // Sync the auto-compact status from the loaded config so
         // the very first render of the input bar shows the right

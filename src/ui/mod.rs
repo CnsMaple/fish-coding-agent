@@ -627,7 +627,7 @@ pub(crate) fn screen_y_to_doc_line(y: u16, area: &Rect, scroll: u32, total: u32)
     let inner_h = area.height as u32;
     let max_scroll = total.saturating_sub(inner_h);
     let offset_from_top = max_scroll.saturating_sub(scroll);
-    (offset_from_top + (y - area.top()) as u32) as usize
+    (offset_from_top + (y.saturating_sub(area.top())) as u32) as usize
 }
 
 /// Convert a global document line index to a screen Y, if visible.
@@ -893,6 +893,20 @@ pub fn render_agents_area(
             buf,
         );
     }
+
+    // Render load duration below the logo
+    let load_text = format!("⚡ {}ms", app.load_duration.as_millis());
+    let load_line = Line::from(Span::styled(load_text, Theme::dim()));
+    let p_launch = Paragraph::new(load_line);
+    p_launch.render(
+        ratatui::layout::Rect {
+            x: area.x + 1,
+            y: area.y + 1 + logo_lines.len() as u16,
+            width: area.width.saturating_sub(area.x + 1),
+            height: 1,
+        },
+        buf,
+    );
 
     // Render line separator
     let sep_y = area.y + 4;
