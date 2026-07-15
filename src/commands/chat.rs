@@ -569,7 +569,8 @@ pub async fn run_chat_stream(
                     tx.clone(),
                 )
                 .await;
-                let ai_result = crate::tools::strip_metadata(&result);
+                let ai_result =
+                    crate::tools::strip_metadata(&crate::tools::truncate_tool_output(&result));
                 let (display, failed) = parse_tool_result_display(&result);
                 let metadata = crate::tools::extract_metadata(&result);
                 send(crate::event::AppMsg::ChatToolResult {
@@ -650,7 +651,8 @@ pub async fn run_chat_stream(
                 )
                 .await
             };
-            let ai_result = crate::tools::strip_metadata(&result);
+            let ai_result =
+                crate::tools::strip_metadata(&crate::tools::truncate_tool_output(&result));
             req.messages.push(ChatMessage {
                 role: "tool".to_string(),
                 content: ai_result,

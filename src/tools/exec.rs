@@ -150,11 +150,10 @@ pub async fn execute_tool_streaming_with_agent(
         _ => execute_tool_with_agent(agent, name, args, cwd).await,
     };
 
-    // Unified truncation layer: keep the AI-facing `result` within
-    // MAX_LINES / MAX_BYTES so a huge read/command output cannot
-    // blow up the context. UI-only `metadata` (edit diffs) is left
-    // intact for the TUI renderer.
-    truncate_tool_output(&result)
+    // Intentionally NOT truncated here. Streaming results are shown
+    // in full in the TUI; callers truncate the AI-facing payload
+    // themselves before adding it to the LLM context.
+    result
 }
 
 /// Heuristic: a tool name is treated as an MCP tool when the live
