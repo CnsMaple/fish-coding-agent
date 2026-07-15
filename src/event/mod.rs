@@ -2030,9 +2030,54 @@ fn handle_mouse(m: MouseEvent, app: &mut App) {
             }
             if tool_idx == usize::MAX {
                 // Thinking toggle.
+                let width = app.session_area.map(|a| a.width as usize).unwrap_or(120);
+                let preview_lines = app.session.tool_preview_lines;
+                let old_delta = if let Some(msg) = app.session.messages.get(msg_idx) {
+                    let segments = crate::session::render::get_thinking_segments(msg);
+                    let old_vis = msg.thinking_visible;
+                    let mut old_h: u32 = 0;
+                    let mut new_h: u32 = 0;
+                    for seg in &segments {
+                        old_h += crate::session::render::thinking_block_line_count(
+                            &seg.content,
+                            old_vis,
+                            preview_lines,
+                            width,
+                        ) as u32;
+                        new_h += crate::session::render::thinking_block_line_count(
+                            &seg.content,
+                            !old_vis,
+                            preview_lines,
+                            width,
+                        ) as u32;
+                    }
+                    if new_h != old_h {
+                        Some(new_h as i64 - old_h as i64)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
                 if let Some(msg) = app.session.messages.get_mut(msg_idx) {
                     msg.thinking_visible = !msg.thinking_visible;
+                    msg.bump_version();
                 }
+                app.session.invalidate_layout_cache();
+                if let Some(delta) = old_delta {
+                    if delta > 0 {
+                        app.session.scroll = app.session.scroll.saturating_add(delta as u32);
+                    } else if delta < 0 {
+                        app.session.scroll = app.session.scroll.saturating_sub((-delta) as u32);
+                    }
+                    // Sync last_rendered_total to the new total so
+                    // pin_scroll_for_total on the next frame does NOT
+                    // re-absorb the same delta (double compensation).
+                    let w = app.session_area.map(|a| a.width).unwrap_or(120);
+                    let new_total = app.session.count_all_lines_with_width(w as usize);
+                    app.session.last_rendered_total = Some((w, new_total));
+                }
+                app.set_scroll_anchored(app.session.scroll);
             } else {
                 // Tool block toggle.
                 let width = app.session_area.map(|a| a.width as usize).unwrap_or(120);

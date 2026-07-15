@@ -993,6 +993,7 @@ impl Session {
                 }
             }
         }
+        self.invalidate_layout_cache();
         self.streaming_id = None;
     }
 
