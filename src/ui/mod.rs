@@ -394,11 +394,22 @@ pub fn render(f: &mut Frame, app: &mut App) {
             }
         }
         app.force_full_repaint = false;
-        // Skip set_cursor_position so terminal.draw() hides the cursor
-        // internally (None branch). position_ime_cursor will show it
-        // at the correct spot afterwards, avoiding the "cursor flies
-        // to last-flushed cell then jumps back" flicker.
-    } else if let Some((cx, cy)) = app.function_panel_cursor.or(app.input_cursor_screen) {
+    }
+
+    // Position the hardware cursor for the focused input. While a
+    // request is in flight we deliberately skip ratatui's cursor
+    // positioning so the terminal cursor stays hidden during the draw
+    // (ratatui hides it when no position is set). We then place the
+    // cursor at the input area after draw() returns, which prevents
+    // it from flickering onto the cwd/spinner line while the spinner
+    // and timer update.
+    let cursor = match app.focus_target {
+        crate::function::FocusTarget::FunctionPanel => app.function_panel_cursor,
+        crate::function::FocusTarget::Input if app.inflight.is_none() => app.input_cursor_screen,
+        crate::function::FocusTarget::Input => None,
+        crate::function::FocusTarget::AgentsCheckbox => None,
+    };
+    if let Some((cx, cy)) = cursor {
         f.set_cursor_position((cx, cy));
     }
 }

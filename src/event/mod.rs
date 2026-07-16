@@ -44,14 +44,11 @@ fn position_ime_cursor(app: &App) {
         return;
     };
 
-    static LAST_CURSOR_POS: std::sync::Mutex<Option<(u16, u16)>> = std::sync::Mutex::new(None);
-    if let Ok(mut last) = LAST_CURSOR_POS.lock() {
-        if *last == Some((cx, cy)) {
-            return;
-        }
-        *last = Some((cx, cy));
-    }
-
+    // Always re-position after draw(). During streaming ratatui does
+    // not set the cursor position, so the terminal cursor is hidden
+    // while the frame is being flushed. We then show it here at the
+    // correct input location, preventing the spinner/timer updates
+    // from ever hosting the visible cursor.
     force_show_cursor_at(cx, cy);
 }
 
@@ -290,29 +287,14 @@ where
         // are rendered immediately instead of being coalesced into one
         // frame after all tools finish.
         if needs_draw && (app.inflight.is_some() || last_draw.elapsed() >= DRAW_INTERVAL) {
-            let was_full = app.force_full_repaint;
-            if app.force_full_repaint {
-                let _ = terminal.hide_cursor();
-            }
             if let Err(e) = terminal.draw(|f| crate::ui::render(f, app)) {
                 let _ = e;
             }
-            if was_full {
-                // render() already cleared force_full_repaint and skipped
-                // set_cursor_position, so terminal.draw() hid the cursor.
-                // Bypass the LAST_CURSOR_POS de-dup to unconditionally
-                // show it at the correct spot.
-                let cur = match app.focus_target {
-                    crate::function::FocusTarget::FunctionPanel => app.function_panel_cursor,
-                    crate::function::FocusTarget::Input => app.input_cursor_screen,
-                    crate::function::FocusTarget::AgentsCheckbox => None,
-                };
-                if let Some((cx, cy)) = cur {
-                    force_show_cursor_at(cx, cy);
-                }
-            } else {
-                position_ime_cursor(app);
-            }
+            // render() now always calls set_cursor_position, so the
+            // hardware cursor is already placed correctly. Keep the
+            // explicit IME positioning only to keep the TSF text store
+            // in sync across Windows terminals.
+            position_ime_cursor(app);
             last_draw = Instant::now();
             needs_draw = false;
 
