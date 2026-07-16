@@ -510,6 +510,23 @@ impl Session {
         self.invalidate_layout_cache();
     }
 
+    /// Invalidate ALL render caches so the next frame re-renders every
+    /// message from scratch. Call this when a global visual setting
+    /// changes (e.g. theme color swap) that affects already-rendered
+    /// output stored in the line cache and message-lines LRU.
+    pub fn invalidate_all_render_caches(&mut self) {
+        if let Ok(mut c) = self.line_cache.lock() {
+            c.clear();
+        }
+        if let Ok(mut lru) = self.message_lines_cache.lock() {
+            lru.clear();
+        }
+        for m in &mut self.messages {
+            m.invalidate_caches();
+        }
+        self.invalidate_layout_cache();
+    }
+
     /// Drop any per-message render-LRU entries whose index is
     /// `>= from_idx`. Call this immediately after truncating or
     /// removing messages so a later `push` cannot reuse a stale

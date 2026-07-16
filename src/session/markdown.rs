@@ -561,7 +561,7 @@ pub(crate) fn highlight_lines(lines: &[&str], lang: &str) -> Vec<Vec<Span<'stati
             .map(|line| vec![Span::raw(line.to_string())])
             .collect();
     };
-    let Some(theme) = theme_set().themes.get("InspiredGitHub") else {
+    let Some(theme) = theme_set().themes.get(syntect_theme_name()) else {
         return lines
             .iter()
             .map(|line| vec![Span::raw(line.to_string())])
@@ -599,6 +599,16 @@ fn syntax_set() -> &'static SyntaxSet {
 fn theme_set() -> &'static ThemeSet {
     static THEME_SET: std::sync::OnceLock<ThemeSet> = std::sync::OnceLock::new();
     THEME_SET.get_or_init(ThemeSet::load_defaults)
+}
+
+/// Pick the syntect highlight theme matching the active TUI theme variant.
+/// Dark variants use a dark syntax theme; light/default use InspiredGitHub.
+fn syntect_theme_name() -> &'static str {
+    use crate::theme::{active_variant, ThemeVariant};
+    match active_variant() {
+        ThemeVariant::DarkEucalyptus => "base16-ocean.dark",
+        _ => "InspiredGitHub",
+    }
 }
 
 fn find_syntax<'a>(ps: &'a SyntaxSet, lang: &str) -> Option<&'a syntect::parsing::SyntaxReference> {

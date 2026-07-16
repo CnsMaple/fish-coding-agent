@@ -1285,10 +1285,8 @@ pub(super) fn handle_settings_enter(app: &mut App, state: &mut crate::function::
                 app.save_config();
                 crate::theme::init_theme(*variant);
                 app.notify(ToastLevel::Ok, format!("theme: {}", variant.as_str()));
-                // Clear line cache so blocks re-render with new colors
-                if let Ok(mut c) = app.session.line_cache.lock() {
-                    c.clear();
-                }
+                // Clear all render caches so blocks re-render with new colors
+                app.session.invalidate_all_render_caches();
             }
             SettingsLevel::TopLevel
         }

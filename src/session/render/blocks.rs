@@ -535,7 +535,10 @@ fn build_streaming_edit_rows(
     for line in old_str.lines() {
         let cleaned = strip_control_chars(line);
         let sign = "-";
-        let (line_bg, sign_color) = (Color::Rgb(239, 154, 154), Color::Rgb(239, 154, 154));
+        let (line_bg, sign_color) = (
+            crate::theme::Theme::diff_removed_bg_color(),
+            crate::theme::Theme::diff_removed_fg(),
+        );
         let content = format!("{sign} {cleaned}");
         let wrapped = wrap_line(&content, inner_w.saturating_sub(2));
         for w in &wrapped {
@@ -576,7 +579,10 @@ fn build_streaming_edit_rows(
     for line in new_str.lines() {
         let cleaned = strip_control_chars(line);
         let sign = "+";
-        let (line_bg, sign_color) = (Color::Rgb(165, 214, 167), Color::Rgb(165, 214, 167));
+        let (line_bg, sign_color) = (
+            crate::theme::Theme::diff_added_bg_color(),
+            crate::theme::Theme::diff_added_fg(),
+        );
         let content = format!("{sign} {cleaned}");
         let wrapped = wrap_line(&content, inner_w.saturating_sub(2));
         for w in &wrapped {
@@ -1457,19 +1463,21 @@ pub(super) fn diff_box_row_line(
     lang: &str,
 ) -> Line<'static> {
     let (line_bg, sign) = match diff.kind {
-        DiffLineKind::Removed => (Color::Rgb(239, 154, 154), "-"),
-        DiffLineKind::Added => (Color::Rgb(165, 214, 167), "+"),
+        DiffLineKind::Removed => (crate::theme::Theme::diff_removed_bg_color(), "-"),
+        DiffLineKind::Added => (crate::theme::Theme::diff_added_bg_color(), "+"),
         DiffLineKind::Context => (bg, " "),
     };
 
     let sign_color = match diff.kind {
-        DiffLineKind::Removed => Color::Rgb(239, 154, 154),
-        DiffLineKind::Added => Color::Rgb(165, 214, 167),
+        DiffLineKind::Removed => crate::theme::Theme::diff_removed_fg(),
+        DiffLineKind::Added => crate::theme::Theme::diff_added_fg(),
         DiffLineKind::Context => Color::Reset,
     };
 
     let number_width = 3.max(diff.line_no.to_string().len());
-    let prefix = format!("{}{:>width$} ", sign, diff.line_no, width = number_width);
+    let number_str = format!("{:>width$} ", diff.line_no, width = number_width);
+    let sign_str = sign.to_string();
+    let prefix = format!("{sign_str}{number_str}");
 
     let content = &diff.content;
     let content = strip_control_chars(content);
@@ -1507,8 +1515,19 @@ pub(super) fn diff_box_row_line(
 
     let pad = max_content.saturating_sub(content_width);
 
+    let prefix_fg = match diff.kind {
+        DiffLineKind::Added | DiffLineKind::Removed => line_bg, // diff bg color (green/red)
+        DiffLineKind::Context => sign_color,                    // keep context visible
+    };
     let mut spans = vec![Span::styled("| ", dim_bg_style(bg))];
-    spans.push(Span::styled(prefix, Style::default().fg(sign_color).bg(bg)));
+    spans.push(Span::styled(
+        sign_str,
+        Style::default().fg(prefix_fg).bg(bg),
+    ));
+    spans.push(Span::styled(
+        number_str,
+        Style::default().fg(prefix_fg).bg(bg),
+    ));
     spans.push(Span::styled("│ ", bg_style(line_bg)));
     spans.extend(truncated_spans);
     if pad > 0 {

@@ -13,17 +13,30 @@ static ACTIVE_COLORS: RwLock<ThemeColors> = RwLock::new(ThemeColors {
     thinking_streaming_bg: Color::Yellow,
     thinking_done_bg: Color::Green,
     user_bg: Color::Rgb(224, 247, 250),
+    diff_added_bg: Color::Rgb(165, 214, 167),
+    diff_added_fg: Color::Rgb(46, 125, 50),
+    diff_removed_bg: Color::Rgb(239, 154, 154),
+    diff_removed_fg: Color::Rgb(198, 40, 40),
 });
+
+/// Active theme variant, readable at any time.
+static ACTIVE_VARIANT: RwLock<ThemeVariant> = RwLock::new(ThemeVariant::Default);
 
 /// Get the currently active theme colors.
 pub fn active_colors() -> ThemeColors {
     ACTIVE_COLORS.read().unwrap().clone()
 }
 
+/// Get the currently active theme variant.
+pub fn active_variant() -> ThemeVariant {
+    *ACTIVE_VARIANT.read().unwrap()
+}
+
 /// Initialize or update the theme colors from the selected variant.
 pub fn init_theme(variant: ThemeVariant) {
     let colors = ThemeColors::from_variant(variant);
     *ACTIVE_COLORS.write().unwrap() = colors;
+    *ACTIVE_VARIANT.write().unwrap() = variant;
 }
 
 /// Available theme variants.
@@ -34,6 +47,8 @@ pub enum ThemeVariant {
     Default,
     #[serde(rename = "light-eucalyptus")]
     LightEucalyptus,
+    #[serde(rename = "dark-eucalyptus")]
+    DarkEucalyptus,
 }
 
 impl ThemeVariant {
@@ -41,11 +56,16 @@ impl ThemeVariant {
         match self {
             ThemeVariant::Default => "default",
             ThemeVariant::LightEucalyptus => "light-eucalyptus",
+            ThemeVariant::DarkEucalyptus => "dark-eucalyptus",
         }
     }
 
     pub fn all() -> &'static [ThemeVariant] {
-        &[ThemeVariant::Default, ThemeVariant::LightEucalyptus]
+        &[
+            ThemeVariant::Default,
+            ThemeVariant::LightEucalyptus,
+            ThemeVariant::DarkEucalyptus,
+        ]
     }
 }
 
@@ -68,6 +88,14 @@ pub struct ThemeColors {
     pub thinking_done_bg: Color,
     /// Background color for user message blocks.
     pub user_bg: Color,
+    /// Background color for added (diff `+`) lines.
+    pub diff_added_bg: Color,
+    /// Foreground color for the added-line sign / text.
+    pub diff_added_fg: Color,
+    /// Background color for removed (diff `-`) lines.
+    pub diff_removed_bg: Color,
+    /// Foreground color for the removed-line sign / text.
+    pub diff_removed_fg: Color,
 }
 
 impl Default for ThemeColors {
@@ -87,6 +115,10 @@ impl ThemeColors {
             thinking_streaming_bg: Color::Yellow,
             thinking_done_bg: Color::Green,
             user_bg: Color::Rgb(224, 247, 250),
+            diff_added_bg: Color::Rgb(165, 214, 167),
+            diff_added_fg: Color::Rgb(46, 125, 50),
+            diff_removed_bg: Color::Rgb(239, 154, 154),
+            diff_removed_fg: Color::Rgb(198, 40, 40),
         }
     }
 
@@ -101,6 +133,31 @@ impl ThemeColors {
             thinking_streaming_bg: Color::Rgb(230, 245, 243), // #E6F5F3
             thinking_done_bg: Color::Rgb(232, 245, 233), // #E8F5E9
             user_bg: Color::Rgb(224, 247, 250),         // #E0F7FA (matches default)
+            // Soft sage / blush diff colors tuned for the light palette
+            diff_added_bg: Color::Rgb(150, 199, 152), // #96C798
+            diff_added_fg: Color::Rgb(20, 75, 25),    // green-900
+            diff_removed_bg: Color::Rgb(224, 139, 139), // #E08B8B
+            diff_removed_fg: Color::Rgb(120, 20, 20), // red-900
+        }
+    }
+
+    fn dark_eucalyptus() -> Self {
+        Self {
+            // Deep muted eucalyptus backgrounds for a dark theme
+            tool_pending_bg: Color::Rgb(20, 40, 42), // #14282A
+            tool_success_bg: Color::Rgb(22, 45, 35), // #162D23
+            tool_error_bg: Color::Rgb(45, 22, 28),   // #2D161C
+            tool_error_fg: Color::Rgb(235, 130, 130), // #EB8282
+            cursor_fg: Color::Rgb(110, 231, 183),    // emerald-400
+            thinking_streaming_bg: Color::Rgb(20, 40, 42), // #14282A
+            thinking_done_bg: Color::Rgb(22, 45, 35), // #162D23
+            user_bg: Color::Rgb(22, 50, 56),         // #163238
+            // Diff backgrounds kept very dark so syntax-highlighted code
+            // stays readable; only the sign uses a clear color.
+            diff_added_bg: Color::Rgb(70, 96, 78), // dark green tint
+            diff_added_fg: Color::Rgb(110, 200, 140), // clear green (sign)
+            diff_removed_bg: Color::Rgb(96, 70, 74), // dark red tint
+            diff_removed_fg: Color::Rgb(200, 120, 120), // clear red (sign)
         }
     }
 
@@ -108,6 +165,7 @@ impl ThemeColors {
         match variant {
             ThemeVariant::Default => Self::default_theme(),
             ThemeVariant::LightEucalyptus => Self::light_eucalyptus(),
+            ThemeVariant::DarkEucalyptus => Self::dark_eucalyptus(),
         }
     }
 }
@@ -233,5 +291,35 @@ impl Theme {
         Style::default()
             .fg(Color::Green)
             .add_modifier(Modifier::BOLD)
+    }
+
+    /// Background style for an added (diff `+`) line.
+    pub fn diff_added_bg() -> Style {
+        Self::base().bg(active_colors().diff_added_bg)
+    }
+
+    /// Foreground color for an added-line sign / text.
+    pub fn diff_added_fg() -> Color {
+        active_colors().diff_added_fg
+    }
+
+    /// Background color for an added-line.
+    pub fn diff_added_bg_color() -> Color {
+        active_colors().diff_added_bg
+    }
+
+    /// Background style for a removed (diff `-`) line.
+    pub fn diff_removed_bg() -> Style {
+        Self::base().bg(active_colors().diff_removed_bg)
+    }
+
+    /// Foreground color for a removed-line sign / text.
+    pub fn diff_removed_fg() -> Color {
+        active_colors().diff_removed_fg
+    }
+
+    /// Background color for a removed-line.
+    pub fn diff_removed_bg_color() -> Color {
+        active_colors().diff_removed_bg
     }
 }
