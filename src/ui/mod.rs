@@ -9,6 +9,7 @@ use ratatui::widgets::Widget;
 use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
 
+pub mod backend;
 pub mod border_type;
 pub mod function_panel;
 pub mod picker_widget;
@@ -396,17 +397,16 @@ pub fn render(f: &mut Frame, app: &mut App) {
         app.force_full_repaint = false;
     }
 
-    // Position the hardware cursor for the focused input. While a
-    // request is in flight we deliberately skip ratatui's cursor
-    // positioning so the terminal cursor stays hidden during the draw
-    // (ratatui hides it when no position is set). We then place the
-    // cursor at the input area after draw() returns, which prevents
-    // it from flickering onto the cwd/spinner line while the spinner
-    // and timer update.
+    // Position the hardware cursor for the focused input.
+    //
+    // We always set the cursor position (even during inflight) so that
+    // ratatui calls `show_cursor()` + `set_cursor_position()` on every
+    // draw. The `CursorTrackingBackend` wrapper de-duplicates the
+    // `show_cursor` calls, preventing the terminal's native blink timer
+    // from being reset on every frame.
     let cursor = match app.focus_target {
         crate::function::FocusTarget::FunctionPanel => app.function_panel_cursor,
-        crate::function::FocusTarget::Input if app.inflight.is_none() => app.input_cursor_screen,
-        crate::function::FocusTarget::Input => None,
+        crate::function::FocusTarget::Input => app.input_cursor_screen,
         crate::function::FocusTarget::AgentsCheckbox => None,
     };
     if let Some((cx, cy)) = cursor {

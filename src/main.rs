@@ -11,6 +11,8 @@ use fish_coding_agent::app::App;
 use fish_coding_agent::{config, event};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
+
+use fish_coding_agent::ui::backend::CursorTrackingBackend;
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -39,7 +41,7 @@ async fn main() -> Result<()> {
 
     let _guard = TerminalGuard::enter()?;
 
-    let backend = CrosstermBackend::new(std::io::stdout());
+    let backend = CursorTrackingBackend::new(CrosstermBackend::new(std::io::stdout()));
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;
     terminal.hide_cursor()?;
@@ -161,13 +163,23 @@ impl TerminalGuard {
             std::io::stdout(),
             crossterm::terminal::EnterAlternateScreen,
             EnableMouseCapture,
-            EnableBracketedPaste
+            EnableBracketedPaste,
         )?;
+        // Set a steady (non-blinking) block cursor so that MoveTo / Print
+        // commands during rendering never reset the terminal's blink timer
+        // and cause irregular cursor blinking.
+        use std::io::Write;
+        let _ = write!(std::io::stdout(), "\x1B[2 q");
+        let _ = std::io::stdout().flush();
         Ok(Self)
     }
 }
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
+        use std::io::Write;
+        // Restore the terminal's default cursor style (blinking).
+        let _ = write!(std::io::stdout(), "\x1B[0 q");
+        let _ = std::io::stdout().flush();
         let _ = execute!(
             std::io::stdout(),
             DisableMouseCapture,

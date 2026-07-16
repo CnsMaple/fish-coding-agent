@@ -26,44 +26,6 @@ use pickers::*;
 #[cfg(test)]
 mod tests;
 
-/// Position the hardware cursor for IME support.
-///
-/// Uses absolute CUP (Cursor Position) followed by Hide cursor.
-/// We render in the main screen buffer (no alternate screen) so the
-/// TSF text store is properly associated with the displayed content.
-///
-/// The function panel cursor (e.g. picker search input) takes priority
-/// over the main input cursor.
-fn position_ime_cursor(app: &App) {
-    let cursor = match app.focus_target {
-        crate::function::FocusTarget::FunctionPanel => app.function_panel_cursor,
-        crate::function::FocusTarget::Input => app.input_cursor_screen,
-        crate::function::FocusTarget::AgentsCheckbox => None,
-    };
-    let Some((cx, cy)) = cursor else {
-        return;
-    };
-
-    // Always re-position after draw(). During streaming ratatui does
-    // not set the cursor position, so the terminal cursor is hidden
-    // while the frame is being flushed. We then show it here at the
-    // correct input location, preventing the spinner/timer updates
-    // from ever hosting the visible cursor.
-    force_show_cursor_at(cx, cy);
-}
-
-/// Unconditionally move to (cx, cy) and show the cursor, bypassing
-/// the `LAST_CURSOR_POS` de-duplication in `position_ime_cursor`.
-/// Called after a `force_full_repaint` frame, which leaves the
-/// cursor hidden (no `set_cursor_position` in render).
-fn force_show_cursor_at(cx: u16, cy: u16) {
-    use std::io::Write;
-    // Move first, then show, so the cursor never appears at a stale
-    // position.
-    let _ = write!(std::io::stdout(), "\x1B[{};{}H\x1B[?25h", cy + 1, cx + 1);
-    let _ = std::io::stdout().flush();
-}
-
 /// Async -> main loop messages.
 pub enum AppMsg {
     /// A piece of streamed chat delta arrived.
@@ -290,11 +252,9 @@ where
             if let Err(e) = terminal.draw(|f| crate::ui::render(f, app)) {
                 let _ = e;
             }
-            // render() now always calls set_cursor_position, so the
-            // hardware cursor is already placed correctly. Keep the
-            // explicit IME positioning only to keep the TSF text store
-            // in sync across Windows terminals.
-            position_ime_cursor(app);
+            // The CursorTrackingBackend wrapper de-duplicates cursor
+            // visibility commands, so the terminal's native blink timer
+            // is not reset on every frame.
             last_draw = Instant::now();
             needs_draw = false;
 
