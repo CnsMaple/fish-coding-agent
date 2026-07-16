@@ -9,7 +9,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 use ratatui::widgets::{Block, Borders, Paragraph};
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// Maximum number of undo snapshots retained in `InputState::undo_stack`.
@@ -834,11 +835,35 @@ fn input_mode_preview<'a>(buffer: &'a str, fallback: &'a str) -> &'a str {
     }
 }
 
-static SPINNER_FRAME: AtomicUsize = AtomicUsize::new(0);
+/// Wall-clock epoch (ms since UNIX_EPOCH) captured on first spinner
+/// draw. Stored in an atomic so the value is stable across calls and
+/// threads without needing a `OnceLock`/`Once` wrapper around `Instant`
+/// (which is not `Sync`).
+static SPINNER_EPOCH: AtomicU64 = AtomicU64::new(0);
+
+/// Milliseconds per spinner frame. The render loop ticks at 100ms
+/// while inflight, so matching that here yields one frame advance per
+/// tick — a steady ~1s per full rotation regardless of how often
+/// intermediate draws are triggered by arriving API chunks.
+const SPINNER_FRAME_MS: u64 = 100;
 
 pub(crate) fn spinner_prompt() -> String {
     const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-    let idx = SPINNER_FRAME.fetch_add(1, Ordering::Relaxed) % FRAMES.len();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let epoch = SPINNER_EPOCH.load(Ordering::Relaxed);
+    let epoch = if epoch == 0 {
+        // Lazily install the epoch on first call; subsequent callers
+        // fall through with whichever value won the race.
+        let _ = SPINNER_EPOCH.compare_exchange(0, now, Ordering::Relaxed, Ordering::Relaxed);
+        now
+    } else {
+        epoch
+    };
+    let elapsed = now.saturating_sub(epoch);
+    let idx = ((elapsed / SPINNER_FRAME_MS) as usize) % FRAMES.len();
     format!(" {} ", FRAMES[idx])
 }
 
