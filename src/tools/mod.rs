@@ -170,6 +170,8 @@ pub(super) struct PythonArgs {
 pub(super) struct GrepArgs {
     pub(super) pattern: String,
     pub(super) path: Option<String>,
+    #[serde(default)]
+    pub(super) glob: Option<String>,
 }
 
 #[derive(Deserialize)]

@@ -234,7 +234,8 @@ pub(super) fn tool_defs() -> Vec<ToolDef> {
                 "type": "object",
                 "properties": {
                     "pattern": { "type": "string", "description": "Regex pattern to search for." },
-                    "path": { "type": "string", "description": "Optional workspace-relative file or directory. Defaults to current workspace." }
+                    "path": { "type": "string", "description": "Optional workspace-relative file or directory. Defaults to current workspace." },
+                    "glob": { "type": "string", "description": "Optional glob pattern to filter which files to search (e.g. \"**/*.rs\")." }
                 },
                 "required": ["pattern"],
                 "additionalProperties": false

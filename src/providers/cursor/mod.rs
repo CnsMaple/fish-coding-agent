@@ -315,6 +315,8 @@ async fn cursor_status_error(resp: reqwest::Response) -> ProviderError {
 fn build_request(req: ChatRequest) -> (AgentClientMessage, HashMap<Vec<u8>, Vec<u8>>) {
     let mut blob_store = HashMap::new();
     let mut root_prompt_messages_json = Vec::new();
+
+    // System prompt blob
     let system = req
         .system
         .clone()
@@ -329,6 +331,27 @@ fn build_request(req: ChatRequest) -> (AgentClientMessage, HashMap<Vec<u8>, Vec<
     blob_store.insert(system_blob_id.clone(), system_blob);
     root_prompt_messages_json.push(system_blob_id);
 
+    // Find the index of the last user message — that message is sent
+    // as the `UserMessageAction` (the trigger), so it must NOT also
+    // appear in `root_prompt_messages_json` (otherwise the server
+    // would see it duplicated).
+    let last_user_idx = req.messages.iter().rposition(|m| m.role == "user");
+
+    // Add all prior conversation messages as blobs so the Cursor
+    // server has the full context (previous user/assistant turns,
+    // tool calls and tool results). Without this, each request looks
+    // like a brand-new conversation with only the system prompt.
+    for (i, m) in req.messages.iter().enumerate() {
+        if Some(i) == last_user_idx {
+            continue;
+        }
+        let blob = message_to_blob_bytes(m);
+        let blob_id = create_blob_id(&blob);
+        blob_store.insert(blob_id.clone(), blob);
+        root_prompt_messages_json.push(blob_id);
+    }
+
+    // The last user message becomes the action that triggers the run.
     let current_user = req
         .messages
         .iter()
@@ -370,6 +393,47 @@ fn build_request(req: ChatRequest) -> (AgentClientMessage, HashMap<Vec<u8>, Vec<
         },
         blob_store,
     )
+}
+
+/// Convert a `ChatMessage` into a JSON byte vector suitable for storage
+/// as a Cursor protocol blob. Uses OpenAI-style message format so the
+/// Cursor server can reconstruct tool calls and tool results.
+fn message_to_blob_bytes(m: &super::ChatMessage) -> Vec<u8> {
+    if m.role == "tool" {
+        return serde_json::json!({
+            "role": "tool",
+            "tool_call_id": m.tool_call_id,
+            "content": m.content,
+        })
+        .to_string()
+        .into_bytes();
+    }
+    if !m.tool_calls.is_empty() {
+        return serde_json::json!({
+            "role": m.role,
+            "content": if m.content.is_empty() {
+                serde_json::Value::Null
+            } else {
+                serde_json::Value::String(m.content.clone())
+            },
+            "tool_calls": m.tool_calls.iter().map(|call| serde_json::json!({
+                "id": call.id,
+                "type": "function",
+                "function": {
+                    "name": call.name,
+                    "arguments": call.arguments,
+                }
+            })).collect::<Vec<_>>(),
+        })
+        .to_string()
+        .into_bytes();
+    }
+    serde_json::json!({
+        "role": m.role,
+        "content": m.content,
+    })
+    .to_string()
+    .into_bytes()
 }
 
 fn create_blob_id(data: &[u8]) -> Vec<u8> {

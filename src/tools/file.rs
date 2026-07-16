@@ -156,8 +156,14 @@ pub(super) async fn grep_text(args: &str, cwd: &Path) -> Result<String> {
     let re = Regex::new(&args.pattern).map_err(|e| anyhow!("invalid regex pattern: {e}"))?;
     let rel = args.path.unwrap_or_else(|| ".".to_string());
     let root = resolve_workspace_path(cwd, &rel)?;
+    let glob_re = match args.glob.as_deref() {
+        Some(g) if !g.trim().is_empty() => {
+            Some(glob::Pattern::new(g).map_err(|e| anyhow!("invalid glob pattern: {e}"))?)
+        }
+        _ => None,
+    };
     let mut out = Vec::new();
-    grep_path(&root, &re, cwd, &mut out, 200)?;
+    grep_path(&root, &re, cwd, &mut out, 200, &glob_re)?;
     if out.is_empty() {
         Ok(format!("no matches for {:?} in {}", args.pattern, rel))
     } else {
@@ -171,6 +177,7 @@ fn grep_path(
     cwd: &Path,
     out: &mut Vec<String>,
     limit: usize,
+    glob: &Option<glob::Pattern>,
 ) -> Result<()> {
     if out.len() >= limit {
         return Ok(());
@@ -184,14 +191,20 @@ fn grep_path(
             if should_skip_dir(&name) {
                 continue;
             }
-            grep_path(&p, re, cwd, out, limit)?;
+            grep_path(&p, re, cwd, out, limit, glob)?;
             if out.len() >= limit {
                 break;
             }
         }
     } else if path.is_file() {
+        let rel = path.strip_prefix(cwd).unwrap_or(path).display().to_string();
+        if let Some(g) = glob {
+            let rel_path = Path::new(&rel);
+            if !g.matches_path(rel_path) {
+                return Ok(());
+            }
+        }
         if let Ok(text) = std::fs::read_to_string(path) {
-            let rel = path.strip_prefix(cwd).unwrap_or(path).display().to_string();
             for (idx, line) in text.lines().enumerate() {
                 if re.is_match(line) {
                     out.push(format!("{}:{}:{}", rel, idx + 1, line));

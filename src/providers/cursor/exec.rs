@@ -228,11 +228,16 @@ pub(super) async fn handle_grep_exec(
     body_tx: &tokio::sync::mpsc::Sender<Vec<u8>>,
 ) -> Result<()> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let tool_args = serde_json::json!({
+    let mut tool_args = serde_json::json!({
         "pattern": args.pattern,
         "path": args.path.unwrap_or_else(|| ".".to_string()),
-    })
-    .to_string();
+    });
+    if let Some(glob) = &args.glob {
+        if !glob.trim().is_empty() {
+            tool_args["glob"] = serde_json::Value::String(glob.clone());
+        }
+    }
+    let tool_args = tool_args.to_string();
     let content = crate::tools::execute_tool("grep", &tool_args, &cwd).await;
     let _ = tx.send(ChatEvent::ToolResult {
         name: "grep".to_string(),
