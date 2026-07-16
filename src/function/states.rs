@@ -330,7 +330,7 @@ impl SidebarTab {
             }
             Self::SessionPicker(_) => " ",
             Self::SessionRename(_) => " Enter: save | Ctrl+E: edit | Esc: close ",
-            Self::Plan(_) => " Enter: approve | R: reject | S: save | Esc: close ",
+            Self::Plan(_) => " Enter: approve | Alt+R: reject | Alt+S: save | Esc: close ",
             Self::Ask(_) => " ",
             Self::Todo(_) => " ",
             Self::ToolPicker(_) => " Space: toggle | Enter: confirm | Esc: close ",

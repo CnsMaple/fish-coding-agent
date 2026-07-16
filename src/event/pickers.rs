@@ -189,7 +189,7 @@ pub(super) async fn handle_plan_key(
             crate::commands::send_chat(app, prompt, Vec::new());
             true
         }
-        KeyCode::Char('r') | KeyCode::Char('R') => {
+        KeyCode::Char('r') | KeyCode::Char('R') if k.modifiers.contains(KeyModifiers::ALT) => {
             state.approved = Some(false);
             let prompt = "Plan rejected. Please revise or ask a follow-up question.".to_string();
             app.set_mode(crate::function::AppMode::Yolo);
@@ -200,7 +200,7 @@ pub(super) async fn handle_plan_key(
             crate::commands::send_chat(app, prompt, Vec::new());
             true
         }
-        KeyCode::Char('s') | KeyCode::Char('S') => {
+        KeyCode::Char('s') | KeyCode::Char('S') if k.modifiers.contains(KeyModifiers::ALT) => {
             if state.dirty {
                 app.save_active_plan();
             } else {

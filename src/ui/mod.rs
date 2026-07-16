@@ -278,7 +278,6 @@ pub fn render(f: &mut Frame, app: &mut App) {
             // existing lines and the last line is non-empty.
             if has_any_line && !prev_line_was_blank {
                 line_idx += 1;
-                prev_line_was_blank = true;
             }
 
             match item {
@@ -311,6 +310,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
                     line_idx += lines;
                     line_idx += 1; // trailing blank
                     has_any_line = true;
+                    prev_line_was_blank = true;
                 }
                 WalkItem::Tool(ti) => {
                     let t = &m.tool_results[*ti];
@@ -922,7 +922,7 @@ pub fn render_agents_area(
     }
 
     // Render load duration below the logo
-    let load_text = format!("⚡ {}ms", app.load_duration.as_millis());
+    let load_text = format!(" ⚡{}ms", app.load_duration.as_millis());
     let load_line = Line::from(Span::styled(load_text, Theme::dim()));
     let p_launch = Paragraph::new(load_line);
     p_launch.render(
