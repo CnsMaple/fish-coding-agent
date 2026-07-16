@@ -231,28 +231,36 @@ pub(super) fn select_lines(
     start_line: Option<usize>,
     end_line: Option<usize>,
 ) -> Result<String> {
-    match (start_line, end_line) {
-        (None, None) => Ok(text.to_string()),
-        (Some(start), Some(end)) => {
-            if start == 0 || end == 0 || start > end {
-                return Err(anyhow!(
-                    "invalid line range: start_line must be <= end_line (got {}:{})",
-                    start,
-                    end
-                ));
-            }
-            Ok(text
-                .lines()
-                .enumerate()
-                .filter_map(|(idx, line)| {
-                    let line_no = idx + 1;
-                    (line_no >= start && line_no <= end).then_some(line)
-                })
-                .collect::<Vec<_>>()
-                .join("\n"))
-        }
-        _ => Err(anyhow!("start_line and end_line must be provided together")),
+    // Neither bound given: return the whole file unchanged.
+    if start_line.is_none() && end_line.is_none() {
+        return Ok(text.to_string());
     }
+    let total = text.lines().count();
+    // An empty file has no selectable lines; the only valid request is
+    // "the whole file" (handled above), so any partial request is an error.
+    if total == 0 {
+        return Err(anyhow!("line range requested but file is empty (0 lines)"));
+    }
+    // Missing bounds default to the file's first/last line, so callers can
+    // pass only one of the two instead of always needing both.
+    let start = start_line.unwrap_or(1);
+    let end = end_line.unwrap_or(total);
+    if start == 0 || end == 0 || start > end {
+        return Err(anyhow!(
+            "invalid line range: start_line must be <= end_line (got {}:{})",
+            start,
+            end
+        ));
+    }
+    Ok(text
+        .lines()
+        .enumerate()
+        .filter_map(|(idx, line)| {
+            let line_no = idx + 1;
+            (line_no >= start && line_no <= end).then_some(line)
+        })
+        .collect::<Vec<_>>()
+        .join("\n"))
 }
 
 pub(super) fn replace_string(

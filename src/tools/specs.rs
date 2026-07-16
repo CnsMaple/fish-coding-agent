@@ -169,8 +169,8 @@ pub(super) fn tool_defs() -> Vec<ToolDef> {
                 "type": "object",
                 "properties": {
                     "path": { "type": "string", "description": "Workspace-relative path to read." },
-                    "start_line": { "type": "integer", "minimum": 1, "description": "Optional 1-based line to start reading." },
-                    "end_line": { "type": "integer", "minimum": 1, "description": "Optional 1-based line to stop reading, inclusive." }
+                    "start_line": { "type": "integer", "minimum": 1, "description": "Optional 1-based line to start reading. If omitted, defaults to the first line. May be provided alone (end_line defaults to the last line)." },
+                    "end_line": { "type": "integer", "minimum": 1, "description": "Optional 1-based line to stop reading, inclusive. If omitted, defaults to the last line. May be provided alone (start_line defaults to the first line)." }
                 },
                 "required": ["path"],
                 "additionalProperties": false
@@ -186,8 +186,8 @@ pub(super) fn tool_defs() -> Vec<ToolDef> {
                     "content": { "type": "string", "description": "Content to write, or replacement text when oldString is provided. Alias: newString." },
                     "oldString": { "type": "string", "description": "Exact text to find and replace in the file. Must be unique within the search scope (whole file or specified line range). Omit to create/overwrite the entire file." },
                     "replaceAll": { "type": "boolean", "description": "Replace all occurrences of oldString. Default false (requires unique match)." },
-                    "start_line": { "type": "integer", "minimum": 1, "description": "Optional 1-based line to start searching for oldString. Must be used with end_line." },
-                    "end_line": { "type": "integer", "minimum": 1, "description": "Optional 1-based line to stop searching for oldString, inclusive. Must be used with start_line." }
+                    "start_line": { "type": "integer", "minimum": 1, "description": "Optional 1-based line to start searching for oldString. Provide both start_line and end_line to narrow the search to a specific range; if either is omitted the whole file is searched." },
+                    "end_line": { "type": "integer", "minimum": 1, "description": "Optional 1-based line to stop searching for oldString, inclusive. Provide both start_line and end_line to narrow the search to a specific range; if either is omitted the whole file is searched." }
                 },
                 "required": ["path"],
                 "additionalProperties": false
