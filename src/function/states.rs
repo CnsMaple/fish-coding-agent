@@ -803,6 +803,13 @@ pub enum PickerFocus {
 #[derive(Debug)]
 pub struct ModelPickerState {
     pub provider: ProviderKind,
+    /// The specific configured entry this picker was opened for (e.g.
+    /// `openai:key`). Multiple entries can share the same `provider` kind
+    /// (e.g. a "prod" and "dev" OpenAI endpoint), so the kind alone is
+    /// not enough to resolve credentials — fetches and commits must use
+    /// this id when set. `None` only for legacy/picker-created-without-id
+    /// paths, in which case callers fall back to kind-based resolution.
+    pub entry_id: Option<crate::config::ProviderId>,
     pub query: String,
     pub models: Vec<ModelInfo>,
     pub filtered: Vec<usize>,
@@ -862,6 +869,7 @@ impl ModelPickerState {
     pub fn new(provider: ProviderKind) -> Self {
         Self {
             provider,
+            entry_id: None,
             query: String::new(),
             models: vec![],
             filtered: vec![],
@@ -873,6 +881,17 @@ impl ModelPickerState {
             scroll: 0,
             context_pick: None,
         }
+    }
+
+    /// Construct a picker bound to a specific configured entry id. The
+    /// kind is derived from the id; `entry_id` is stored so fetches and
+    /// commits target this exact entry rather than the global active one
+    /// (which may be a different entry of the same kind).
+    pub fn new_for_entry(id: &str) -> Option<Self> {
+        let (kind, _) = crate::config::parse_id(id)?;
+        let mut s = Self::new(kind);
+        s.entry_id = Some(id.to_string());
+        Some(s)
     }
 
     pub fn rebuild_filter(&mut self) {

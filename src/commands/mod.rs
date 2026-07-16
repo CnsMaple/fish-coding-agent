@@ -4,7 +4,6 @@ mod tests;
 mod utils;
 
 use crate::app::App;
-use crate::config::parse_id;
 use crate::function::notifications::ToastLevel;
 use crate::function::SidebarTab;
 use crate::session::{Message, Role};
@@ -553,14 +552,8 @@ pub fn open_model_picker(app: &mut App) {
         1 => {
             // Only one configured entry — skip the chooser and jump
             // straight to the model list for its kind.
-            let kind = app
-                .config
-                .entries
-                .keys()
-                .next()
-                .and_then(|id| parse_id(id).map(|(k, _)| k));
-            if let Some(kind) = kind {
-                open_model_picker_for_kind(app, kind);
+            if let Some(id) = app.config.entries.keys().next().cloned() {
+                open_model_picker_for_entry(app, &id);
             }
         }
         _ => {
@@ -593,6 +586,62 @@ pub fn open_model_picker_for_kind(app: &mut App, provider: crate::config::Provid
     if let Some(c) = app.model_cache.get(provider) {
         state.models = c.models.clone();
         state.rebuild_filter();
+    }
+    app.function.push(SidebarTab::ModelPicker(state));
+    app.show_panel();
+    app.acknowledge_panel();
+}
+
+/// Open (or focus) a ModelPicker bound to a specific configured entry
+/// id. Prefer this over `open_model_picker_for_kind` whenever the
+/// caller knows the exact entry: multiple entries can share a kind
+/// (e.g. two OpenAI endpoints), so resolving credentials/commits by
+/// kind alone would hit the wrong one. Only uses the per-kind model
+/// cache when it actually matches this entry's base_url/api_key (via
+/// `needs_invalidation`), so opening a different same-kind entry does
+/// not show the other entry's stale model list.
+pub fn open_model_picker_for_entry(app: &mut App, entry_id: &str) {
+    use crate::config::ProviderKind;
+    let Some(mut state) = crate::function::ModelPickerState::new_for_entry(entry_id) else {
+        return;
+    };
+    let provider = state.provider;
+    // Dedup by the exact entry id, not just the kind — two pickers for
+    // different same-kind entries are distinct tabs.
+    if let Some(idx) = app.function.tabs.iter().position(|t| {
+        matches!(t, SidebarTab::ModelPicker(s)
+            if s.entry_id.as_deref() == Some(entry_id))
+    }) {
+        app.function.active = idx;
+        app.show_panel();
+        app.acknowledge_panel();
+        return;
+    }
+    // Cursor never has a model list endpoint; skip cache lookup.
+    if provider != ProviderKind::Cursor {
+        let entry_base = app
+            .config
+            .entry(entry_id)
+            .map(|c| c.base_url.clone())
+            .unwrap_or_default();
+        let entry_key = app.config.effective_api_key(entry_id).unwrap_or_default();
+        let use_cache = app
+            .model_cache
+            .get(provider)
+            .map(|c| {
+                // Only reuse the kind cache when it was populated from
+                // this same entry's credentials.
+                !app.model_cache
+                    .needs_invalidation(provider, &entry_base, &entry_key)
+                    || (c.base_url == entry_base && c.api_key == entry_key)
+            })
+            .unwrap_or(false);
+        if use_cache {
+            if let Some(c) = app.model_cache.get(provider) {
+                state.models = c.models.clone();
+                state.rebuild_filter();
+            }
+        }
     }
     app.function.push(SidebarTab::ModelPicker(state));
     app.show_panel();

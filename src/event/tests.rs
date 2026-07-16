@@ -210,6 +210,101 @@ fn commit_model_falls_back_to_matching_kind() {
 }
 
 #[test]
+fn commit_model_with_entry_pins_to_bound_same_kind_entry() {
+    // Regression: two configured entries share ProviderKind::Openai
+    // (e.g. "opencode" and "alibaba" both via the OpenAI-compatible
+    // endpoint). The picker was opened for the non-active entry; a
+    // commit must activate THAT entry, not the global active one.
+    use crate::config::ProviderConfig;
+    let mut app = make_app();
+    let opencode_id = make_id(ProviderKind::Openai, ProviderMode::Key);
+    let alibaba_id = "openai:key-2".to_string();
+    app.config.entries.insert(
+        alibaba_id.clone(),
+        ProviderConfig {
+            api_key: "ali-key".to_string(),
+            api_key_env: String::new(),
+            base_url: "https://ali.example/v1".to_string(),
+            model: String::new(),
+            model_display: String::new(),
+            name: "alibaba".to_string(),
+            access_key: String::new(),
+            secret_key: String::new(),
+        },
+    );
+    // Active is the opencode entry, NOT alibaba.
+    app.config.active = Some(opencode_id.clone());
+    commit_model_with_entry(
+        &mut app,
+        ProviderKind::Openai,
+        Some(&alibaba_id),
+        "qwen-max".to_string(),
+        false,
+    );
+    // The bound entry (alibaba) must be the one activated and updated.
+    assert_eq!(app.config.active.as_deref(), Some(alibaba_id.as_str()));
+    let entry = app.config.entry(&alibaba_id).unwrap();
+    assert_eq!(entry.model, "qwen-max");
+    // And the opencode entry must be untouched.
+    let oc = app.config.entry(&opencode_id).unwrap();
+    assert_eq!(oc.model, "");
+}
+
+#[test]
+fn open_model_picker_for_entry_skips_stale_same_kind_cache() {
+    // Regression for the reported bug: opening the picker for a
+    // different same-kind entry must NOT show the other entry's cached
+    // model list (which previously made Ctrl+R look like it returned
+    // opencode models even after selecting alibaba).
+    use crate::config::ProviderConfig;
+    use crate::function::notifications::{ModelCache, ModelInfo};
+    let mut app = make_app();
+    let opencode_id = make_id(ProviderKind::Openai, ProviderMode::Key);
+    let alibaba_id = "openai:key-2".to_string();
+    app.config.entries.insert(
+        alibaba_id.clone(),
+        ProviderConfig {
+            api_key: "ali-key".to_string(),
+            api_key_env: String::new(),
+            base_url: "https://ali.example/v1".to_string(),
+            model: String::new(),
+            model_display: String::new(),
+            name: "alibaba".to_string(),
+            access_key: String::new(),
+            secret_key: String::new(),
+        },
+    );
+    // Seed the Openai-kind cache with opencode's models (different
+    // base_url/api_key than alibaba).
+    let mut cache = ModelCache::default();
+    cache.put(
+        ProviderKind::Openai,
+        "https://api.openai.com/v1".to_string(),
+        "openai-key".to_string(),
+        vec![ModelInfo {
+            id: "gpt-4o".to_string(),
+            display: "gpt-4o".to_string(),
+            request_id: None,
+            context_window_tokens: None,
+            context_needs_pick: false,
+        }],
+    );
+    app.model_cache = cache;
+
+    crate::commands::open_model_picker_for_entry(&mut app, &alibaba_id);
+    // The alibaba picker should start empty (no stale opencode models).
+    let s = match app.function.tabs.last() {
+        Some(crate::function::SidebarTab::ModelPicker(s)) => s,
+        _ => unreachable!(),
+    };
+    assert_eq!(s.entry_id.as_deref(), Some(alibaba_id.as_str()));
+    assert!(
+        s.models.is_empty(),
+        "picker for alibaba must not show opencode's cached models"
+    );
+}
+
+#[test]
 fn picker_state_initializes() {
     // Sanity: ModelPickerState::new(provider) doesn't panic
     let _p = ModelPickerState::new(ProviderKind::Anthropic);

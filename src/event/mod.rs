@@ -965,13 +965,13 @@ fn handle_msg(msg: AppMsg, app: &mut App) {
                     entry.model.clear();
                 }
             }
-            app.config.active = Some(id);
+            app.config.active = Some(id.clone());
             app.save_config();
             app.status.set_provider_name(&app.config.active_name());
             app.status.set_model(&app.config.active_model_display());
             app.refresh_status_model_context();
             app.notify(ToastLevel::Ok, "Cursor OAuth authorized");
-            crate::commands::open_model_picker_for_kind(app, ProviderKind::Cursor);
+            crate::commands::open_model_picker_for_entry(app, &id);
         }
         AppMsg::CursorAuthFailed(e) => {
             use crate::function::notifications::ToastLevel;

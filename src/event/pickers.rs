@@ -637,13 +637,13 @@ pub(super) fn handle_provider_picker_key(
     let open_model_picker_for_selected =
         |app: &mut App, state: &crate::function::ProviderPickerState| {
             if let Some(id) = state.selected_id() {
-                if let Some((kind, _)) = crate::config::parse_id(&id) {
-                    // Push the model picker for the chosen kind. Do NOT
-                    // remove the ProviderPicker — keeping it in the tab
-                    // stack means the user can Esc back to provider
-                    // selection.
-                    crate::commands::open_model_picker_for_kind(app, kind);
-                }
+                // Push the model picker for the chosen entry. Bind it to
+                // the exact entry id (not just its kind) so fetches and
+                // commits target the right endpoint even when several
+                // configured entries share a kind. Do NOT remove the
+                // ProviderPicker — keeping it in the tab stack means
+                // the user can Esc back to provider selection.
+                crate::commands::open_model_picker_for_entry(app, &id);
             }
         };
     match state.focus {
@@ -727,12 +727,24 @@ pub(super) fn handle_picker_key(
                                 open_context_picker(_app, state, idx);
                             } else {
                                 let id = model.id.clone();
-                                commit_model(_app, state.provider, id, false);
+                                commit_model_with_entry(
+                                    _app,
+                                    state.provider,
+                                    state.entry_id.as_deref(),
+                                    id,
+                                    false,
+                                );
                             }
                         } else {
                             let id = state.query.trim();
                             if !id.is_empty() {
-                                commit_model(_app, state.provider, id.to_string(), true);
+                                commit_model_with_entry(
+                                    _app,
+                                    state.provider,
+                                    state.entry_id.as_deref(),
+                                    id.to_string(),
+                                    true,
+                                );
                             }
                         }
                         true
@@ -753,7 +765,13 @@ pub(super) fn handle_picker_key(
                                 open_context_picker(_app, state, idx);
                             } else {
                                 let id = model.id.clone();
-                                commit_model(_app, state.provider, id, false);
+                                commit_model_with_entry(
+                                    _app,
+                                    state.provider,
+                                    state.entry_id.as_deref(),
+                                    id,
+                                    false,
+                                );
                             }
                         }
                         true
@@ -876,20 +894,36 @@ pub(super) fn commit_timeline_jump(app: &mut App, state: &crate::function::Timel
     app.notify(ToastLevel::Info, label);
 }
 pub(super) fn trigger_picker_fetch(app: &mut App, state: &mut crate::function::ModelPickerState) {
+    use crate::config::parse_id;
     let p = state.provider;
-    let active_id = match app.config.active.as_ref() {
-        Some(id) => id.clone(),
+    // Resolve the entry to fetch from. Prefer the picker's bound entry id
+    // (multiple entries can share a kind — e.g. two OpenAI endpoints —
+    // so the kind alone is not enough). Fall back to kind-based
+    // resolution only when no entry id is bound (legacy paths) — same
+    // precedence as `commit_model`.
+    let target_id: Option<String> = match state.entry_id.as_deref() {
+        Some(id) if app.config.entry(id).is_some() => Some(id.to_string()),
+        _ => match app.config.active.as_deref() {
+            Some(id) if parse_id(id).map(|(k, _)| k == p).unwrap_or(false) => Some(id.to_string()),
+            _ => app
+                .config
+                .entries
+                .keys()
+                .find(|id| parse_id(id).map(|(k2, _)| k2 == p).unwrap_or(false))
+                .cloned(),
+        },
+    };
+    let target_id = match target_id {
+        Some(id) => id,
         None => {
-            use crate::function::notifications::ToastLevel;
             app.notify(
                 ToastLevel::Fail,
-                "no active provider; configure one in /settings",
+                "no provider configured for this kind; add one in /settings",
             );
             return;
         }
     };
-    if let Err(e) = app.config.validate_provider(&active_id) {
-        use crate::function::notifications::ToastLevel;
+    if let Err(e) = app.config.validate_provider(&target_id) {
         app.notify(ToastLevel::Fail, e);
         return;
     }
@@ -902,24 +936,24 @@ pub(super) fn trigger_picker_fetch(app: &mut App, state: &mut crate::function::M
     if let Some(tx) = app.msg_tx.clone() {
         let base = app
             .config
-            .entry(&active_id)
+            .entry(&target_id)
             .map(|c| c.base_url.clone())
             .unwrap_or_default();
-        let key = app.config.effective_api_key(&active_id).unwrap_or_default();
+        let key = app.config.effective_api_key(&target_id).unwrap_or_default();
         let access_key = app
             .config
-            .entry(&active_id)
+            .entry(&target_id)
             .map(|c| c.access_key.clone())
             .unwrap_or_default();
         let secret_key = app
             .config
-            .entry(&active_id)
+            .entry(&target_id)
             .map(|c| c.secret_key.clone())
             .unwrap_or_default();
         let client = app.reqwest.clone();
         let provider_name = app
             .config
-            .entry(&active_id)
+            .entry(&target_id)
             .map(|c| c.name.clone())
             .unwrap_or_default();
         let cache_path = app
@@ -1417,6 +1451,7 @@ pub(super) fn settings_save_form(app: &mut App, form: crate::function::ConfigFor
         };
 
         let mut state = crate::function::ModelPickerState::new(k);
+        state.entry_id = Some(active_id.clone());
         match app.config.validate_provider(&active_id) {
             Ok(_) => state.fetching = true,
             Err(e) => state.fetch_error = Some(e),
@@ -1647,10 +1682,26 @@ pub(super) fn open_context_picker(
     state: &mut crate::function::ModelPickerState,
     model_idx: usize,
 ) {
-    let provider_name = app
-        .config
-        .active
-        .as_ref()
+    use crate::config::parse_id;
+    // Resolve the entry by the picker's bound entry id when available
+    // (multiple entries can share a kind), else by kind. Uses the right
+    // provider name for the models.dev lookup instead of the global
+    // active entry, which may be a different same-kind endpoint.
+    let p = state.provider;
+    let target_id: Option<String> = match state.entry_id.as_deref() {
+        Some(id) if app.config.entry(id).is_some() => Some(id.to_string()),
+        _ => match app.config.active.as_deref() {
+            Some(id) if parse_id(id).map(|(k, _)| k == p).unwrap_or(false) => Some(id.to_string()),
+            _ => app
+                .config
+                .entries
+                .keys()
+                .find(|id| parse_id(id).map(|(k2, _)| k2 == p).unwrap_or(false))
+                .cloned(),
+        },
+    };
+    let provider_name = target_id
+        .as_deref()
         .and_then(|id| app.config.entry(id))
         .map(|c| c.name.clone())
         .unwrap_or_default()
@@ -1741,8 +1792,9 @@ pub(super) fn handle_context_picker_key(
                         );
                         let id = state.models[model_idx].id.clone();
                         let provider = state.provider;
+                        let entry_id = state.entry_id.clone();
                         state.context_pick = None;
-                        commit_model(app, provider, id, false);
+                        commit_model_with_entry(app, provider, entry_id.as_deref(), id, false);
                     }
                 }
                 crate::function::ContextPickerFocus::CustomInput => {
@@ -1767,8 +1819,9 @@ pub(super) fn handle_context_picker_key(
                         );
                         let id = state.models[model_idx].id.clone();
                         let provider = state.provider;
+                        let entry_id = state.entry_id.clone();
                         state.context_pick = None;
-                        commit_model(app, provider, id, false);
+                        commit_model_with_entry(app, provider, entry_id.as_deref(), id, false);
                     }
                 }
             }
@@ -1789,9 +1842,25 @@ pub(super) fn handle_context_picker_key(
         _ => false,
     }
 }
+#[allow(dead_code)]
 pub fn commit_model(
     app: &mut App,
     provider: crate::config::ProviderKind,
+    model_id: String,
+    manual: bool,
+) {
+    commit_model_with_entry(app, provider, None, model_id, manual)
+}
+
+/// Same as `commit_model` but, when the picker knows the exact entry it
+/// was opened for, `entry_id` pins the commit to that entry. This matters
+/// when several configured entries share a kind (e.g. two OpenAI
+/// endpoints): without it, the kind-based fallback could activate the
+/// wrong same-kind entry.
+pub fn commit_model_with_entry(
+    app: &mut App,
+    provider: crate::config::ProviderKind,
+    entry_id: Option<&str>,
     model_id: String,
     manual: bool,
 ) {
@@ -1799,19 +1868,24 @@ pub fn commit_model(
     use crate::function::notifications::ToastLevel;
 
     // 1. Find target entry id:
-    //    - If the active entry's kind matches, use it.
+    //    - If the picker was bound to a specific entry that still exists,
+    //      use it (handles multiple entries of the same kind).
+    //    - Else if the active entry's kind matches, use it.
     //    - Otherwise, find any existing entry with the same kind.
     //    - Otherwise, leave the target unset (no entry to attach the model to).
-    let target_id: Option<String> = match app.config.active.as_deref() {
-        Some(id) if parse_id(id).map(|(k, _)| k == provider).unwrap_or(false) => {
-            Some(id.to_string())
-        }
-        Some(_) | None => app
-            .config
-            .entries
-            .keys()
-            .find(|id| parse_id(id).map(|(k2, _)| k2 == provider).unwrap_or(false))
-            .cloned(),
+    let target_id: Option<String> = match entry_id {
+        Some(id) if app.config.entry(id).is_some() => Some(id.to_string()),
+        _ => match app.config.active.as_deref() {
+            Some(id) if parse_id(id).map(|(k, _)| k == provider).unwrap_or(false) => {
+                Some(id.to_string())
+            }
+            Some(_) | None => app
+                .config
+                .entries
+                .keys()
+                .find(|id| parse_id(id).map(|(k2, _)| k2 == provider).unwrap_or(false))
+                .cloned(),
+        },
     };
 
     let selected_model =
