@@ -216,10 +216,12 @@ pub const THINKING_END: &str = "[end thinking]";
 /// Render a single message into its full line vector. This is the
 /// core rendering function. It reads from the LRU cache when possible.
 ///
-/// Streaming messages are never cached; non-streaming messages ARE
-/// cached via `session.message_lines_cache` (keyed by `msg_idx`).
-/// When the cached entry matches `m.content_version` and `width`, it
-/// is reused without re-rendering.
+/// All messages (streaming and non-streaming) are cached via
+/// `session.message_lines_cache` (keyed by `msg_idx`). When the cached
+/// entry matches `m.content_version`, `width`, `display_cursor`, and
+/// `content_len`, it is reused without re-rendering. `compute_total_lines`
+/// pre-warms this cache before counting, so during streaming each frame
+/// parses Markdown exactly once instead of twice (count + render).
 pub fn build_message_lines(
     session: &Session,
     msg_idx: usize,

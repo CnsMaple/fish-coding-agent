@@ -243,12 +243,15 @@ where
     const DRAW_INTERVAL: Duration = Duration::from_millis(16);
 
     loop {
-        // Throttled draw: at least once per DRAW_INTERVAL.
-        // During inflight (chat/tool execution), skip the throttle so
-        // intermediate states (e.g. each parallel tool result arriving)
-        // are rendered immediately instead of being coalesced into one
-        // frame after all tools finish.
-        if needs_draw && (app.inflight.is_some() || last_draw.elapsed() >= DRAW_INTERVAL) {
+        // Throttled draw: cap at ~60 fps via DRAW_INTERVAL. During
+        // inflight we previously skipped the throttle, but SSE delta
+        // chunks arrive far faster than 60 fps and each draw re-parses
+        // the growing streaming message through Markdown twice — that
+        // was the dominant CPU + stdout-write hotspot. Discrete
+        // events (parallel tool results) are now coalesced into the
+        // next 16 ms frame, which is imperceptible. The 100 ms tick
+        // keeps the spinner animating even when no deltas arrive.
+        if needs_draw && last_draw.elapsed() >= DRAW_INTERVAL {
             if let Err(e) = terminal.draw(|f| crate::ui::render(f, app)) {
                 let _ = e;
             }
