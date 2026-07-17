@@ -297,17 +297,27 @@ pub(super) fn replace_string(
         (text, old_string, new_string)
     };
 
-    let (search_text, search_offset) = if let (Some(start), Some(end)) = (start_line, end_line) {
-        if start == 0 || end == 0 || start > end {
-            return Err(anyhow!("start_line must be <= end_line and >= 1"));
-        }
+    // A range is active when at least one bound is given; the missing
+    // bound defaults to the first/last line, mirroring `select_lines`.
+    let has_range = start_line.is_some() || end_line.is_some();
+    let (search_text, search_offset) = if has_range {
         let lines: Vec<&str> = text_ref.lines().collect();
-        if end > lines.len() {
+        let total = lines.len();
+        let start = start_line.unwrap_or(1);
+        let end = end_line.unwrap_or(total);
+        if start == 0 || end == 0 || start > end {
+            return Err(anyhow!(
+                "invalid line range: start_line must be <= end_line (got {}:{})",
+                start,
+                end
+            ));
+        }
+        if end > total {
             return Err(anyhow!(
                 "line range [{}, {}] exceeds file length ({})",
                 start,
                 end,
-                lines.len()
+                total
             ));
         }
         let offset = lines[..start - 1]
@@ -357,13 +367,15 @@ pub(super) fn replace_string(
     };
 
     if matches.is_empty() {
-        if let (Some(s), Some(e)) = (start_line, end_line) {
+        if has_range {
+            let s = start_line.unwrap_or(1);
+            let e = end_line.unwrap_or(text_ref.lines().count());
             return Err(anyhow!("oldString not found in lines [{}, {}]", s, e));
         }
         return Err(anyhow!("oldString not found in file"));
     }
     if !replace_all && matches.len() > 1 {
-        let hint = if start_line.is_some() {
+        let hint = if has_range {
             "provide more context to make oldString unique within the range"
         } else {
             "use replaceAll=true to replace all, or provide start_line/end_line to narrow the scope"
@@ -401,39 +413,26 @@ pub(super) fn replace_string(
         ));
     }
 
-    let result = if start_line.is_some() {
-        let mut result = text_ref.to_string();
-        if fuzzy {
-            // For fuzzy matches, we need to replace the original-text
-            // region that corresponds to the fuzzy match. The match
-            // offset in the fuzzy domain maps back to an original offset;
-            // the length to replace is the length of the original (non-
-            // stripped) text at that position. Since fuzzy matching only
-            // strips trailing whitespace, the original text at the match
-            // position starts at the same offset and extends through the
-            // matched region plus any trailing whitespace that was stripped.
-            // We find the end by searching for the original old_ref in a
-            // whitespace-tolerant way.
-            let orig_len = original_match_len(&search_text, matches[0], old_ref);
-            result.replace_range(
-                search_offset + matches[0]..search_offset + matches[0] + orig_len,
-                new_ref,
-            );
-        } else {
-            result.replace_range(
-                search_offset..search_offset + search_text.len(),
-                &search_text.replace(old_ref, new_ref),
-            );
-        }
-        result
-    } else if fuzzy {
-        // Whole-file fuzzy match: replace the first (or all) matched
-        // region in the original text.
+    let result = if fuzzy {
+        // Fuzzy match (range or whole file): replace every matched
+        // region in reverse order so earlier offsets stay valid as the
+        // string mutates. Each match offset is relative to
+        // `search_text`; add `search_offset` to land in the full text.
         let mut result = text_ref.to_string();
         for &offset in matches.iter().rev() {
-            let orig_len = original_match_len(&result, offset, old_ref);
-            result.replace_range(offset..offset + orig_len, new_ref);
+            let real_offset = search_offset + offset;
+            let orig_len = original_match_len(&result, real_offset, old_ref);
+            result.replace_range(real_offset..real_offset + orig_len, new_ref);
         }
+        result
+    } else if has_range {
+        // Exact match within a line range: replace within the range
+        // slice, then splice the modified slice back into the full text.
+        let mut result = text_ref.to_string();
+        result.replace_range(
+            search_offset..search_offset + search_text.len(),
+            &search_text.replace(old_ref, new_ref),
+        );
         result
     } else {
         text_ref.replace(old_ref, new_ref)
