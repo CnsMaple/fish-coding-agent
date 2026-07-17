@@ -1381,6 +1381,23 @@ async fn handle_key(k: crossterm::event::KeyEvent, app: &mut App) {
                 return;
             }
 
+            // If the active sidebar tab is a Plan and the input buffer is
+            // empty, Enter approves the plan directly from the input box
+            // (no need to Alt+L into the panel first). A non-empty buffer
+            // falls through to the normal submit path so the user can still
+            // type additional args/instructions; handle_plan_key already
+            // appends them when approving from the panel.
+            if app.input.buffer.trim().is_empty()
+                && k.modifiers.is_empty()
+                && matches!(
+                    app.function.tabs.get(app.function.active),
+                    Some(crate::function::SidebarTab::Plan(_))
+                )
+                && dispatch_to_active_tab(k, app).await
+            {
+                return;
+            }
+
             // Treat any modifier (Shift, Ctrl, Alt, Meta) as the "modified
             // variant". This matters because some Windows consoles drop
             // the SHIFT bit for Enter specifically — without this fallback
