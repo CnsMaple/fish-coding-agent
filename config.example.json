@@ -1,18 +1,37 @@
 {
-  "active_provider": "openai",
-  "active_model": "gpt-4o-mini",
+  "active": "openai:key",
   "thinking": "off",
+  "thinking_display": "show",
+  "tool_display": "show",
+  "enter_behavior": "enter_sends",
+  "tool_preview_lines": 10,
+  "border_type": "ascii",
+  "theme": "default",
   "auto_compact": true,
-  "providers": {
-    "openai": {
+  "compact_reserved": null,
+  "entries": {
+    "openai:key": {
       "api_key": "",
       "api_key_env": "OPENAI_API_KEY",
-      "base_url": "https://api.openai.com/v1"
+      "base_url": "https://api.openai.com/v1",
+      "model": "gpt-4o-mini",
+      "name": "OpenAI",
+      "access_key": "",
+      "secret_key": ""
     },
-    "anthropic": {
+    "anthropic:key": {
       "api_key": "",
       "api_key_env": "ANTHROPIC_API_KEY",
-      "base_url": "https://api.anthropic.com"
+      "base_url": "https://api.anthropic.com",
+      "model": "claude-3-5-sonnet-latest",
+      "name": "Anthropic",
+      "access_key": "",
+      "secret_key": ""
     }
+  },
+  "mcp": {},
+  "agents": {
+    "entries": {},
+    "visible": true
   }
 }
