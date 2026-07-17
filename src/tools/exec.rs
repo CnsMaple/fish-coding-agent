@@ -177,12 +177,7 @@ pub(super) async fn run_command_streaming(
     }
 
     let timeout_secs = cmd_args.timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS);
-    let output = tokio::time::timeout(
-        Duration::from_secs(timeout_secs),
-        run_shell_streaming(&cmd_args.command, cwd, call_id, tx, timeout_secs),
-    )
-    .await
-    .map_err(|_| anyhow!("command timed out after {timeout_secs}s"))??;
+    let output = run_shell_streaming(&cmd_args.command, cwd, call_id, tx, timeout_secs).await?;
 
     Ok(truncate(output, COMMAND_OUTPUT_LIMIT))
 }
@@ -198,12 +193,7 @@ pub(super) async fn run_python_streaming(
         return Err(anyhow!("python code is empty"));
     }
     let timeout_secs = py_args.timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS);
-    let output = tokio::time::timeout(
-        Duration::from_secs(timeout_secs),
-        run_python_streaming_inner(&py_args.code, cwd, call_id, tx, timeout_secs),
-    )
-    .await
-    .map_err(|_| anyhow!("python command timed out after {timeout_secs}s"))??;
+    let output = run_python_streaming_inner(&py_args.code, cwd, call_id, tx, timeout_secs).await?;
 
     Ok(json!({
         "kind": "python_command_result",
@@ -265,74 +255,123 @@ pub(super) async fn run_shell_streaming_impl(
         .env("PYTHONUTF8", "1")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .kill_on_drop(true)
         .spawn()?;
-
-    let mut stdout_buf = String::new();
-    let mut stderr_buf = String::new();
 
     // Take stdout/stderr handles
     let stdout_reader = child.stdout.take().map(tokio::io::BufReader::new);
     let stderr_reader = child.stderr.take().map(tokio::io::BufReader::new);
     let call_id = call_id.to_string();
 
+    // Buffers shared between the read tasks and the timeout guard.
+    // `Arc<Mutex<String>>` so the timeout branch can read what was
+    // already streamed before killing the child.
+    let stdout_buf = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let stderr_buf = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+
     // Read stdout and stderr concurrently
-    let stdout_task = async {
-        let mut buf = String::new();
-        if let Some(mut reader) = stdout_reader {
-            let mut line = String::new();
-            loop {
-                line.clear();
-                match reader.read_line(&mut line).await {
-                    Ok(0) => break,
-                    Ok(_) => {
-                        buf.push_str(&line);
-                        let clean = strip_ansi(&line);
-                        let _ = tx.send(AppMsg::ToolDelta {
-                            call_id: call_id.clone(),
-                            content: clean,
-                        });
+    let stdout_task = {
+        let stdout_buf = stdout_buf.clone();
+        let call_id = call_id.clone();
+        let tx = tx.clone();
+        async move {
+            let mut buf = String::new();
+            if let Some(mut reader) = stdout_reader {
+                let mut line = String::new();
+                loop {
+                    line.clear();
+                    match reader.read_line(&mut line).await {
+                        Ok(0) => break,
+                        Ok(_) => {
+                            buf.push_str(&line);
+                            let clean = strip_ansi(&line);
+                            let _ = tx.send(AppMsg::ToolDelta {
+                                call_id: call_id.clone(),
+                                content: clean,
+                            });
+                        }
+                        Err(_) => break,
                     }
-                    Err(_) => break,
                 }
             }
-        }
-        buf
-    };
-
-    let stderr_task = async {
-        let mut buf = String::new();
-        if let Some(mut reader) = stderr_reader {
-            let mut line = String::new();
-            loop {
-                match reader.read_line(&mut line).await {
-                    Ok(0) => break,
-                    Ok(_) => {
-                        let tag = "stderr: ";
-                        buf.push_str(&line);
-                        let clean = strip_ansi(&line);
-                        let _ = tx.send(AppMsg::ToolDelta {
-                            call_id: call_id.clone(),
-                            content: format!("{tag}{clean}"),
-                        });
-                    }
-                    Err(_) => break,
-                }
+            if let Ok(mut shared) = stdout_buf.lock() {
+                shared.push_str(&buf);
             }
         }
-        buf
     };
 
-    let (stdout, stderr) = tokio::join!(stdout_task, stderr_task);
-    stdout_buf.push_str(&stdout);
-    stderr_buf.push_str(&stderr);
+    let stderr_task = {
+        let stderr_buf = stderr_buf.clone();
+        let call_id = call_id.clone();
+        async move {
+            let mut buf = String::new();
+            if let Some(mut reader) = stderr_reader {
+                let mut line = String::new();
+                loop {
+                    match reader.read_line(&mut line).await {
+                        Ok(0) => break,
+                        Ok(_) => {
+                            let tag = "stderr: ";
+                            buf.push_str(&line);
+                            let clean = strip_ansi(&line);
+                            let _ = tx.send(AppMsg::ToolDelta {
+                                call_id: call_id.clone(),
+                                content: format!("{tag}{clean}"),
+                            });
+                        }
+                        Err(_) => break,
+                    }
+                }
+            }
+            if let Ok(mut shared) = stderr_buf.lock() {
+                shared.push_str(&buf);
+            }
+        }
+    };
 
-    let status = child.wait().await?;
-    let stdout = strip_ansi(&stdout_buf);
-    let stderr = strip_ansi(&stderr_buf);
-    let exit_code = status
-        .code()
-        .map(|c| c.to_string())
-        .unwrap_or_else(|| "terminated".to_string());
+    // Race the read tasks against the wall-clock timeout. On
+    // timeout, kill the child so the outer future resolves; the
+    // buffers still hold whatever was streamed before the deadline.
+    let timed_out = tokio::select! {
+        _ = async { tokio::join!(stdout_task, stderr_task); } => false,
+        _ = tokio::time::sleep(Duration::from_secs(timeout_secs)) => true,
+    };
+
+    let mut exit_code;
+    if timed_out {
+        // Best-effort kill; ignore errors (process may have exited
+        // on its own between the deadline and the kill).
+        let _ = child.kill().await;
+        exit_code = "124".to_string();
+    } else {
+        let status = child.wait().await?;
+        exit_code = status
+            .code()
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| "terminated".to_string());
+    }
+
+    // Flush any trailing bytes the read tasks pushed into the shared
+    // buffers before the deadline fired (select! may have cut them
+    // off mid-read).
+    let mut stdout = String::new();
+    let mut stderr = String::new();
+    if let Ok(shared) = stdout_buf.lock() {
+        stdout.push_str(&shared);
+    }
+    if let Ok(shared) = stderr_buf.lock() {
+        stderr.push_str(&shared);
+    }
+    let stdout = strip_ansi(&stdout);
+    let mut stderr = strip_ansi(&stderr);
+    if timed_out {
+        // Make it obvious in the output that the deadline was hit,
+        // not a normal exit-124.
+        stderr.push_str(&format!("\n[command timed out after {timeout_secs}s]"));
+        if exit_code == "124" {
+            exit_code = "timeout".to_string();
+        }
+    }
     Ok(format_command_output(
         &exit_code,
         started.elapsed(),
