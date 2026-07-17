@@ -1,6 +1,7 @@
 pub mod paths;
 
 use anyhow::{Context, Result};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -443,7 +444,7 @@ impl Config {
         if path.exists() {
             let raw = std::fs::read_to_string(path)
                 .with_context(|| format!("read config {}", path.display()))?;
-            // Try the new format first.
+            // Try the new format first (fast path: everything is valid).
             if let Ok(mut cfg) = serde_json::from_str::<Self>(&raw) {
                 if cfg.sanitize_entries() {
                     let _ = cfg.save(path);
@@ -453,6 +454,19 @@ impl Config {
             // Migrate from the old (kind-only) format if possible.
             if let Ok(old) = serde_json::from_str::<OldConfig>(&raw) {
                 let cfg = Self::migrate_from(old);
+                let _ = cfg.save(path);
+                return Ok(cfg);
+            }
+            // Last resort: field-level tolerant parse. Instead of
+            // bailing on a single bad value (which used to make the
+            // whole file fall back to `Config::default()` and get
+            // overwritten on the next `save_config`), parse the JSON
+            // as a `Value` and deserialize each top-level field
+            // independently. Bad fields fall back to their defaults;
+            // everything else is preserved. The repaired config is
+            // written back so the file self-heals.
+            if let Ok(mut cfg) = Self::load_tolerant(&raw) {
+                let _ = cfg.sanitize_entries();
                 let _ = cfg.save(path);
                 return Ok(cfg);
             }
@@ -466,6 +480,37 @@ impl Config {
             std::fs::write(path, pretty).ok();
             Ok(cfg)
         }
+    }
+
+    /// Field-level tolerant parse. Parses `raw` as a JSON `Value` and
+    /// deserializes each top-level `Config` field independently; a
+    /// field whose value is missing or invalid (e.g.
+    /// `"thinking": "not-a-mode"`) falls back to its `Default` value
+    /// instead of rejecting the whole document. `entries`, `mcp` and
+    /// `agents` are HashMaps: a single corrupt entry (e.g. one bad
+    /// `ProviderConfig`) is dropped rather than blanking the entire
+    /// map. Returns `Err` if `raw` is not a valid JSON object — a
+    /// syntactically broken file is still surfaced to the caller.
+    fn load_tolerant(raw: &str) -> Result<Self> {
+        let value: serde_json::Value = serde_json::from_str(raw).context("parse config as JSON")?;
+        let obj = value
+            .as_object()
+            .ok_or_else(|| anyhow::anyhow!("config root is not a JSON object"))?;
+        Ok(Self {
+            active: field::<Option<ProviderId>>(obj, "active").unwrap_or_default(),
+            thinking: field(obj, "thinking").unwrap_or_default(),
+            thinking_display: field(obj, "thinking_display").unwrap_or_default(),
+            tool_display: field(obj, "tool_display").unwrap_or_default(),
+            enter_behavior: field(obj, "enter_behavior").unwrap_or_default(),
+            tool_preview_lines: field(obj, "tool_preview_lines").unwrap_or_default(),
+            border_type: field(obj, "border_type").unwrap_or_default(),
+            theme: field(obj, "theme").unwrap_or_default(),
+            auto_compact: field(obj, "auto_compact").unwrap_or_default(),
+            compact_reserved: field(obj, "compact_reserved").unwrap_or_default(),
+            entries: tolerant_map::<ProviderConfig>(obj, "entries"),
+            mcp: tolerant_map::<crate::mcp::McpEntry>(obj, "mcp"),
+            agents: field(obj, "agents").unwrap_or_default(),
+        })
     }
 
     fn migrate_from(old: OldConfig) -> Self {
@@ -696,6 +741,48 @@ impl Default for Config {
     }
 }
 
+/// Deserialize a single top-level field from a parsed JSON object.
+/// Returns `Ok(value)` on success, `Err` if the field is missing or
+/// its value is invalid — callers turn `Err` into the field's
+/// `Default` via `.unwrap_or_default()`. Missing fields naturally
+/// fail and fall back to default, which is the desired behaviour for
+/// a tolerant load.
+fn field<T: DeserializeOwned + Default>(
+    obj: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> Result<T> {
+    let v = obj
+        .get(key)
+        .ok_or_else(|| anyhow::anyhow!("missing field {key}"))?;
+    serde_json::from_value(v.clone()).with_context(|| format!("decode field {key}"))
+}
+
+/// Deserialize a `HashMap<String, V>` field entry-by-entry. A single
+/// corrupt entry (e.g. one `ProviderConfig` with a bad value) is
+/// dropped rather than blanking the whole map. This preserves as
+/// much of the user's data as possible while still discarding the
+/// parts that cannot be decoded.
+fn tolerant_map<V: DeserializeOwned>(
+    obj: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> HashMap<String, V> {
+    let Some(serde_json::Value::Object(map)) = obj.get(key) else {
+        return HashMap::new();
+    };
+    let mut out = HashMap::with_capacity(map.len());
+    for (k, v) in map {
+        match serde_json::from_value::<V>(v.clone()) {
+            Ok(parsed) => {
+                out.insert(k.clone(), parsed);
+            }
+            Err(_) => {
+                // Skip the single bad entry; the rest of the map is kept.
+            }
+        }
+    }
+    out
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct OldConfig {
     pub active_provider: ProviderKind,
@@ -716,4 +803,136 @@ struct OldProviderConfig {
 
 pub fn config_file_path() -> Result<PathBuf> {
     paths::config_file_path()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{make_id, ProviderKind, ProviderMode};
+    use std::io::Write;
+
+    fn temp_config_path(name: &str) -> std::path::PathBuf {
+        let mut p = std::env::temp_dir();
+        p.push(format!("fish-coding-agent-config-{name}.json"));
+        let _ = std::fs::remove_file(&p);
+        p
+    }
+
+    /// Write `json` to a temp path and load it via `load_or_init`.
+    fn load_from(name: &str, json: &str) -> Config {
+        let path = temp_config_path(name);
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(json.as_bytes()).unwrap();
+        drop(f);
+        Config::load_or_init(&path).expect("load must succeed")
+    }
+
+    #[test]
+    fn bad_scalar_field_falls_back_to_default() {
+        // `thinking` is an invalid enum value, but everything else is
+        // valid. The old behaviour bailed and the whole config reset
+        // to default; now `thinking` falls back to `Off` while
+        // `auto_compact` and `tool_preview_lines` survive.
+        let json = r#"{
+            "thinking": "not-a-mode",
+            "auto_compact": false,
+            "tool_preview_lines": 42
+        }"#;
+        let cfg = load_from("bad_scalar", json);
+        assert_eq!(cfg.thinking, ReasoningMode::Off, "bad enum -> default");
+        assert!(!cfg.auto_compact, "valid field must survive");
+        assert_eq!(cfg.tool_preview_lines, 42, "valid field must survive");
+    }
+
+    #[test]
+    fn bad_nested_entry_is_dropped_rest_kept() {
+        // Two provider entries: one valid, one with a structurally
+        // invalid value (api_key is a number, not a string). The bad
+        // entry is dropped; the good entry survives.
+        let openai_id = make_id(ProviderKind::Openai, ProviderMode::Key);
+        let deepseek_id = make_id(ProviderKind::DeepSeek, ProviderMode::Key);
+        let json = format!(
+            r#"{{
+            "entries": {{
+                "{openai_id}": {{
+                    "api_key": "sk-good",
+                    "base_url": "https://api.openai.com/v1",
+                    "model": "gpt-4o"
+                }},
+                "{deepseek_id}": {{
+                    "api_key": 12345,
+                    "base_url": "https://api.deepseek.com",
+                    "model": "deepseek-chat"
+                }}
+            }}
+        }}"#
+        );
+        let cfg = load_from("bad_entry", &json);
+        assert!(cfg.entries.contains_key(&openai_id), "good entry survives");
+        assert!(
+            !cfg.entries.contains_key(&deepseek_id),
+            "bad entry is dropped, not the whole map"
+        );
+    }
+
+    #[test]
+    fn syntactically_broken_json_still_bails() {
+        // A file that is not valid JSON at all cannot be salvaged; the
+        // tolerant path requires a parseable JSON object. We keep the
+        // bail so the caller (main.rs) falls back to default and the
+        // user sees a warning instead of silently losing data.
+        let path = temp_config_path("broken_syntax");
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(b"{ this is not json ").unwrap();
+        drop(f);
+        let res = Config::load_or_init(&path);
+        assert!(res.is_err(), "non-JSON file must still bail");
+    }
+
+    #[test]
+    fn valid_config_loads_unchanged() {
+        // Regression: a fully valid config must continue to load
+        // through the fast path with all fields intact.
+        let openai_id = make_id(ProviderKind::Openai, ProviderMode::Key);
+        let json = format!(
+            r#"{{
+            "thinking": "high",
+            "auto_compact": true,
+            "tool_preview_lines": 7,
+            "entries": {{
+                "{openai_id}": {{
+                    "api_key": "sk-x",
+                    "base_url": "https://api.openai.com/v1",
+                    "model": "gpt-4o"
+                }}
+            }}
+        }}"#
+        );
+        let cfg = load_from("valid", &json);
+        assert_eq!(cfg.thinking, ReasoningMode::High);
+        assert!(cfg.auto_compact);
+        assert_eq!(cfg.tool_preview_lines, 7);
+        assert!(cfg.entries.contains_key(&openai_id));
+    }
+
+    #[test]
+    fn repaired_config_is_written_back() {
+        // After a tolerant load the file on disk should be healed:
+        // reloading it must go through the fast path (no tolerant
+        // fallback) and the bad field must now hold its default value.
+        let path = temp_config_path("repaired");
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(b"{ \"thinking\": \"garbage\", \"auto_compact\": false }")
+            .unwrap();
+        drop(f);
+        let cfg = Config::load_or_init(&path).expect("first load heals");
+        assert_eq!(cfg.thinking, ReasoningMode::Off);
+        assert!(!cfg.auto_compact);
+
+        // Reload: the file should now be valid JSON with the default
+        // `thinking` value.
+        let cfg2 = Config::load_or_init(&path).expect("reload healed file");
+        assert_eq!(cfg2.thinking, ReasoningMode::Off);
+        assert!(!cfg2.auto_compact, "non-bad field still preserved");
+    }
 }

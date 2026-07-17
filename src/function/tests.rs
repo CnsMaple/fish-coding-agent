@@ -115,6 +115,30 @@ fn plan_state_is_dirty_on_open_and_clears_after_save() {
     }
 }
 
+/// After the AI opens a plan, the panel must be visible (so the user
+/// can read the plan) but focus stays on the input box, because the
+/// user still needs to type args / follow-up text. This is the
+/// distinguishing behaviour vs `jump_to_plan` (the `/plan` command),
+/// which focuses the panel itself.
+#[test]
+fn open_plan_keeps_input_focus_while_showing_panel() {
+    let mut app = make_test_app();
+    app.open_plan("t".to_string(), "body".to_string());
+    assert!(
+        app.function_visible,
+        "panel must be visible to read the plan"
+    );
+    assert_eq!(
+        app.focus_target,
+        FocusTarget::Input,
+        "input box must keep focus so the user can type args"
+    );
+    assert!(
+        app.function_panel_cursor.is_none(),
+        "panel cursor must be cleared so it does not steal focus"
+    );
+}
+
 #[test]
 fn open_ask_pushes_first_question() {
     let mut app = make_test_app();

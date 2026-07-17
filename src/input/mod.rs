@@ -947,12 +947,19 @@ pub fn completion_candidates_for(input: &str) -> Vec<String> {
     //   - anything else       -> fuzzy against the static command list
     // We dedupe (a candidate may match both static and dynamic) and
     // sort by fuzzy score then alphabetically so the best matches
-    // appear at the top of the picker.
-    let mut scored: Vec<(u32, String)> = Vec::new();
+    // appear at the top of the picker. The tuple is
+    // (prefix_match, score, candidate): a candidate whose stem starts
+    // with the query is always ranked ahead of a mere subsequence
+    // match, even when both score 0. This prevents `/tool` from being
+    // pushed below `/skill:ecommerce-rpa-toolkit` (where "tool" is a
+    // contiguous substring with the same 0 gap) by the alphabetical
+    // tiebreak.
+    let mut scored: Vec<(bool, u32, String)> = Vec::new();
     for cmd in COMMAND_LIST.iter().copied() {
         let stem = &cmd[1..]; // strip leading '/'
         if let Some(sc) = crate::fuzzy::score(&trimmed, stem) {
-            scored.push((sc, cmd.to_string()));
+            let prefix_match = stem.starts_with(&trimmed);
+            scored.push((prefix_match, sc, cmd.to_string()));
         }
     }
     // Decide which dynamic list to query and with what arg.
@@ -981,19 +988,25 @@ pub fn completion_candidates_for(input: &str) -> Vec<String> {
         // must rank higher.
         let stem = cand.trim_start_matches("/skill:").to_string();
         let sc = crate::fuzzy::score(&trimmed, &stem).unwrap_or(u32::MAX);
-        push_unique(&mut scored, sc, cand);
+        let prefix_match = stem.starts_with(&trimmed);
+        push_unique(&mut scored, prefix_match, sc, cand);
     }
     if let Some(q) = mcp_q.as_deref() {
         for cand in crate::mcp::completion_candidates(q) {
             let stem = cand.trim_start_matches("/mcp:").to_string();
             let sc = crate::fuzzy::score(&trimmed, &stem).unwrap_or(u32::MAX);
-            push_unique(&mut scored, sc, cand);
+            let prefix_match = stem.starts_with(&trimmed);
+            push_unique(&mut scored, prefix_match, sc, cand);
         }
     }
-    // Sort: best score first, alphabetical tiebreak so the picker is
-    // deterministic across renders.
-    scored.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
-    let mut out: Vec<String> = scored.into_iter().map(|(_, s)| s).collect();
+    // Sort: prefix_match desc (true first), then score asc, then
+    // alphabetical asc so the picker is deterministic across renders.
+    scored.sort_by(|a, b| {
+        b.0.cmp(&a.0)
+            .then_with(|| a.1.cmp(&b.1))
+            .then_with(|| a.2.cmp(&b.2))
+    });
+    let mut out: Vec<String> = scored.into_iter().map(|(_, _, s)| s).collect();
     // Cap the picker at a sane size so a very broad fuzzy match
     // doesn't dump the entire skill library into the sidebar.
     const MAX_CANDIDATES: usize = 50;
@@ -1001,12 +1014,18 @@ pub fn completion_candidates_for(input: &str) -> Vec<String> {
     out
 }
 
-/// Helper: push `(score, cand)` into `scored` only if no candidate
-/// with the same string is already there. Used by the top-level
-/// completion builder to dedupe across static + dynamic sources.
-fn push_unique(scored: &mut Vec<(u32, String)>, score: u32, cand: String) {
-    if !scored.iter().any(|(_, c)| *c == cand) {
-        scored.push((score, cand));
+/// Helper: push `(prefix_match, score, cand)` into `scored` only if no
+/// candidate with the same string is already there. Used by the
+/// top-level completion builder to dedupe across static + dynamic
+/// sources.
+fn push_unique(
+    scored: &mut Vec<(bool, u32, String)>,
+    prefix_match: bool,
+    score: u32,
+    cand: String,
+) {
+    if !scored.iter().any(|(_, _, c)| *c == cand) {
+        scored.push((prefix_match, score, cand));
     }
 }
 
@@ -1048,5 +1067,52 @@ pub fn sidebar_tab_name(t: &SidebarTab) -> &'static str {
         SidebarTab::Todo(_) => "todo",
         SidebarTab::ToolPicker(_) => "tools",
         SidebarTab::Hotkey => "hotkey",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// A prefix match must outrank a non-prefix subsequence match even
+    /// when both have the same gap score. The motivating bug: typing
+    /// `/tool` ranked `/skill:ecommerce-rpa-toolkit` (contiguous
+    /// substring "tool" -> gap 0) ahead of the literal `/tool` command
+    /// because the alphabetical tiebreak put "skill" before "tool".
+    #[test]
+    fn prefix_match_outranks_same_score_subsequence() {
+        // Sanity: both stems match `tool` with score 0.
+        let tool_score = crate::fuzzy::score("tool", "tool").unwrap();
+        let ecomm_score = crate::fuzzy::score("tool", "ecommerce-rpa-toolkit").unwrap();
+        assert_eq!(tool_score, 0);
+        assert_eq!(ecomm_score, 0);
+
+        // The new prefix_match key separates them: "tool" starts_with
+        // "tool" (true), "ecommerce-rpa-toolkit" does not (false).
+        let tool_prefix = "tool".starts_with("tool");
+        let ecomm_prefix = "ecommerce-rpa-toolkit".starts_with("tool");
+        assert!(tool_prefix);
+        assert!(!ecomm_prefix);
+
+        // Simulate the sort key tuple (prefix_match desc, score asc,
+        // alpha asc): true (1) > false (0), so /tool ranks first.
+        let a = (tool_prefix, tool_score, "/tool".to_string());
+        let b = (
+            ecomm_prefix,
+            ecomm_score,
+            "/skill:ecommerce-rpa-toolkit".to_string(),
+        );
+        assert!(
+            b.0.cmp(&a.0) == std::cmp::Ordering::Less,
+            "prefix must rank first"
+        );
+    }
+
+    /// Empty query degrades gracefully: every stem `starts_with("")`
+    /// is true, so all candidates are at the same tier and the order
+    /// falls back to alphabetical (existing behaviour).
+    #[test]
+    fn empty_query_all_prefix_tier() {
+        assert!("tool".starts_with(""));
+        assert!("skill".starts_with(""));
+        assert!("mcp".starts_with(""));
     }
 }

@@ -852,7 +852,15 @@ impl App {
         } else {
             self.function.push(SidebarTab::Plan(state));
         }
-        self.show_panel();
+        // Show the plan panel but keep focus on the input box: after the
+        // AI presents a plan the user still needs to type args (or other
+        // follow-up text), so the cursor must stay in the input field.
+        // `jump_to_plan` (the /plan command path) keeps the
+        // panel-focused behaviour because that is an explicit "show me
+        // the plan" navigation.
+        self.function_visible = true;
+        self.focus_target = FocusTarget::Input;
+        self.function_panel_cursor = None;
         self.acknowledge_panel();
     }
 
