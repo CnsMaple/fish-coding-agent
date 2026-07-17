@@ -399,7 +399,7 @@ pub fn os_name() -> &'static str {
 
 #[cfg(windows)]
 pub(super) fn windows_shell_program() -> &'static str {
-    static SHELL: OnceLock<&'static str> = OnceLock::new();
+    static SHELL: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
     SHELL.get_or_init(|| {
         if std::process::Command::new("pwsh")
             .arg("-NoLogo")

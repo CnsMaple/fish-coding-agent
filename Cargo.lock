@@ -794,6 +794,7 @@ dependencies = [
  "hex",
  "html2text",
  "image",
+ "libc",
  "open",
  "prost",
  "pulldown-cmark",
