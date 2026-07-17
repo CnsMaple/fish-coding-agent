@@ -59,7 +59,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           name: Nightly
-          tag: nightly
+          tag_name: nightly
           body: |
             Automated nightly build of fish-coding-agent.
             Built from commit ${{ github.sha }} on ${{ github.run_id }}.
