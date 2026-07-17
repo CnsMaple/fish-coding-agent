@@ -90,6 +90,7 @@ pub fn render(area: Rect, buf: &mut Buffer, app: &mut App) {
             config: &app.config,
             todos: &todo_items,
             disabled_tools: &app.disabled_tools,
+            agent: app.active_agent,
         };
         let cursor = match tab {
             SidebarTab::Notifications => {

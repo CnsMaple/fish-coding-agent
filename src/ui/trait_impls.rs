@@ -768,18 +768,32 @@ impl TabWidget for crate::function::ToolPickerState {
             for row in range {
                 let tool_idx = self.filtered[row];
                 let name = &self.tools[tool_idx];
-                let is_disabled = ctx.disabled_tools.contains(name.as_str());
+                let mode_denied = matches!(
+                    crate::permission::check(ctx.agent, name.as_str()),
+                    crate::permission::Action::Deny
+                );
+                let user_disabled = ctx.disabled_tools.contains(name.as_str());
                 let is_cursor = row == self.cursor;
-                let checkbox = if is_disabled { "\u{2612}" } else { "\u{2610}" };
+                let (checkbox, style) = if mode_denied {
+                    ("\u{1F512}", Theme::dim())
+                } else if user_disabled {
+                    ("\u{2717}", Theme::dim())
+                } else {
+                    ("\u{2713}", Theme::base())
+                };
                 let y = area.y + (row - self.scroll) as u16;
                 let line = if is_cursor {
                     Line::from(vec![
                         Span::styled("> ", Theme::bold()),
-                        Span::raw(format!("{checkbox} ")),
-                        Span::raw(name.clone()),
+                        Span::styled(format!("{checkbox} "), style),
+                        Span::styled(name.clone(), style),
                     ])
                 } else {
-                    Line::from(Span::raw(format!("  {checkbox} {name}")))
+                    Line::from(vec![
+                        Span::raw("  "),
+                        Span::styled(format!("{checkbox} "), style),
+                        Span::styled(name.clone(), style),
+                    ])
                 };
                 buf.set_line(area.x, y, &line, area.width);
             }

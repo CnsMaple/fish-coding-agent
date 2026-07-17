@@ -1975,7 +1975,15 @@ pub(super) fn handle_tool_picker_key(
         }
         KeyCode::Char(' ') => {
             if let Some(name) = state.selected() {
-                if app.disabled_tools.contains(name) {
+                if matches!(
+                    crate::permission::check(app.active_agent, name),
+                    crate::permission::Action::Deny
+                ) {
+                    app.notify(
+                        ToastLevel::Warn,
+                        format!("`{name}` is locked in {} mode", app.active_agent.as_str()),
+                    );
+                } else if app.disabled_tools.contains(name) {
                     app.disabled_tools.remove(name);
                 } else {
                     app.disabled_tools.insert(name.to_string());

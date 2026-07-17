@@ -12,6 +12,7 @@ pub struct TabCtx<'a> {
     pub config: &'a Config,
     pub todos: &'a [TodoItem],
     pub disabled_tools: &'a std::collections::HashSet<String>,
+    pub agent: crate::permission::Agent,
 }
 
 /// A widget rendered inside the function panel's bordered area.
