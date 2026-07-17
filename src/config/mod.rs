@@ -210,12 +210,27 @@ impl ReasoningMode {
         }
     }
 
+    /// For OpenAI and OpenAI-compatible endpoints (DashScope, GLM,
+    /// DeepSeek, etc.): returns the `reasoning_effort` value (or `None`
+    /// to omit the field entirely).
+    ///
+    /// `Off` maps to `"none"` (not omitted!) so that models which think
+    /// by default (e.g. GLM-5.2) actually disable thinking — omitting
+    /// the field would fall back to the model's default thinking
+    /// behavior, silently ignoring the user's "off" selection.
+    ///
+    /// `Adaptive` is omitted (`None`) so the endpoint uses its own
+    /// adaptive reasoning default.
     pub fn openai_effort(self) -> Option<&'static str> {
         match self {
-            ReasoningMode::Off | ReasoningMode::Adaptive => None,
-            ReasoningMode::Minimal | ReasoningMode::Low => Some("low"),
+            ReasoningMode::Adaptive => None,
+            ReasoningMode::Off => Some("none"),
+            ReasoningMode::Minimal => Some("minimal"),
+            ReasoningMode::Low => Some("low"),
             ReasoningMode::Medium => Some("medium"),
-            ReasoningMode::High | ReasoningMode::XHigh | ReasoningMode::Max => Some("high"),
+            ReasoningMode::High => Some("high"),
+            ReasoningMode::XHigh => Some("xhigh"),
+            ReasoningMode::Max => Some("max"),
         }
     }
 }
