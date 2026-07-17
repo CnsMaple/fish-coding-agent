@@ -1,0 +1,68 @@
+name: Nightly Release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: fish-coding-agent.exe
+            archive: fish-coding-agent-windows-x64.zip
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact: fish-coding-agent
+            archive: fish-coding-agent-linux-x64.tar.gz
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact: fish-coding-agent
+            archive: fish-coding-agent-macos-arm64.tar.gz
+          - os: macos-13
+            target: x86_64-apple-darwin
+            artifact: fish-coding-agent
+            archive: fish-coding-agent-macos-x86_64.tar.gz
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Setup caching
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build release
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Archive artifact (unix)
+        if: matrix.os != 'windows-latest'
+        run: tar -czf ${{ matrix.archive }} -C target/${{ matrix.target }}/release ${{ matrix.artifact }}
+
+      - name: Archive artifact (windows)
+        if: matrix.os == 'windows-latest'
+        run: Compress-Archive -Path target/${{ matrix.target }}/release/${{ matrix.artifact }} -DestinationPath ${{ matrix.archive }}
+
+      - name: Upload to nightly release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Nightly
+          tag: nightly
+          body: |
+            Automated nightly build of fish-coding-agent.
+            Built from commit ${{ github.sha }} on ${{ github.run_id }}.
+            Replaces the previous nightly artifacts.
+          prerelease: true
+          files: ${{ matrix.archive }}
