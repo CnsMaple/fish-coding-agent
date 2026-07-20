@@ -1159,89 +1159,13 @@ impl Session {
         let mut offsets = Vec::with_capacity(self.messages.len() + 1);
         offsets.push(0); // line_offsets[0] = 0
 
-        // Pre-render every message whose LRU entry is stale/missing
-        // BEFORE borrowing `&mut self.messages`. `build_message_lines`
-        // takes `&Session` (reads `messages` + writes the LRU via its
-        // interior Mutex) and computes both the full `Vec<Line>` AND
-        // the `content_line_count`. By warming the LRU here, the
-        // counting pass below reads `content_line_count` from the
-        // cache instead of re-parsing Markdown via
-        // `render_cached_content_lines`, AND the later render pass
-        // (`build_lines_viewport` → `build_message_lines`) hits the
-        // same LRU entry. Net effect: during streaming each frame
-        // parses the growing message exactly once instead of twice.
-        //
-        // Collect the stale indices first (holding only the LRU lock),
-        // then call `build_message_lines` with `&self` so there is no
-        // aliasing `&mut` borrow on `messages`.
-        let stale_indices: Vec<usize> = {
-            let lru = self.message_lines_cache.lock().unwrap();
-            self.messages
-                .iter()
-                .enumerate()
-                .filter_map(|(i, m)| {
-                    let valid = lru.get(&i).is_some_and(|c| {
-                        c.content_version == m.content_version
-                            && c.width == width
-                            && c.display_cursor == m.display_cursor
-                            && c.content_len == m.content.len()
-                    });
-                    if valid {
-                        None
-                    } else {
-                        Some(i)
-                    }
-                })
-                .collect()
-        };
-        for idx in &stale_indices {
-            // `build_message_lines` writes the LRU entry (with
-            // `content_line_count`) via the interior Mutex; no `&mut`
-            // on `messages` is taken here.
-            let _ = crate::session::render::build_message_lines(self, *idx, width as usize);
-        }
-
-        // Snapshot valid `content_line_count` values from the render
-        // cache (`message_lines_cache`) before borrowing `&mut
-        // self.messages`. After the pre-render pass above, every
-        // message whose render output is width/version-stable now has
-        // a valid entry, so this snapshot hits for all of them.
-        let cached_content_counts: Vec<Option<u32>> = {
-            let lru = self.message_lines_cache.lock().unwrap();
-            self.messages
-                .iter()
-                .enumerate()
-                .map(|(i, m)| {
-                    lru.get(&i).and_then(|c| {
-                        if c.content_version == m.content_version
-                            && c.width == width
-                            && c.display_cursor == m.display_cursor
-                            && c.content_len == m.content.len()
-                        {
-                            Some(c.content_line_count)
-                        } else {
-                            None
-                        }
-                    })
-                })
-                .collect()
-        };
-
-        for (msg_idx, m) in self.messages.iter_mut().enumerate() {
-            // Fast path: use the render cache's content_line_count if
-            // the entry is valid. Write it to `cached_content_line_count`
-            // so `read_cached_content_count_at` (used by `ui::render`
-            // for toggle-row tracking) also hits the fast path.
-            let content_lines = if let Some(count) = cached_content_counts[msg_idx] {
-                m.cached_content_line_count = Some(crate::session::CachedLineCount {
-                    width,
-                    count,
-                    content_len: m.content.len(),
-                });
-                count
-            } else {
-                render_cached_content_lines(m, width)
-            };
+        for m in self.messages.iter_mut() {
+            // Fast path: use `cached_content_line_count` (populated by
+            // `render_cached_content_lines` or from session load) when
+            // valid, otherwise compute and cache lazily. No LRU warmup
+            // is needed here — `build_lines_viewport` will warm the LRU
+            // on demand only for viewport-visible messages.
+            let content_lines = render_cached_content_lines(m, width);
             n += content_lines;
 
             // Attachment blocks.
