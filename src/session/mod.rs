@@ -1932,3 +1932,6 @@ mod compaction_tests {
         assert_eq!(s.apply_compaction(2, 3, "x".to_string()), None);
     }
 }
+action(2, 3, "x".to_string()), None);
+    }
+}
