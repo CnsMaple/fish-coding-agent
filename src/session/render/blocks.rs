@@ -376,7 +376,7 @@ fn build_streaming_tool_rows(
         "shell_command" | "command" => {
             let cmd =
                 crate::commands::extract_partial_json_field(args, "command").unwrap_or_default();
-            build_streaming_shell_rows(&cmd, width, bg)
+            build_streaming_shell_rows(&cmd, width, bg, tool.started_at)
         }
         "python_command" => {
             let code =
@@ -408,7 +408,12 @@ fn build_streaming_tool_rows(
 
 /// Streaming shell command preview — shows the command text as it
 /// arrives from the LLM, with sh syntax highlighting.
-fn build_streaming_shell_rows(cmd: &str, width: usize, bg: Color) -> Vec<Line<'static>> {
+fn build_streaming_shell_rows(
+    cmd: &str,
+    width: usize,
+    bg: Color,
+    started_at: Option<chrono::DateTime<chrono::Utc>>,
+) -> Vec<Line<'static>> {
     let width = width.max(4);
     let mut rows = Vec::new();
     rows.push(border_line(width, bg));
@@ -463,7 +468,13 @@ fn build_streaming_shell_rows(cmd: &str, width: usize, bg: Color) -> Vec<Line<'s
 
     rows.push(border_with_label_line(width, " Output ", bg));
     rows.extend(box_row_lines("…", width, bg));
-    rows.push(border_line(width, bg));
+    if let Some(start) = started_at {
+        let elapsed = (chrono::Utc::now() - start).num_seconds().max(0);
+        let label = format!("[{elapsed}s|300s]");
+        rows.push(border_line_with_right_label(width, &label, bg));
+    } else {
+        rows.push(border_line(width, bg));
+    }
     rows
 }
 
