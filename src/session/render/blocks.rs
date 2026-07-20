@@ -1433,20 +1433,26 @@ fn build_edit_diff_rows(
     let lang = ext;
 
     let width = width.max(4);
+    let max_line_width = diff
+        .iter()
+        .map(|l| l.line_no.to_string().len())
+        .max()
+        .unwrap_or(0)
+        .max(3);
     let mut rows = vec![border_with_label_line(width, &title, bg)];
     if visible {
         if diff.is_empty() {
             rows.extend(box_row_lines("[no changes]", width, bg));
         } else {
             for line in &diff {
-                rows.push(diff_box_row_line(line, width, bg, lang));
+                rows.push(diff_box_row_line(line, max_line_width, width, bg, lang));
             }
         }
     } else {
         let shown = preview_lines.min(diff.len());
         let skip = diff.len().saturating_sub(shown);
         for line in diff.iter().skip(skip) {
-            rows.push(diff_box_row_line(line, width, bg, lang));
+            rows.push(diff_box_row_line(line, max_line_width, width, bg, lang));
         }
         if skip > 0 {
             rows.push(click_hint_line(skip, width, bg));
@@ -1458,6 +1464,7 @@ fn build_edit_diff_rows(
 
 pub(super) fn diff_box_row_line(
     diff: &DiffLine,
+    number_width: usize,
     width: usize,
     bg: Color,
     lang: &str,
@@ -1474,7 +1481,6 @@ pub(super) fn diff_box_row_line(
         DiffLineKind::Context => Color::Reset,
     };
 
-    let number_width = 3.max(diff.line_no.to_string().len());
     let number_str = format!("{:>width$} ", diff.line_no, width = number_width);
     let sign_str = sign.to_string();
     let prefix = format!("{sign_str}{number_str}");

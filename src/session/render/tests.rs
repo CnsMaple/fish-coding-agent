@@ -2123,7 +2123,13 @@ mod border_fix_tests {
             content: "let x = some_long_variable_name_that_might_overflow;".to_string(),
         };
         for width in [30usize, 50, 80, 120] {
-            let line = diff_box_row_line(&diff, width, Color::Reset, "rust");
+            let line = diff_box_row_line(
+                &diff,
+                3.max(diff.line_no.to_string().len()),
+                width,
+                Color::Reset,
+                "rust",
+            );
             let line_w = line.width();
             assert_eq!(
                 line_w,
