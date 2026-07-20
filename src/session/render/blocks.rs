@@ -319,6 +319,15 @@ pub(super) fn build_tool_block_rows(
     } else {
         let (output, footer) = tool_display_content(tool);
         let title_highlighted = tool.name == "shell_command" || tool.name == "command";
+        let footer = if tool.running && title_highlighted && footer.is_empty() {
+            let elapsed = tool
+                .started_at
+                .map(|t| (chrono::Utc::now() - t).num_seconds().max(0))
+                .unwrap_or(0);
+            format!("[{elapsed}s|300s]")
+        } else {
+            footer
+        };
         if title_highlighted {
             build_shell_command_rows(
                 &tool.title,

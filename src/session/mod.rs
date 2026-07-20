@@ -135,6 +135,11 @@ pub struct ToolResultBlock {
     /// type (not just shell/python commands).
     #[serde(default)]
     pub failed: bool,
+    /// When the tool started running (set on `running = true`).
+    /// Used by the renderer to show live elapsed time while the
+    /// command is in flight.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl ToolResultBlock {
@@ -168,6 +173,7 @@ impl ToolResultBlock {
             streaming_input,
             cached_line_count_visible: None,
             cached_line_count_collapsed: None,
+            started_at: None,
         }
     }
 }
@@ -702,6 +708,7 @@ impl Session {
                     let tool = &mut m.tool_results[pos];
                     tool.title = title;
                     tool.running = true;
+                    tool.started_at = Some(chrono::Utc::now());
                     if tool.call_id.is_empty() {
                         tool.call_id = call_id;
                     }
