@@ -24,7 +24,6 @@ jobs:
             target: aarch64-apple-darwin
             artifact: fish-coding-agent
             archive: fish-coding-agent-macos-arm64.tar.gz
-          - os: ubuntu-latest
 
     runs-on: ${{ matrix.os }}
 
