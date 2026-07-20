@@ -518,6 +518,7 @@ mod tests {
             streaming_input: String::new(),
             cached_line_count_visible: None,
             cached_line_count_collapsed: None,
+            started_at: None,
         }
     }
 

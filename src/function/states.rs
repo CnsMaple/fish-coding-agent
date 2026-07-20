@@ -1572,6 +1572,9 @@ pub struct AskItem {
     pub cursor: usize,
     pub scroll: usize,
     pub answered: Option<String>,
+    /// Buffer for free-form typing when the cursor is on the
+    /// "Type your own answer…" row.
+    pub custom_input: String,
 }
 
 impl AskItem {
@@ -1584,6 +1587,7 @@ impl AskItem {
             cursor: 0,
             scroll: 0,
             answered: None,
+            custom_input: String::new(),
         }
     }
 

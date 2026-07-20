@@ -290,6 +290,7 @@ mod tool_block_count_tests {
             streaming_input: String::new(),
             cached_line_count_visible: None,
             cached_line_count_collapsed: None,
+            started_at: None,
         }
     }
 
@@ -310,6 +311,7 @@ mod tool_block_count_tests {
             pruned: false,
             streaming_input: String::new(), cached_line_count_visible: None,
             cached_line_count_collapsed: None,
+            started_at: None,
         }
     }
 
@@ -699,6 +701,7 @@ mod tool_block_count_tests {
                 streaming_input: String::new(),
                 cached_line_count_visible: None,
                 cached_line_count_collapsed: None,
+                started_at: None,
             });
 
         // Post-tool reasoning must land in a NEW segment, not extend
@@ -759,6 +762,7 @@ mod tool_block_count_tests {
                 streaming_input: String::new(),
                 cached_line_count_visible: None,
                 cached_line_count_collapsed: None,
+                started_at: None,
             });
 
         // 3. Post-tool reasoning burst. The auto-close from Layer 1
@@ -1031,6 +1035,7 @@ mod skill_block_count_tests {
             streaming_input: String::new(),
             cached_line_count_visible: None,
             cached_line_count_collapsed: None,
+            started_at: None,
         });
         s.push(asst);
 
@@ -1100,6 +1105,7 @@ mod tests {
             line_count: 0,
             cached_content_line_count: None,
             content_version: 0,
+            prefix: false,
         });
         s
     }
@@ -1176,6 +1182,7 @@ mod tests {
             streaming_input: String::new(),
             cached_line_count_visible: None,
             cached_line_count_collapsed: None,
+            started_at: None,
         });
         let total_with_placeholder = s.count_all_lines_with_width(80);
         s.messages[1].tool_results.pop();
@@ -1213,6 +1220,7 @@ mod tests {
             streaming_input: String::new(),
             cached_line_count_visible: None,
             cached_line_count_collapsed: None,
+            started_at: None,
         });
         // A stray empty placeholder (the kind the old bug produced).
         asst.tool_results.push(ToolResultBlock {
@@ -1229,6 +1237,7 @@ mod tests {
             streaming_input: String::new(),
             cached_line_count_visible: None,
             cached_line_count_collapsed: None,
+            started_at: None,
         });
         s.push(asst);
         let (lines, _t) = build_lines(&s, 100);
@@ -1274,6 +1283,7 @@ mod tests {
             pruned: false,
             streaming_input: String::new(), cached_line_count_visible: None,
             cached_line_count_collapsed: None,
+        started_at: None,
         };
         let rows = build_tool_block_rows(&tool, true, 10, 100);
         let text = lines_to_text(&rows);
@@ -1308,6 +1318,7 @@ mod tests {
             pruned: false,
             streaming_input: String::new(), cached_line_count_visible: None,
             cached_line_count_collapsed: None,
+        started_at: None,
         };
         let rows = build_tool_block_rows(&tool, true, 10, 100);
         assert!(
@@ -1362,6 +1373,7 @@ mod tests {
             streaming_input: String::new(),
             cached_line_count_visible: None,
             cached_line_count_collapsed: None,
+            started_at: None,
         };
         let rows = build_tool_block_rows(&tool, true, 10, 100);
         let text = lines_to_text(&rows);
@@ -1397,6 +1409,7 @@ mod tests {
             streaming_input: String::new(),
             cached_line_count_visible: None,
             cached_line_count_collapsed: None,
+            started_at: None,
         };
         let rows = build_tool_block_rows(&tool, true, 10, 80);
         let text = lines_to_text(&rows);
@@ -1538,6 +1551,7 @@ mod tests {
                 line_count: lines_per_msg as u32,
                 cached_content_line_count: None,
                 content_version: 0,
+                prefix: false,
             });
             if i % 2 == 0 {
                 s.push(Message::new(Role::User, format!("prompt {}", i / 2)));
@@ -1693,6 +1707,7 @@ mod tests {
             streaming_input: String::new(),
             cached_line_count_visible: None,
             cached_line_count_collapsed: None,
+            started_at: None,
         });
         s.push(asst);
         let area = Rect::new(0, 0, 60, 16);
@@ -2323,6 +2338,7 @@ mod border_fix_tests {
                 streaming_input: String::new(),
                 cached_line_count_visible: None,
                 cached_line_count_collapsed: None,
+                started_at: None,
             });
             session.push(msg);
 

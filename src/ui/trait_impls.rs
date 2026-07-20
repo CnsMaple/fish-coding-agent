@@ -568,7 +568,7 @@ impl TabWidget for crate::function::AskState {
                     .map(|it| 1 + it.options.len() + 1)
                     .unwrap_or(1)
             }
-            AskPhase::Reviewing => self.items.len() * 2,
+            AskPhase::Reviewing => self.items.len(),
         }
     }
     fn render_body(&mut self, area: Rect, buf: &mut Buffer, _ctx: &TabCtx) -> Option<(u16, u16)> {
@@ -618,7 +618,7 @@ impl TabWidget for crate::function::AskState {
         if total > 0 {
             let cursor = match self.phase {
                 AskPhase::Asking => self.items[active_idx].cursor + 1,
-                AskPhase::Reviewing => 0,
+                AskPhase::Reviewing => self.active,
             };
             let range = visible_window(cursor, &mut self.scroll, body_area.height as usize, total);
             for row in range {

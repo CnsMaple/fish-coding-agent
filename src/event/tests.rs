@@ -259,7 +259,7 @@ fn open_model_picker_for_entry_skips_stale_same_kind_cache() {
     use crate::config::ProviderConfig;
     use crate::function::notifications::{ModelCache, ModelInfo};
     let mut app = make_app();
-    let opencode_id = make_id(ProviderKind::Openai, ProviderMode::Key);
+    let _opencode_id = make_id(ProviderKind::Openai, ProviderMode::Key);
     let alibaba_id = "openai:key-2".to_string();
     app.config.entries.insert(
         alibaba_id.clone(),
@@ -2482,7 +2482,7 @@ async fn ask_reviewing_enter_sends_summary() {
 /// In the Reviewing phase Up/Down scroll the cursor (it does
 /// NOT pop back to Asking — the user just reviews answers).
 #[tokio::test]
-async fn ask_reviewing_up_returns_to_asking() {
+async fn ask_reviewing_esc_returns_to_asking() {
     use crate::function::AskPhase;
     let mut app = make_app_with_provider();
     app.open_ask("Q1?".to_string(), vec!["a".into()]);
@@ -2506,9 +2506,9 @@ async fn ask_reviewing_up_returns_to_asking() {
     handle_ask_key(enter_key(), &mut app, &mut state).await;
     assert_eq!(state.phase, AskPhase::Reviewing);
 
-    // Up pops back to Asking.
+    // Esc pops back to Asking.
     handle_ask_key(
-        KeyEvent::new(KeyCode::Up, KeyModifiers::empty()),
+        KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()),
         &mut app,
         &mut state,
     )

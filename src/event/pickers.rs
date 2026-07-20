@@ -371,12 +371,8 @@ pub(super) async fn handle_ask_key(
     match k.code {
         KeyCode::Up => {
             if state.phase == AskPhase::Reviewing {
-                // Up in the review phase pops back to Asking so the
-                // user can fix an answer. We jump to the first
-                // unanswered question to be helpful.
-                state.phase = AskPhase::Asking;
-                if let Some(idx) = state.next_unanswered(0) {
-                    state.active = idx;
+                if state.active > 0 {
+                    state.active -= 1;
                 }
                 return true;
             }
@@ -391,6 +387,9 @@ pub(super) async fn handle_ask_key(
         }
         KeyCode::Down => {
             if state.phase == AskPhase::Reviewing {
+                if state.active + 1 < state.items.len() {
+                    state.active += 1;
+                }
                 return true;
             }
             if let Some(it) = state.items.get_mut(state.active) {
@@ -436,15 +435,25 @@ pub(super) async fn handle_ask_key(
             let is_freeform = cursor >= state.items[q_idx].options.len();
 
             if is_freeform {
-                // Tell the LLM to wait for the user's free-form
-                // input. The state stays in Asking with the
-                // question still unanswered, so the user can
-                // re-pick an option if they change their mind.
-                let question = state.items[q_idx].question.clone();
-                let prompt = format!(
-                    "(Question: {question})\nPlease wait — the user is typing a free-form answer."
-                );
-                crate::commands::send_chat(app, prompt, Vec::new());
+                let custom = state.items[q_idx].custom_input.clone();
+                if custom.trim().is_empty() {
+                    // No text typed yet — tell the LLM to wait.
+                    let question = state.items[q_idx].question.clone();
+                    let prompt = format!(
+                        "(Question: {question})\nPlease wait — the user is typing a free-form answer."
+                    );
+                    crate::commands::send_chat(app, prompt, Vec::new());
+                    return true;
+                }
+                // Use the typed custom input as the answer.
+                state.items[q_idx].answered = Some(custom);
+                state.items[q_idx].custom_input.clear();
+                if state.all_answered() {
+                    state.phase = AskPhase::Reviewing;
+                } else if let Some(next) = state.next_unanswered(q_idx + 1) {
+                    state.active = next;
+                    state.items[next].cursor = 0;
+                }
                 return true;
             }
 
@@ -461,12 +470,39 @@ pub(super) async fn handle_ask_key(
             }
             true
         }
+        KeyCode::Backspace => {
+            if state.phase == AskPhase::Asking {
+                if let Some(it) = state.items.get_mut(state.active) {
+                    if it.cursor >= it.options.len() && !it.custom_input.is_empty() {
+                        it.custom_input.pop();
+                        return true;
+                    }
+                }
+            }
+            false
+        }
+        KeyCode::Char(c) => {
+            if state.phase == AskPhase::Asking {
+                if let Some(it) = state.items.get_mut(state.active) {
+                    if it.cursor >= it.options.len() {
+                        it.custom_input.push(c);
+                        return true;
+                    }
+                }
+            }
+            false
+        }
         KeyCode::Esc => {
-            // Esc dismisses the entire ask round. We synthesize a
-            // user turn summarising the answered questions (if any)
-            // and the unanswered ones (as dismissed), so the LLM has
-            // a complete picture of what the user did and didn't
-            // answer.
+            if state.phase == AskPhase::Reviewing {
+                // Esc in Reviewing goes back to Asking so the user
+                // can fix an answer.
+                state.phase = AskPhase::Asking;
+                if let Some(idx) = state.next_unanswered(0) {
+                    state.active = idx;
+                }
+                return true;
+            }
+            // Esc in Asking dismisses the entire ask round.
             let summary = state.build_dismiss_summary();
             close_active_function_tab(app);
             crate::commands::send_chat(app, summary, Vec::new());

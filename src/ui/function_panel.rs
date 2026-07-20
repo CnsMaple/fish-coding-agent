@@ -401,36 +401,54 @@ pub fn ask_active_question_lines(
     }
     let freeform_idx = it.options.len();
     if freeform_idx == it.cursor {
+        let label = if it.custom_input.is_empty() {
+            "Type your own answer…".to_string()
+        } else {
+            format!("Custom: [{}]", it.custom_input)
+        };
         lines.push(Line::from(vec![
             Span::styled(">  - ", Theme::bold()),
-            Span::styled("Type your own answer…", Theme::dim()),
+            Span::styled(
+                label,
+                if it.custom_input.is_empty() {
+                    Theme::dim()
+                } else {
+                    Theme::bold()
+                },
+            ),
         ]));
     } else {
-        lines.push(Line::from(Span::styled(
-            "   - Type your own answer…",
-            Theme::dim(),
-        )));
+        let label = if it.custom_input.is_empty() {
+            "   - Type your own answer…".to_string()
+        } else {
+            format!("   - Custom: [{}]", it.custom_input)
+        };
+        lines.push(Line::from(Span::styled(label, Theme::dim())));
     }
     lines
 }
 
-/// Body lines for the Reviewing phase: one Q/A pair per question.
+/// Body lines for the Reviewing phase: one line per Q&A pair, with
+/// the answer shown to the right of the question.  The active pair
+/// (highlighted by the cursor) is prefixed with `>`.
 ///
 /// ```text
-/// Q1. <question>
-///    A. <answer>
-/// Q2. <question>
-///    A. <answer>
+/// > Q1. <question>     → <answer>
+///   Q2. <question>     → <answer>
 /// ```
 pub fn ask_review_lines(s: &crate::function::AskState) -> Vec<Line<'static>> {
     let mut lines: Vec<Line> = Vec::new();
     for (i, it) in s.items.iter().enumerate() {
         let ans = it.answered.as_deref().unwrap_or("(no answer)");
-        lines.push(Line::from(Span::styled(
-            format!("Q{}. {}", i + 1, it.question),
-            Theme::bold(),
-        )));
-        lines.push(Line::from(Span::raw(format!("   A. {ans}"))));
+        let label = format!("Q{}. {}  →  {ans}", i + 1, it.question);
+        if i == s.active {
+            lines.push(Line::from(vec![
+                Span::styled(">  ", Theme::bold()),
+                Span::styled(label, Theme::bold()),
+            ]));
+        } else {
+            lines.push(Line::from(Span::raw(format!("   {label}"))));
+        }
     }
     lines
 }
