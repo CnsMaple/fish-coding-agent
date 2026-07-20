@@ -239,6 +239,7 @@ pub fn build_message_lines(
                 && cached.width == width as u16
                 && cached.display_cursor == m.display_cursor
                 && cached.content_len == m.content.len()
+                && !m.tool_results.iter().any(|t| t.running)
             {
                 return Arc::clone(&cached.lines);
             }
