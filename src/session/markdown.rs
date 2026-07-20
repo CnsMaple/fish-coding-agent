@@ -332,20 +332,14 @@ impl MdRenderer {
             table_border('+', '+', '+', &widths),
             Theme::dim(),
         )));
-        for (idx, row) in table.rows.iter().enumerate() {
+        for row in &table.rows {
             self.out
                 .extend(table_row_lines(row, &widths, &table.alignments));
-            if table.header_rows > 0 && idx + 1 == table.header_rows && idx + 1 < table.rows.len() {
-                self.out.push(Line::from(Span::styled(
-                    table_border('+', '+', '+', &widths),
-                    Theme::dim(),
-                )));
-            }
+            self.out.push(Line::from(Span::styled(
+                table_border('+', '+', '+', &widths),
+                Theme::dim(),
+            )));
         }
-        self.out.push(Line::from(Span::styled(
-            table_border('+', '+', '+', &widths),
-            Theme::dim(),
-        )));
     }
 
     fn render(&mut self, text: &str) -> Vec<Line<'static>> {
