@@ -588,6 +588,8 @@ impl App {
         // Land at the tail immediately; cancel any in-flight momentum.
         self.set_scroll_anchored(0);
         self.status.reset_usage_stats();
+        self.hit_rate.clear();
+        self.token_rate.clear();
     }
 
     /// Pin the session viewport to a specific scroll offset, cancelling

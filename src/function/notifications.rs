@@ -210,6 +210,10 @@ impl HitRate {
         let sum: f64 = self.window.iter().sum();
         Some(sum / self.window.len() as f64)
     }
+
+    pub fn clear(&mut self) {
+        self.window.clear();
+    }
 }
 
 /// Token rate tracker with a sliding window.
@@ -259,6 +263,11 @@ impl TokenRate {
         }
         let sum: f64 = self.window.iter().sum();
         Some(sum / self.window.len() as f64)
+    }
+
+    pub fn clear(&mut self) {
+        self.window.clear();
+        self.current = None;
     }
 }
 
