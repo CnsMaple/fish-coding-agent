@@ -107,6 +107,11 @@ pub fn render(
         vec![]
     };
 
+    #[cfg(debug_assertions)]
+    if visible.len() != (end - start) as usize {
+        diagnose_viewport(session, width, start, end, visible.len());
+    }
+
     let p = Paragraph::new(visible).style(Style::reset());
     p.render(area, buf);
 }
@@ -706,4 +711,48 @@ pub fn build_lines(
         out.push(Line::from("")); // bottom gap
     }
     (out, Vec::new())
+}
+
+/// Debug-only: when `visible` line count disagrees with `end - start`,
+/// dump per-message details to stderr so the developer can identify
+/// exactly which message has a count/render mismatch.
+#[cfg(debug_assertions)]
+fn diagnose_viewport(session: &Session, width: usize, start: u32, end: u32, visible_len: usize) {
+    use std::io::Write;
+    let mut w = std::io::stderr().lock();
+    let _ = writeln!(
+        w,
+        "[viewport-diag] MISMATCH: visible={visible_len} expected={} range=[{start},{end}) total_msgs={}",
+        end - start,
+        session.messages.len(),
+    );
+    let offsets = &session.line_offsets;
+    if offsets.len() <= 1 {
+        let _ = writeln!(
+            w,
+            "[viewport-diag] line_offsets too short (len={})",
+            offsets.len()
+        );
+        return;
+    }
+    let total = *offsets.last().unwrap_or(&0);
+    let _ = writeln!(w, "[viewport-diag] line_offsets total={total}");
+    for (msg_idx, m) in session.messages.iter().enumerate() {
+        let msg_start = offsets.get(msg_idx).copied().unwrap_or(0);
+        let msg_end = offsets.get(msg_idx + 1).copied().unwrap_or(total);
+        let expected_lines = msg_end - msg_start; // includes gap
+        let rendered = build_message_lines(session, msg_idx, width);
+        // rendered.len() is content-only; build_lines_viewport adds
+        // the gap separately.
+        if expected_lines.saturating_sub(1) as usize != rendered.len() {
+            let _ = writeln!(
+                w,
+                "[viewport-diag]  msg[{msg_idx}] role={:?} expected={expected_lines} content={} rendered={} start={msg_start} end={msg_end} content.len={}",
+                m.role,
+                expected_lines.saturating_sub(1),
+                rendered.len(),
+                m.content.len(),
+            );
+        }
+    }
 }

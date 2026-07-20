@@ -189,32 +189,35 @@ pub(super) fn build_skill_block_rows(skill: &SkillRef, width: usize) -> Vec<Line
 /// This mirrors `build_skill_block_rows` exactly — any change to one
 /// must be reflected in the other. The block is:
 ///   1. top border
-///   2. `[skill]`
-///   3. `name: <name>`
-///   4. `args: <args>` (only when args is non-empty)
-///   5. `context: <path>`
+///   2. `[skill]` (wrapped)
+///   3. `name: <name>` (wrapped)
+///   4. `args: <args>` (wrapped, only when args is non-empty)
+///   5. `context: <path>` (wrapped)
 ///   6. bottom border
 ///   7. trailing blank line (pushed by `build_message_lines`)
 ///
-/// Used by the per-message line counters (`compute_total_lines`,
-/// `lines_before`, `count_lines_estimate`, `build_lines_viewport`,
-/// and the `ui` toggle-row walk) so the viewport math matches the
-/// actual rendered output. Without this, a user message with
-/// `skill_ref` was undercounted by 5-6 rows and the bottom of long
-/// skill bodies was hidden behind the input area.
-pub fn skill_block_line_count(skill: &SkillRef, _width: usize) -> u32 {
+/// Uses `wrap_line` to count wrapped lines, matching what
+/// `box_row_lines` in `build_skill_block_rows` produces. Previously
+/// this ignored the `width` parameter and always counted each field
+/// as 1 line, causing long fields (e.g. a curl pasted as skill args)
+/// to undercount the block's display rows and hide the bottom of the
+/// viewport.
+pub fn skill_block_line_count(skill: &SkillRef, width: usize) -> u32 {
+    let render_width = width.max(8);
+    let content_width = render_width.saturating_sub(4).max(1);
     let mut rows = 2u32; // top + bottom borders
-    rows += 1; // "[skill]"
-    rows += 1; // "name: ..."
+    rows += wrap_line("[skill]", content_width).len() as u32;
+    rows += wrap_line(&format!("name: {}", skill.name), content_width).len() as u32;
     if skill
         .args
         .as_deref()
         .map(|a| !a.trim().is_empty())
         .unwrap_or(false)
     {
-        rows += 1; // "args: ..."
+        let args_text = format!("args: {}", skill.args.as_deref().unwrap());
+        rows += wrap_line(&args_text, content_width).len() as u32;
     }
-    rows += 1; // "context: ..."
+    rows += wrap_line(&format!("context: {}", skill.context_path), content_width).len() as u32;
     rows += 1; // trailing blank after the block
     rows
 }
