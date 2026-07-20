@@ -765,7 +765,11 @@ pub(super) fn build_agents_content(app: &App) -> String {
     out
 }
 
-pub(super) fn system_prompt(agent: crate::permission::Agent, agents_content: &str) -> String {
+/// Build the dynamic suffix for the system prompt: date, OS, shell,
+/// and workspace path. These change between or even during sessions,
+/// so keeping them separate from the static core avoids invalidating
+/// the prefix cache on every request.
+pub(super) fn system_prompt_dynamic() -> String {
     let now = chrono::Local::now();
     let date = now.format("%Y-%m-%d %A").to_string();
     let cwd = std::env::current_dir()
@@ -773,6 +777,37 @@ pub(super) fn system_prompt(agent: crate::permission::Agent, agents_content: &st
         .unwrap_or_else(|_| ".".to_string());
     let os = crate::tools::os_name();
     let shell = crate::tools::shell_description();
+    format!(
+        "\
+Current date: {date}
+OS: {os}
+Shell: {shell} ({shell_details})
+Workspace: {workspace}
+
+All file paths are relative to the workspace unless noted otherwise. \
+Use `list`, `grep`, and `glob` to discover files — never invent or guess paths.",
+        date = date,
+        os = os,
+        shell = shell,
+        shell_details = crate::tools::shell_guidance(),
+        workspace = cwd,
+    )
+}
+
+/// Build the full system prompt for `agent`. When `Config::prefix_cache`
+/// is enabled, only `system_prompt_core` is sent in the system message
+/// (stable across requests), and `system_prompt_dynamic` is appended
+/// as a separate user message at the end of the prefix.
+pub(super) fn system_prompt(agent: crate::permission::Agent, agents_content: &str) -> String {
+    let core = system_prompt_core(agent, agents_content);
+    format!("{core}\n\n{}", system_prompt_dynamic())
+}
+
+/// Static core system prompt that never changes mid-session.
+/// The dynamic parts (date, CWD, shell) are sent separately via
+/// `system_prompt_dynamic()` as a user message at the end of the
+/// prefix, so the cacheable prefix stays stable.
+fn system_prompt_core(agent: crate::permission::Agent, agents_content: &str) -> String {
     match agent {
         crate::permission::Agent::Build => format!(
             "\
@@ -789,14 +824,7 @@ information provided...\". After working on a file, just stop — do NOT summari
 did unless asked. DO NOT add comments to code unless explicitly asked. Prefer tool calls \
 over prose narration.
 
-You operate in the following environment:
-- Current date: {date}
-- OS: {os}
-- Shell: {shell} ({shell_details})
-- Workspace: {workspace}
-
-All file paths are relative to the workspace unless noted otherwise. Use `list`, `grep`, \
-and `glob` to discover files — never invent or guess paths.
+Use `list`, `grep`, and `glob` to discover files — never invent or guess paths.
 
 {skills}
 
@@ -950,13 +978,10 @@ convention demands it.
 
 ## Language
 
-- Respond in the same language as the user's first prompt. If the user explicitly \
+ - Respond in the same language as the user's first prompt. If the user explicitly \
 requests a different language in a later message, switch to that language.
 {agents}",
-            date = date,
-            workspace = cwd,
-            os = os,
-            shell = shell,
+            shell = crate::tools::shell_description(),
             shell_details = crate::tools::shell_guidance(),
             skills = crate::skill::skills_for_system_prompt(),
             agents = agents_content,
@@ -968,10 +993,6 @@ requests a different language in a later message, switch to that language.
 You are operating in **plan mode**, a read-only research and planning role. \
 Your job is to understand the user's task, gather only the evidence you need, \
 and present a concrete plan the user can approve before any code is written.
-
-Current date: {date}
-Current workspace: {workspace}
-Current OS: {os}, shell: {shell}
 
 ## What you can do
 
@@ -1033,10 +1054,6 @@ its result.
     or call `plan` again.
 {skills}
 {agents}",
-            date = date,
-            workspace = cwd,
-            os = os,
-            shell = shell,
             skills = crate::skill::skills_for_system_prompt(),
             agents = agents_content,
         ),

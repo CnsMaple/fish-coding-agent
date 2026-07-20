@@ -282,6 +282,13 @@ pub struct Message {
     /// cached render output for the others.
     #[serde(default)]
     pub content_version: u64,
+    /// When true, this message is part of the stable cache prefix.
+    /// Prefix messages are sent first in every API request and are
+    /// never compacted away. The session prefix grows append-only:
+    /// once a message is promoted to prefix status it stays there.
+    /// Only set by the compaction/promotion logic.
+    #[serde(default)]
+    pub prefix: bool,
 }
 
 impl Message {
@@ -305,6 +312,7 @@ impl Message {
             line_count,
             cached_content_line_count: None,
             content_version: 0,
+            prefix: false,
         }
     }
 
@@ -829,6 +837,7 @@ impl Session {
             line_count: 0,
             cached_content_line_count: None,
             content_version: 0,
+            prefix: false,
         };
         self.push(msg);
     }
@@ -1054,6 +1063,12 @@ impl Session {
         // at `start`. Indices >= end shift by `(end - start) - 1`.
         self.messages
             .splice(start..end, std::iter::once(summary_msg));
+        // Messages before `start` are now frozen — they will never
+        // be touched again. Mark them as prefix so the request
+        // builder can separate them for prefix-cache payloads.
+        for m in self.messages.iter_mut().take(start) {
+            m.prefix = true;
+        }
         // The splice moved every index >= end down by
         // `(end - start) - 1`. Invalidate their render caches so
         // a stale LRU entry cannot be reused.

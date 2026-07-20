@@ -56,19 +56,41 @@ impl Provider for OpenAiProvider {
         tx: mpsc::UnboundedSender<ChatEvent>,
     ) -> Result<()> {
         let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
+        let mut messages: Vec<serde_json::Value> = Vec::new();
+
+        // System prompt goes first.
+        if let Some(sys) = &req.system {
+            messages.push(serde_json::json!({"role": "system", "content": sys}));
+        }
+
+        // Prefix messages form the stable cache prefix.
+        // They are kept at the head of the conversation and are never
+        // rewritten, maximising DeepSeek prefix-cache reuse.
+        if !req.prefix_messages.is_empty() {
+            for pm in &req.prefix_messages {
+                messages.push(openai_message(pm));
+            }
+            // Add a separator to mark the boundary between cached
+            // prefix and working messages.
+            messages.push(serde_json::json!({
+                "role": "user",
+                "content": "[End of cached context. Continue below.]"
+            }));
+        }
+
+        // Working messages follow the prefix.
+        for m in &req.messages {
+            messages.push(openai_message(m));
+        }
+
         let mut body = serde_json::json!({
             "model": req.model,
             "stream": true,
             "stream_options": { "include_usage": true },
-            "messages": req.messages.iter().map(openai_message).collect::<Vec<_>>(),
+            "messages": messages,
             "tools": req.tools.unwrap_or_else(crate::tools::openai_tool_specs),
             "tool_choice": "auto",
         });
-        if let Some(sys) = &req.system {
-            if let Some(arr) = body["messages"].as_array_mut() {
-                arr.insert(0, serde_json::json!({"role": "system", "content": sys}));
-            }
-        }
         if let Some(effort) = req.thinking.openai_effort() {
             body["reasoning_effort"] = serde_json::Value::String(effort.to_string());
         }

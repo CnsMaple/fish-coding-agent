@@ -236,6 +236,31 @@ pub const PRUNE_PLACEHOLDER: &str = "[Old tool result content cleared]";
 /// session).
 const PRUNE_PROTECTED_TOOLS: &[&str] = &["skill"];
 
+/// Walk the session backward and truncate long tool-result content
+/// for older messages, without clearing them entirely. This is a
+/// lighter-weight pass than `prune` — it preserves the tail of each
+/// truncated result so the model still has some signal, but reduces
+/// token count enough to push back the next compaction.
+///
+/// Truncated results are shortened to `TOOL_OUTPUT_MAX_CHARS` chars
+/// and get an `[truncated]` suffix. Already-truncated results are
+/// skipped. Protected tools (e.g. `skill`) are also skipped.
+pub fn snip(messages: &mut [crate::session::Message]) {
+    use crate::compaction::TOOL_OUTPUT_MAX_CHARS;
+    for m in messages.iter_mut() {
+        for tr in m.tool_results.iter_mut() {
+            if tr.pruned || PRUNE_PROTECTED_TOOLS.contains(&tr.name.as_str()) {
+                continue;
+            }
+            if tr.content.len() > TOOL_OUTPUT_MAX_CHARS {
+                let mut out = tr.content[..TOOL_OUTPUT_MAX_CHARS].to_string();
+                out.push_str("\n[truncated]");
+                tr.content = out;
+            }
+        }
+    }
+}
+
 /// Walk the session backward and mark old tool results as pruned
 /// once their cumulative token estimate exceeds `PRUNE_PROTECT_TOKENS`.
 /// Already-pruned tools stop the accumulation (their content is

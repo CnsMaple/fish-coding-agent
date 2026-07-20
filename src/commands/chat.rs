@@ -106,6 +106,7 @@ pub fn send_message(app: &mut App, user_msg: Message) {
         streaming: true,
         skill_ref: None,
         content_version: 0,
+        prefix: false,
     };
     let id = app.session.push(assistant);
     app.session.streaming_id = Some(id);
@@ -148,6 +149,19 @@ pub fn send_message(app: &mut App, user_msg: Message) {
         }
     }
 
+    // Snip pass: truncate overly long tool results on older messages
+    // when context usage is above the configured ratio. This is a
+    // lighter touch than pruning — the model still sees the partial
+    // output — and helps push back the next full compaction.
+    if let Some(used) = app.status.token_total {
+        let ctx = app.status.context_window_tokens;
+        if ctx > 0 {
+            let ratio = used as f64 / ctx as f64;
+            if ratio >= app.config.tool_result_snip_ratio {
+                crate::compaction::snip(&mut app.session.messages);
+            }
+        }
+    }
     // Prune pass: clear AI-facing content of old tool results whose
     // cumulative size exceeds the protected budget. The TUI still
     // shows the original content; only the LLM-bound value is swapped.
@@ -157,6 +171,7 @@ pub fn send_message(app: &mut App, user_msg: Message) {
         .session
         .messages
         .iter()
+        .filter(|m| !m.prefix)
         .filter(|m| !matches!(m.role, Role::System))
         .filter(|m| {
             // Keep assistant messages that have tool_calls
@@ -249,12 +264,35 @@ pub fn send_message(app: &mut App, user_msg: Message) {
     let agents = build_agents_content(app);
     let sp = system_prompt(app.active_agent, &agents);
 
+    let prefix_messages: Vec<crate::providers::ChatMessage> = if app.config.prefix_cache {
+        let mut pmsgs = Vec::new();
+        for m in &app.session.messages {
+            if !m.prefix {
+                break;
+            }
+            pmsgs.push(ChatMessage {
+                role: match m.role {
+                    Role::User => "user".to_string(),
+                    Role::Assistant => "assistant".to_string(),
+                    Role::System => "user".to_string(),
+                },
+                content: m.content.clone(),
+                content_parts: Vec::new(),
+                tool_call_id: None,
+                tool_calls: Vec::new(),
+            });
+        }
+        pmsgs
+    } else {
+        Vec::new()
+    };
     let req = ChatRequest {
         model,
         messages,
         thinking,
         system: Some(sp),
         tools: None,
+        prefix_messages,
     };
 
     if let Some(tx) = app.msg_tx.clone() {
@@ -349,6 +387,7 @@ pub async fn run_chat_stream(
             thinking: req.thinking,
             system: req.system.clone(),
             tools: req.tools.clone(),
+            prefix_messages: req.prefix_messages.clone(),
         };
         let call = tokio::spawn(async move {
             p.chat_stream(
@@ -763,6 +802,7 @@ pub(super) async fn run_sub_agent(
         thinking: crate::config::ReasoningMode::Off,
         system: Some(system_prompt),
         tools: Some(tools),
+        prefix_messages: Vec::new(),
     };
 
     let retry_delays: [u64; 3] = [10, 30, 60];
@@ -792,6 +832,7 @@ pub(super) async fn run_sub_agent(
                 thinking: req.thinking,
                 system: req.system.clone(),
                 tools: req.tools.clone(),
+                prefix_messages: req.prefix_messages.clone(),
             };
             let call = tokio::spawn(async move {
                 p.chat_stream(&client_c, &base_c, &key_c, req_c, chat_tx)
@@ -1107,6 +1148,7 @@ pub async fn run_compaction_stream(
         thinking: crate::config::ReasoningMode::Off,
         system: Some(compaction_system_prompt()),
         tools: None,
+        prefix_messages: Vec::new(),
     };
 
     let (chat_tx, mut chat_rx) =

@@ -113,6 +113,13 @@ pub struct ChatRequest {
     /// `Some`, the provider uses these instead. This is used by the
     /// sub-agent tool to pass filtered tool specs.
     pub tools: Option<Vec<serde_json::Value>>,
+    /// Stable prefix messages that form the cacheable prefix.
+    /// These messages are sent first (after system) and are never
+    /// rewritten or rotated, maximising DeepSeek prefix-cache reuse.
+    /// When `prefix_messages` is non-empty and the provider supports
+    /// it, these messages are kept at the head of the conversation
+    /// and separated from the working messages.
+    pub prefix_messages: Vec<ChatMessage>,
 }
 
 #[derive(Debug, Clone)]

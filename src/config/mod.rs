@@ -377,6 +377,26 @@ pub fn default_auto_compact() -> bool {
     true
 }
 
+/// Default for `Config::prefix_cache`.
+pub fn default_prefix_cache() -> bool {
+    true
+}
+
+/// Default for `Config::tool_result_snip_ratio`.
+pub fn default_tool_result_snip_ratio() -> f64 {
+    0.6
+}
+
+/// Default for `Config::compact_ratio`.
+pub fn default_compact_ratio() -> f64 {
+    0.8
+}
+
+/// Default for `Config::compact_force_ratio`.
+pub fn default_compact_force_ratio() -> f64 {
+    0.9
+}
+
 /// Default number of output lines visible inside a collapsed tool
 /// block before the Ctrl+O hint is offered. Adjustable via
 /// `/settings → tool preview lines`.
@@ -440,6 +460,28 @@ pub struct Config {
     /// advanced settings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compact_reserved: Option<u64>,
+    /// When true, the system prompt is split into a stable core +
+    /// dynamic suffix. The stable core (instructions + tool defs) is
+    /// kept at the very front of the conversation and never changes,
+    /// maximising DeepSeek prefix-cache reuse. The dynamic suffix
+    /// (date, CWD, shell) is appended as a user message at the end.
+    /// Default: true.
+    #[serde(default = "default_prefix_cache")]
+    pub prefix_cache: bool,
+    /// Ratio of context window at which stale tool results are
+    /// shortened (cheap in-place operation, no LLM call). Default 0.6
+    /// (60%). Mirrors DeepSeek-Reasonix `toolResultSnipRatio`.
+    #[serde(default = "default_tool_result_snip_ratio")]
+    pub tool_result_snip_ratio: f64,
+    /// Ratio of context window at which full compaction
+    /// (archive + summarise stale turns) is triggered. Default 0.8
+    /// (80%). Mirrors DeepSeek-Reasonix `compactRatio`.
+    #[serde(default = "default_compact_ratio")]
+    pub compact_ratio: f64,
+    /// Ratio of context window at which compaction is forced even
+    /// when the foldable region is small. Default 0.9 (90%).
+    #[serde(default = "default_compact_force_ratio")]
+    pub compact_force_ratio: f64,
     #[serde(default)]
     pub entries: HashMap<ProviderId, ProviderConfig>,
     /// MCP server configuration. Mirrors the top-level
@@ -522,6 +564,10 @@ impl Config {
             theme: field(obj, "theme").unwrap_or_default(),
             auto_compact: field(obj, "auto_compact").unwrap_or_default(),
             compact_reserved: field(obj, "compact_reserved").unwrap_or_default(),
+            prefix_cache: field(obj, "prefix_cache").unwrap_or_default(),
+            tool_result_snip_ratio: field(obj, "tool_result_snip_ratio").unwrap_or_default(),
+            compact_ratio: field(obj, "compact_ratio").unwrap_or_default(),
+            compact_force_ratio: field(obj, "compact_force_ratio").unwrap_or_default(),
             entries: tolerant_map::<ProviderConfig>(obj, "entries"),
             mcp: tolerant_map::<crate::mcp::McpEntry>(obj, "mcp"),
             agents: field(obj, "agents").unwrap_or_default(),
@@ -561,6 +607,10 @@ impl Config {
             theme: crate::theme::ThemeVariant::default(),
             auto_compact: default_auto_compact(),
             compact_reserved: None,
+            prefix_cache: true,
+            tool_result_snip_ratio: default_tool_result_snip_ratio(),
+            compact_ratio: default_compact_ratio(),
+            compact_force_ratio: default_compact_force_ratio(),
             entries,
             mcp: HashMap::new(),
             agents: AgentsConfig::default(),
@@ -749,6 +799,10 @@ impl Default for Config {
             theme: crate::theme::ThemeVariant::default(),
             auto_compact: default_auto_compact(),
             compact_reserved: None,
+            prefix_cache: true,
+            tool_result_snip_ratio: default_tool_result_snip_ratio(),
+            compact_ratio: default_compact_ratio(),
+            compact_force_ratio: default_compact_force_ratio(),
             entries: HashMap::new(),
             mcp: HashMap::new(),
             agents: AgentsConfig::default(),
