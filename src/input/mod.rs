@@ -205,7 +205,6 @@ impl InputState {
         if self.cursor == 0 {
             return;
         }
-        self.push_undo();
         let mut i = self.cursor;
         let prev_char = |pos: usize| -> Option<(usize, char)> {
             if pos == 0 {

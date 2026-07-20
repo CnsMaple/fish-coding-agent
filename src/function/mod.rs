@@ -167,6 +167,12 @@ pub struct App {
     /// Image blocks pasted from clipboard, indexed by VecDeque position.
     /// The input buffer shows `[image #K]` where K = 1-based index.
     pub image_blocks: VecDeque<crate::session::ImageAttachment>,
+    /// Block undo stack, paired with `input.undo_stack`. Each entry
+    /// saves `(paste_blocks, image_blocks)` at the time a mutation
+    /// was about to occur.
+    pub block_undo_stack: VecDeque<(VecDeque<String>, VecDeque<crate::session::ImageAttachment>)>,
+    /// Redo stack for block state, paired with `input.redo_stack`.
+    pub block_redo_stack: VecDeque<(VecDeque<String>, VecDeque<crate::session::ImageAttachment>)>,
     pub last_paste_text: Option<String>,
     pub last_paste_at: Option<Instant>,
     /// Number of keystrokes to suppress after a paste (terminal re-sends
@@ -361,6 +367,8 @@ impl App {
             function_panel_cursor: None,
             paste_blocks: VecDeque::new(),
             image_blocks: VecDeque::new(),
+            block_undo_stack: VecDeque::new(),
+            block_redo_stack: VecDeque::new(),
             last_paste_text: None,
             last_paste_at: None,
             paste_key_quota: 0,
@@ -390,6 +398,51 @@ impl App {
         app.refresh_status_model_context();
         app.load_agents();
         app
+    }
+
+    /// Snapshot current input + block state onto the undo stack *before*
+    /// a mutation. Also clears the block redo stack so Ctrl+Y cannot
+    /// re-apply stale state after a new edit.
+    pub fn push_input_undo(&mut self) {
+        self.block_redo_stack.clear();
+        if self.block_undo_stack.len() >= 100 {
+            self.block_undo_stack.pop_front();
+        }
+        self.block_undo_stack
+            .push_back((self.paste_blocks.clone(), self.image_blocks.clone()));
+        self.input.push_undo();
+    }
+
+    /// Restore the most recent input + block undo snapshot.
+    /// Returns `true` if an undo was performed.
+    pub fn undo_input(&mut self) -> bool {
+        let Some(block_state) = self.block_undo_stack.pop_back() else {
+            return false;
+        };
+        self.block_redo_stack
+            .push_back((self.paste_blocks.clone(), self.image_blocks.clone()));
+        if self.block_redo_stack.len() > 100 {
+            self.block_redo_stack.pop_front();
+        }
+        self.paste_blocks = block_state.0;
+        self.image_blocks = block_state.1;
+        self.input.undo()
+    }
+
+    /// Re-apply the most recently undone input + block snapshot.
+    /// Returns `true` if a redo was performed.
+    pub fn redo_input(&mut self) -> bool {
+        let Some(block_state) = self.block_redo_stack.pop_back() else {
+            return false;
+        };
+        self.block_undo_stack
+            .push_back((self.paste_blocks.clone(), self.image_blocks.clone()));
+        if self.block_undo_stack.len() > 100 {
+            self.block_undo_stack.pop_front();
+        }
+        self.paste_blocks = block_state.0;
+        self.image_blocks = block_state.1;
+        self.input.redo()
     }
 
     pub fn refresh_status_model_context(&mut self) {
@@ -570,7 +623,11 @@ impl App {
         self.session.clear();
         self.session_id = crate::session::store::new_session_id();
         self.session_title = crate::session::store::default_title(&self.cwd);
+        self.paste_blocks.clear();
         self.image_blocks.clear();
+        self.block_undo_stack.clear();
+        self.block_redo_stack.clear();
+        self.input.clear_undo();
         self.disabled_tools.clear();
         clear_disabled_tools();
         // Remove the todo tab when the session is cleared.

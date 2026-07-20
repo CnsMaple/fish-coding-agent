@@ -83,6 +83,8 @@ fn make_app() -> App {
         function_panel_cursor: None,
         paste_blocks: VecDeque::new(),
         image_blocks: VecDeque::new(),
+        block_undo_stack: VecDeque::new(),
+        block_redo_stack: VecDeque::new(),
         last_paste_text: None,
         last_paste_at: None,
         paste_key_quota: 0,

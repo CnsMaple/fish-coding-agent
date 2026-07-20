@@ -115,6 +115,7 @@ pub(super) fn handle_paste_preview_key(
             app.input_scroll_decoupled = false;
             if let Some(ref image) = state.image {
                 // Insert [image #N] marker.
+                app.push_input_undo();
                 let idx = app.image_blocks.len() + 1;
                 app.image_blocks.push_back(image.clone());
                 app.input.insert_str(&format!("[image #{idx}]"));
@@ -219,6 +220,7 @@ pub(super) fn try_insert_image_from_path(text: &str, app: &mut App) -> bool {
         height: 0,
     };
     let idx = app.image_blocks.len() + 1;
+    app.push_input_undo();
     app.image_blocks.push_back(attachment);
     let marker = format!("[image #{idx}]");
     if app.input.has_selection() {
@@ -283,6 +285,7 @@ pub(super) fn insert_paste_block(text: String, app: &mut App, quota: bool) {
     }
     let line_count = paste_line_count(&text);
     let marker = format!("[paste {line_count} lines]");
+    app.push_input_undo();
     app.paste_blocks.push_back(text);
     app.input.insert_str(&marker);
     app.sync_completion();
@@ -310,7 +313,7 @@ pub(super) fn try_remove_paste_marker(app: &mut App) -> bool {
             .and_then(|s| s.strip_suffix(" lines]"))
         {
             if !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()) {
-                app.input.push_undo();
+                app.push_input_undo();
                 app.input.buffer.replace_range(start..cursor, "");
                 app.input.cursor = start;
                 app.paste_blocks.pop_front();
@@ -339,6 +342,7 @@ pub(super) fn try_remove_image_marker(app: &mut App) -> bool {
                 let idx: usize = rest.parse().unwrap_or(0);
                 if idx > 0 && idx <= app.image_blocks.len() {
                     // Remove the image file from disk.
+                    app.push_input_undo();
                     if let Some(att) = app.image_blocks.get(idx - 1) {
                         let _ = std::fs::remove_file(&att.asset_path);
                     }
