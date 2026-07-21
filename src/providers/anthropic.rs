@@ -362,14 +362,27 @@ fn add_anthropic_cache_control(
 ) {
     let cc = retention.to_cache_control();
 
-    // 1. System prompt: convert string to content array with cache_control
+    // 1. System prompt: split into core (cached first) + dynamic suffix.
+    //    Core (stable across requests) goes first with cache_control so
+    //    it is the cache breakpoint. Dynamic (date/CWD/shell, ~50t)
+    //    goes second WITHOUT cache_control and thus does NOT invalidate
+    //    the core cache entry when it changes.
     if let Some(sys_val) = body.get_mut("system") {
         if let Some(sys_str) = sys_val.as_str() {
-            *sys_val = serde_json::json!([{
-                "type": "text",
-                "text": sys_str,
-                "cache_control": cc,
-            }]);
+            let dynamic_prefix = "\nCurrent date: ";
+            if let Some(dyn_pos) = sys_str.rfind(dynamic_prefix) {
+                let core_part = &sys_str[..dyn_pos];
+                let dyn_part = &sys_str[dyn_pos..];
+                *sys_val = serde_json::json!([
+                    {"type": "text", "text": core_part, "cache_control": cc},
+                    {"type": "text", "text": dyn_part},
+                ]);
+            } else {
+                // Dynamic part not found; cache the whole system.
+                *sys_val = serde_json::json!([{
+                    "type": "text", "text": sys_str, "cache_control": cc,
+                }]);
+            }
         }
     }
 
@@ -402,7 +415,7 @@ fn add_anthropic_cache_control(
                     if last_user_or_assistant.is_none() {
                         // This is the last user/assistant message — mark it
                         last_user_or_assistant = Some(i);
-                    } else if block_count >= 15 {
+                    } else if block_count >= 10 {
                         // Past the 20-block lookback window; add
                         // a mid-history breakpoint so older content
                         // is still covered by cache.

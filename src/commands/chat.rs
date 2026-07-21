@@ -170,7 +170,7 @@ pub fn send_message(app: &mut App, user_msg: Message) {
     // shows the original content; only the LLM-bound value is swapped.
     crate::compaction::prune(&mut app.session.messages);
 
-    let messages: Vec<ChatMessage> = app
+    let mut messages: Vec<ChatMessage> = app
         .session
         .messages
         .iter()
@@ -285,23 +285,36 @@ pub fn send_message(app: &mut App, user_msg: Message) {
                 tool_calls: Vec::new(),
             });
         }
-        // Append the dynamic prompt (date, OS, shell, workspace) as the
-        // last prefix message. This keeps the system message + session
-        // prefix messages cacheable, and only the short dynamic part
-        // changes per-request.
-        pmsgs.push(ChatMessage {
-            role: "user".to_string(),
-            content: system_prompt_dynamic(),
-            content_parts: Vec::new(),
-            tool_call_id: None,
-            tool_calls: Vec::new(),
-        });
         pmsgs
     } else {
         Vec::new()
     };
-    // When prefix_cache is disabled, include the dynamic part in the
-    // system prompt so the model still receives it.
+
+    // Dynamic prompt (date/CWD/shell) goes as the FIRST working message,
+    // AFTER the prefix separator. This places it after the last cache
+    // breakpoint so it does NOT invalidate the cached prefix:
+    //   [system_core(cached) + tools(cached) + prefix_msgs... + separator(cached)]
+    //   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    //   cache hit on every request —  ONLY this part is cached
+    //
+    //   [dynamic_msg + actual_working_msgs...]
+    //   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    //   computed fresh every request — does NOT affect cache key
+    if app.config.prefix_cache {
+        messages.insert(
+            0,
+            ChatMessage {
+                role: "user".to_string(),
+                content: system_prompt_dynamic(),
+                content_parts: Vec::new(),
+                tool_call_id: None,
+                tool_calls: Vec::new(),
+            },
+        );
+    }
+
+    // System prompt is core only (stable). The dynamic part is already
+    // appended as a working message above.
     let sp = if app.config.prefix_cache {
         core_sp
     } else {

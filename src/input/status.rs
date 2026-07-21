@@ -329,12 +329,7 @@ impl StatusBar {
 
         // hit[current|average|total]
         let total_hit = if self.total_input_tokens > 0 {
-            let denom = self.total_input_tokens + self.total_cache_read;
-            if denom > 0 {
-                Some(self.total_cache_read as f64 / denom as f64)
-            } else {
-                None
-            }
+            Some(self.total_cache_read as f64 / self.total_input_tokens as f64)
         } else {
             None
         };

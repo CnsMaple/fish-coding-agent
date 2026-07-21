@@ -172,7 +172,8 @@ fn truncate(s: &str, max_chars: usize) -> String {
     if s.len() <= max_chars {
         s.to_string()
     } else {
-        let mut out = s[..max_chars].to_string();
+        let cut = s.floor_char_boundary(max_chars);
+        let mut out = s[..cut].to_string();
         out.push_str("\n[truncated]");
         out
     }
@@ -253,7 +254,8 @@ pub fn snip(messages: &mut [crate::session::Message]) {
                 continue;
             }
             if tr.content.len() > TOOL_OUTPUT_MAX_CHARS {
-                let mut out = tr.content[..TOOL_OUTPUT_MAX_CHARS].to_string();
+                let cut = tr.content.floor_char_boundary(TOOL_OUTPUT_MAX_CHARS);
+                let mut out = tr.content[..cut].to_string();
                 out.push_str("\n[truncated]");
                 tr.content = out;
             }

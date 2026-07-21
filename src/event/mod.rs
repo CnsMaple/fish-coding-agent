@@ -751,11 +751,10 @@ fn handle_msg(msg: AppMsg, app: &mut App) {
             if seq != app.current_request_seq {
                 return;
             }
-            let denom = u.input_tokens + u.cache_read_tokens;
-            let rate = if denom == 0 {
+            let rate = if u.input_tokens == 0 {
                 0.0
             } else {
-                u.cache_read_tokens as f64 / denom as f64
+                u.cache_read_tokens as f64 / u.input_tokens as f64
             };
             app.hit_rate.record(rate);
             app.status.update_hit(&app.hit_rate);
