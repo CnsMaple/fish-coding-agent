@@ -759,10 +759,9 @@ fn handle_msg(msg: AppMsg, app: &mut App) {
             if let Some(context_window_tokens) = u.context_window_tokens {
                 app.status.set_context_window_tokens(context_window_tokens);
             }
-            let total_tokens =
-                u.input_tokens + u.output_tokens + u.cache_read_tokens + u.cache_creation_tokens;
-            if total_tokens > 0 {
-                app.status.update_token_usage(total_tokens);
+            let ctx_tokens = u.input_tokens;
+            if ctx_tokens > 0 {
+                app.status.update_token_usage(ctx_tokens);
             }
             if u.output_tokens > 0 {
                 *app.response_output_tokens.get_or_insert(0) += u.output_tokens;
