@@ -18,6 +18,14 @@ pub struct StatusBar {
     pub hit_avg: Option<f64>,
     pub tok_cur: Option<f64>,
     pub tok_avg: Option<f64>,
+    /// Cumulative output tokens across all responses (for total rate).
+    pub total_output_tokens: u64,
+    /// Cumulative elapsed time (secs) across all responses (for total rate).
+    pub total_elapsed_secs: f64,
+    /// Cumulative input tokens across all requests (for total hit rate).
+    pub total_input_tokens: u64,
+    /// Cumulative cache-read tokens across all requests (for total hit rate).
+    pub total_cache_read: u64,
     pub token_total: Option<u64>,
     pub token_pct: Option<f64>,
     pub context_window_tokens: u64,
@@ -54,6 +62,10 @@ impl StatusBar {
             hit_avg: None,
             tok_cur: None,
             tok_avg: None,
+            total_output_tokens: 0,
+            total_elapsed_secs: 0.0,
+            total_input_tokens: 0,
+            total_cache_read: 0,
             token_total: None,
             token_pct: None,
             context_window_tokens: 0,
@@ -191,6 +203,10 @@ impl StatusBar {
         self.hit_avg = None;
         self.tok_cur = None;
         self.tok_avg = None;
+        self.total_output_tokens = 0;
+        self.total_elapsed_secs = 0.0;
+        self.total_input_tokens = 0;
+        self.total_cache_read = 0;
         self.compact_triggered = false;
     }
 
@@ -287,26 +303,49 @@ impl StatusBar {
     /// Render only the tok, hit, and mcp stats — shown right-aligned on
     /// the cwd line below the input block.
     pub fn render_stats_line(&self) -> Line<'static> {
-        let fmt_pct = |v: Option<f64>| match v {
+        let fmt_num = |v: Option<f64>| match v {
             None => "--".to_string(),
-            Some(x) => format!("{:.1}%", x * 100.0),
+            Some(x) => format!("{:.1}", x),
         };
-        let fmt_tps = |v: Option<f64>| match v {
+        let fmt_pct_int = |v: Option<f64>| match v {
             None => "--".to_string(),
-            Some(x) => format!("{:.1}/s", x),
+            Some(x) => format!("{}", (x * 100.0).round() as u64),
         };
         let mut spans: Vec<Span<'static>> = Vec::new();
-        spans.push(Span::raw("tok:"));
-        spans.push(Span::styled(fmt_tps(self.tok_cur), Theme::base()));
-        if let Some(avg) = self.tok_avg {
-            spans.push(Span::raw(" (avg "));
-            spans.push(Span::styled(format!("{:.1}/s", avg), Theme::dim()));
-            spans.push(Span::raw(")"));
-        }
-        spans.push(Span::raw(" | hit:"));
-        spans.push(Span::styled(fmt_pct(self.hit_cur), Theme::base()));
-        spans.push(Span::raw("/avg "));
-        spans.push(Span::styled(fmt_pct(self.hit_avg), Theme::dim()));
+
+        // tok[current|average|total]
+        let total_tok = if self.total_elapsed_secs > 0.0 {
+            Some(self.total_output_tokens as f64 / self.total_elapsed_secs)
+        } else {
+            None
+        };
+        spans.push(Span::raw("tok["));
+        spans.push(Span::styled(fmt_num(self.tok_cur), Theme::base()));
+        spans.push(Span::raw("|"));
+        spans.push(Span::styled(fmt_num(self.tok_avg), Theme::dim()));
+        spans.push(Span::raw("|"));
+        spans.push(Span::styled(fmt_num(total_tok), Theme::base()));
+        spans.push(Span::raw("]"));
+
+        // hit[current|average|total]
+        let total_hit = if self.total_input_tokens > 0 {
+            let denom = self.total_input_tokens + self.total_cache_read;
+            if denom > 0 {
+                Some(self.total_cache_read as f64 / denom as f64)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        spans.push(Span::raw(" | hit["));
+        spans.push(Span::styled(fmt_pct_int(self.hit_cur), Theme::base()));
+        spans.push(Span::raw("|"));
+        spans.push(Span::styled(fmt_pct_int(self.hit_avg), Theme::dim()));
+        spans.push(Span::raw("|"));
+        spans.push(Span::styled(fmt_pct_int(total_hit), Theme::base()));
+        spans.push(Span::raw("]"));
+
         if let Some(ref mcp) = self.mcp_summary {
             spans.push(Span::raw(" | "));
             spans.push(Span::styled("mcp:", Theme::dim()));

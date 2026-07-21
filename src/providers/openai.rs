@@ -84,6 +84,20 @@ impl Provider for OpenAiProvider {
             messages.push(openai_message(m));
         }
 
+        // Inject prompt_cache_key for OpenAI-compatible providers
+        // (OpenRouter, LiteLLM, etc.) that support session-affinity
+        // cache routing. Use a hash of the system prompt as a stable
+        // session identifier.
+        let prompt_cache_key = req
+            .system
+            .as_ref()
+            .map(|s| {
+                use sha2::Digest;
+                let hash = sha2::Sha256::digest(s.as_bytes());
+                hex::encode(&hash[..8])
+            })
+            .unwrap_or_default();
+
         let mut body = serde_json::json!({
             "model": req.model,
             "stream": true,
@@ -92,9 +106,17 @@ impl Provider for OpenAiProvider {
             "tools": req.tools.unwrap_or_else(crate::tools::openai_tool_specs),
             "tool_choice": "auto",
         });
+        if !prompt_cache_key.is_empty() {
+            body["prompt_cache_key"] = serde_json::Value::String(prompt_cache_key);
+        }
         if let Some(effort) = req.thinking.openai_effort() {
             body["reasoning_effort"] = serde_json::Value::String(effort.to_string());
         }
+
+        // Apply cache_control markers for prompt caching (OpenRouter
+        // Anthropic-style). Only works when the upstream supports it.
+        add_openai_cache_control(&mut body, req.cache_retention);
+
         let resp = client
             .post(&url)
             .bearer_auth(api_key)
@@ -301,6 +323,112 @@ fn parse_openai_usage(v: &serde_json::Value) -> Option<Usage> {
         u.cache_read_tokens = n;
     }
     Some(u)
+}
+
+/// Apply Anthropic-style `cache_control` markers to an OpenAI-compatible
+/// request body (used for OpenRouter / custom providers that support
+/// prompt caching via `cache_control` on content parts).
+///
+/// Places markers on:
+/// 1. The system/developer message's last text block
+/// 2. The last tool definition
+/// 3. The last user/assistant message's text content
+/// 4. A mid-history message (~15 content blocks before end)
+fn add_openai_cache_control(
+    body: &mut serde_json::Value,
+    retention: crate::config::CacheRetention,
+) {
+    let cc = retention.to_cache_control();
+
+    // 1. System/developer message
+    if let Some(messages_val) = body.get_mut("messages") {
+        if let Some(messages_arr) = messages_val.as_array_mut() {
+            for msg in messages_arr.iter_mut() {
+                let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("");
+                if role == "system" || role == "developer" {
+                    add_cache_control_to_content(msg, &cc);
+                    break;
+                }
+            }
+        }
+    }
+
+    // 2. Last tool definition
+    if let Some(tools_val) = body.get_mut("tools") {
+        if let Some(tools_arr) = tools_val.as_array_mut() {
+            if let Some(last_tool) = tools_arr.last_mut() {
+                last_tool["cache_control"] = cc.clone();
+            }
+        }
+    }
+
+    // 3 & 4. Message markers: last + mid-history breakpoint
+    if let Some(messages_val) = body.get_mut("messages") {
+        if let Some(messages_arr) = messages_val.as_array_mut() {
+            let mut block_count: u32 = 0;
+            let mut last_user_or_assistant: Option<usize> = None;
+
+            for i in (0..messages_arr.len()).rev() {
+                let role = messages_arr[i]
+                    .get("role")
+                    .and_then(|r| r.as_str())
+                    .unwrap_or("");
+
+                if role == "user" || role == "assistant" {
+                    if last_user_or_assistant.is_none() {
+                        last_user_or_assistant = Some(i);
+                    } else if block_count >= 15 {
+                        add_cache_control_to_content(&mut messages_arr[i], &cc);
+                        break;
+                    }
+                    block_count += count_openai_content_blocks(&messages_arr[i]);
+                } else if role == "tool" {
+                    block_count += count_openai_content_blocks(&messages_arr[i]);
+                }
+            }
+
+            if let Some(idx) = last_user_or_assistant {
+                add_cache_control_to_content(&mut messages_arr[idx], &cc);
+            }
+        }
+    }
+}
+
+/// Count content blocks in an OpenAI-format message for block-counting.
+fn count_openai_content_blocks(msg: &serde_json::Value) -> u32 {
+    match msg.get("content") {
+        Some(serde_json::Value::String(s)) if !s.is_empty() => 1,
+        Some(serde_json::Value::Array(arr)) => arr.len() as u32,
+        _ => 0,
+    }
+}
+
+/// Add `cache_control` to the last text content block of a message.
+/// Converts string content to array format if needed.
+fn add_cache_control_to_content(msg: &mut serde_json::Value, cc: &serde_json::Value) {
+    match msg.get_mut("content") {
+        Some(serde_json::Value::String(s)) if !s.is_empty() => {
+            msg["content"] = serde_json::json!([{
+                "type": "text",
+                "text": s,
+                "cache_control": cc,
+            }]);
+        }
+        Some(serde_json::Value::Array(arr)) => {
+            for block in arr.iter_mut().rev() {
+                if block.get("type").and_then(|t| t.as_str()) == Some("text") {
+                    block["cache_control"] = cc.clone();
+                    return;
+                }
+            }
+            arr.push(serde_json::json!({
+                "type": "text",
+                "text": "",
+                "cache_control": cc,
+            }));
+        }
+        _ => {}
+    }
 }
 
 #[derive(Debug, Deserialize)]

@@ -179,12 +179,13 @@ pub enum AppMsg {
         server: String,
     },
     /// Auto or `/compact` finished: the LLM returned a summary for
-    /// the slice `Session::messages[start..end]`. The handler calls
-    /// `Session::apply_compaction` and (for auto-triggers) flags
-    /// the post-compaction continue prompt.
+    /// the slice `Session::messages[start..keep_start]`. The handler
+    /// calls `Session::apply_compaction` with the kept window
+    /// `keep_start..end` (real messages that follow the summary).
     CompactionSummaryReady {
         start: usize,
         end: usize,
+        keep_start: usize,
         summary: String,
     },
     /// The compaction stream errored out. The session is left
@@ -550,6 +551,8 @@ fn finish_model_output_rate(app: &mut App) {
 
     app.token_rate.record(tokens as f64 / elapsed);
     app.status.update_token_rate(&app.token_rate);
+    app.status.total_output_tokens += tokens;
+    app.status.total_elapsed_secs += elapsed;
 }
 
 fn estimate_output_tokens(chars: usize) -> u64 {
@@ -763,6 +766,9 @@ fn handle_msg(msg: AppMsg, app: &mut App) {
             if ctx_tokens > 0 {
                 app.status.update_token_usage(ctx_tokens);
             }
+            // Accumulate for overall hit rate display.
+            app.status.total_input_tokens += u.input_tokens;
+            app.status.total_cache_read += u.cache_read_tokens;
             if u.output_tokens > 0 {
                 *app.response_output_tokens.get_or_insert(0) += u.output_tokens;
             }
@@ -1043,13 +1049,17 @@ fn handle_msg(msg: AppMsg, app: &mut App) {
         AppMsg::CompactionSummaryReady {
             start,
             end,
+            keep_start,
             summary,
         } => {
             use crate::function::notifications::ToastLevel;
             app.inflight = None;
             app.cancel_state = CancelState::Idle;
             app.compacting = false;
-            if let Some(idx) = app.session.apply_compaction(start, end, summary) {
+            if let Some(idx) = app
+                .session
+                .apply_compaction(start, end, keep_start, summary)
+            {
                 app.notify(ToastLevel::Ok, "session compacted");
                 app.save_current_session();
                 if app.pending_post_compaction_prompt.is_none() {

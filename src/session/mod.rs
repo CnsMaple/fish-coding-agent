@@ -1061,24 +1061,44 @@ impl Session {
     /// touched message index is dropped, the layout cache is
     /// flushed, and the streaming id is reset (a compaction can
     /// never run while a chat stream is live).
-    pub fn apply_compaction(&mut self, start: usize, end: usize, summary: String) -> Option<usize> {
-        if start >= end || end > self.messages.len() {
+    pub fn apply_compaction(
+        &mut self,
+        start: usize,
+        end: usize,
+        keep_start: usize,
+        summary: String,
+    ) -> Option<usize> {
+        if start >= end || end > self.messages.len() || keep_start < start || keep_start > end {
             return None;
         }
+        // Integrity guard: check before summary is moved.
+        if summary.len() < 20 {
+            tracing::warn!(
+                "compaction summary is very short ({} chars): {:?}",
+                summary.len(),
+                &summary[..summary.len().min(100)]
+            );
+        }
         let summary_msg = Message::new(Role::System, summary);
-        // Drop everything in [start, end), then insert the summary
-        // at `start`. Indices >= end shift by `(end - start) - 1`.
-        self.messages
-            .splice(start..end, std::iter::once(summary_msg));
+
+        // Build the replacement: [summary, ...kept_messages]
+        let kept_len = end.saturating_sub(keep_start);
+        let mut replacement = Vec::with_capacity(1 + kept_len);
+        replacement.push(summary_msg);
+        if kept_len > 0 {
+            replacement.extend(self.messages[keep_start..end].iter().cloned());
+        }
+
+        // Replace the full range with summary + kept messages.
+        self.messages.splice(start..end, replacement);
+
         // Messages before `start` are now frozen — they will never
         // be touched again. Mark them as prefix so the request
         // builder can separate them for prefix-cache payloads.
         for m in self.messages.iter_mut().take(start) {
             m.prefix = true;
         }
-        // The splice moved every index >= end down by
-        // `(end - start) - 1`. Invalidate their render caches so
-        // a stale LRU entry cannot be reused.
+        // Invalidate caches for all indices >= start.
         self.invalidate_message_cache_from(start);
         // A streaming id pointing into the removed range is now
         // dangling; clear it.
@@ -1086,7 +1106,9 @@ impl Session {
             if id >= start && id < end {
                 self.streaming_id = None;
             } else if id >= end {
-                self.streaming_id = Some(id - (end - start) + 1);
+                // Indices >= end shifted by replacement.len() - (end - start)
+                let delta = (1 + kept_len) as isize - (end - start) as isize;
+                self.streaming_id = Some((id as isize + delta) as usize);
             }
         }
         self.invalidate_layout_cache();
@@ -1839,7 +1861,7 @@ mod compaction_tests {
         s.push(Message::new(Role::Assistant, "a1"));
         s.push(Message::new(Role::User, "u2"));
         s.push(Message::new(Role::Assistant, "a2"));
-        let idx = s.apply_compaction(0, 2, "summary".to_string()).unwrap();
+        let idx = s.apply_compaction(0, 2, 2, "summary".to_string()).unwrap();
         assert_eq!(idx, 0);
         assert_eq!(s.messages.len(), 3);
         assert_eq!(s.messages[0].role, Role::System);
@@ -1852,7 +1874,7 @@ mod compaction_tests {
     fn apply_compaction_rejects_empty_range() {
         let mut s = Session::default();
         s.push(Message::new(Role::User, "u1"));
-        assert_eq!(s.apply_compaction(0, 0, "x".to_string()), None);
-        assert_eq!(s.apply_compaction(2, 3, "x".to_string()), None);
+        assert_eq!(s.apply_compaction(0, 0, 0, "x".to_string()), None);
+        assert_eq!(s.apply_compaction(2, 3, 3, "x".to_string()), None);
     }
 }

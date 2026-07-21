@@ -10,7 +10,9 @@ use std::time::Duration;
 use super::utils::{
     is_doom_loop, parse_text_tool_calls, parse_tool_result_display, tool_result_title,
 };
-use super::{build_agents_content, compact_now, open_settings, system_prompt};
+use super::{
+    build_agents_content, compact_now, open_settings, system_prompt, system_prompt_dynamic,
+};
 use super::{MSG_PROVIDER_INVALID, MSG_REQUEST_IN_FLIGHT};
 pub fn send_chat(app: &mut App, user_text: String, image_parts: Vec<crate::session::ContentPart>) {
     let mut msg = Message::new(Role::User, user_text);
@@ -120,6 +122,7 @@ pub fn send_message(app: &mut App, user_msg: Message) {
         && app.inflight.is_none()
     {
         let agents = build_agents_content(app);
+        // Core-only for estimation (dynamic part is ~50 tokens).
         let sp = system_prompt(app.active_agent, &agents);
         let msg_texts: Vec<String> = app
             .session
@@ -262,7 +265,7 @@ pub fn send_message(app: &mut App, user_msg: Message) {
     app.cancel_state = crate::function::CancelState::Idle;
 
     let agents = build_agents_content(app);
-    let sp = system_prompt(app.active_agent, &agents);
+    let core_sp = system_prompt(app.active_agent, &agents);
 
     let prefix_messages: Vec<crate::providers::ChatMessage> = if app.config.prefix_cache {
         let mut pmsgs = Vec::new();
@@ -282,9 +285,27 @@ pub fn send_message(app: &mut App, user_msg: Message) {
                 tool_calls: Vec::new(),
             });
         }
+        // Append the dynamic prompt (date, OS, shell, workspace) as the
+        // last prefix message. This keeps the system message + session
+        // prefix messages cacheable, and only the short dynamic part
+        // changes per-request.
+        pmsgs.push(ChatMessage {
+            role: "user".to_string(),
+            content: system_prompt_dynamic(),
+            content_parts: Vec::new(),
+            tool_call_id: None,
+            tool_calls: Vec::new(),
+        });
         pmsgs
     } else {
         Vec::new()
+    };
+    // When prefix_cache is disabled, include the dynamic part in the
+    // system prompt so the model still receives it.
+    let sp = if app.config.prefix_cache {
+        core_sp
+    } else {
+        format!("{}\n\n{}", core_sp, system_prompt_dynamic())
     };
     let req = ChatRequest {
         model,
@@ -293,6 +314,7 @@ pub fn send_message(app: &mut App, user_msg: Message) {
         system: Some(sp),
         tools: None,
         prefix_messages,
+        cache_retention: app.config.cache_retention,
     };
 
     if let Some(tx) = app.msg_tx.clone() {
@@ -388,6 +410,7 @@ pub async fn run_chat_stream(
             system: req.system.clone(),
             tools: req.tools.clone(),
             prefix_messages: req.prefix_messages.clone(),
+            cache_retention: req.cache_retention,
         };
         let call = tokio::spawn(async move {
             p.chat_stream(
@@ -803,6 +826,7 @@ pub(super) async fn run_sub_agent(
         system: Some(system_prompt),
         tools: Some(tools),
         prefix_messages: Vec::new(),
+        cache_retention: crate::config::CacheRetention::Default,
     };
 
     let retry_delays: [u64; 3] = [10, 30, 60];
@@ -833,6 +857,7 @@ pub(super) async fn run_sub_agent(
                 system: req.system.clone(),
                 tools: req.tools.clone(),
                 prefix_messages: req.prefix_messages.clone(),
+                cache_retention: req.cache_retention,
             };
             let call = tokio::spawn(async move {
                 p.chat_stream(&client_c, &base_c, &key_c, req_c, chat_tx)
@@ -1101,10 +1126,10 @@ only — no preamble, no closing remarks."
 
 /// Spawn a one-shot chat stream that summarizes `history`. Used by
 /// both auto-compaction and the `/compact` command. The result is
-/// delivered as `AppMsg::CompactionSummaryReady { start, end, summary }`
+/// delivered as `AppMsg::CompactionSummaryReady { start, end, keep_start, summary }`
 /// (or `AppMsg::CompactionFailed { error }` on error).
 ///
-/// `history` must already be a clone of `Session::messages[start..end]`
+/// `history` must already be a clone of `Session::messages[start..keep_start]`
 /// — the compactor runs entirely on the snapshot, so the live
 /// session can be mutated safely in parallel. The cancel channel is
 /// independent from the chat inflight handle so the existing
@@ -1121,6 +1146,7 @@ pub async fn run_compaction_stream(
     tx: tokio::sync::mpsc::UnboundedSender<crate::event::AppMsg>,
     start: usize,
     end: usize,
+    keep_start: usize,
 ) {
     let send_msg = |msg: crate::event::AppMsg| {
         if !*cancel_rx.borrow() {
@@ -1149,6 +1175,7 @@ pub async fn run_compaction_stream(
         system: Some(compaction_system_prompt()),
         tools: None,
         prefix_messages: Vec::new(),
+        cache_retention: crate::config::CacheRetention::Default,
     };
 
     let (chat_tx, mut chat_rx) =
@@ -1214,6 +1241,7 @@ pub async fn run_compaction_stream(
     send_msg(crate::event::AppMsg::CompactionSummaryReady {
         start,
         end,
+        keep_start,
         summary,
     });
 }

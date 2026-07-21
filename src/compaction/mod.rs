@@ -328,6 +328,36 @@ pub fn select(messages: &[Message], keep_tokens: u64) -> Option<(String, String)
     Some((head, recent))
 }
 
+/// Like `select`, but returns the index within `messages` that
+/// separates the "to compact" head from the "keep verbatim" tail.
+/// Used by the compaction kept-window feature so the summary can
+/// be followed by real messages that overlap with the pre-compaction
+/// cache prefix.
+pub fn select_keep_boundary(messages: &[Message], keep_tokens: u64) -> Option<usize> {
+    if messages.is_empty() {
+        return None;
+    }
+    let mut total: u64 = 0;
+    let mut split = messages.len();
+    for (i, m) in messages.iter().enumerate().rev() {
+        let s = serialize_message(m);
+        if s.is_empty() {
+            continue;
+        }
+        let next = total + estimate_tokens(&s);
+        if next > keep_tokens {
+            split = i + 1;
+            break;
+        }
+        total = next;
+        split = i;
+    }
+    if split == messages.len() && total == 0 {
+        return None;
+    }
+    Some(split)
+}
+
 /// Build the compaction prompt. If `previous_summary` is provided,
 /// the LLM is asked to update the existing summary rather than
 /// create a new one. Matches opencode's `buildPrompt`.

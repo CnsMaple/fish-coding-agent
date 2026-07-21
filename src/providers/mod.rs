@@ -120,6 +120,8 @@ pub struct ChatRequest {
     /// it, these messages are kept at the head of the conversation
     /// and separated from the working messages.
     pub prefix_messages: Vec<ChatMessage>,
+    /// Cache retention policy for prompt caching.
+    pub cache_retention: crate::config::CacheRetention,
 }
 
 #[derive(Debug, Clone)]

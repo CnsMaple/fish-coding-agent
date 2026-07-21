@@ -61,11 +61,33 @@ impl Provider for AnthropicProvider {
         tx: mpsc::UnboundedSender<ChatEvent>,
     ) -> Result<()> {
         let url = format!("{}/v1/messages", base_url.trim_end_matches('/'));
+        let mut messages: Vec<serde_json::Value> = Vec::new();
+
+        // Prefix messages form the stable cache prefix. They are
+        // inserted between system and working messages so the system +
+        // prefix block is cacheable across requests.
+        if !req.prefix_messages.is_empty() {
+            for pm in &req.prefix_messages {
+                messages.push(anthropic_message(pm));
+            }
+            // Separator to mark the boundary between cached prefix and
+            // working messages.
+            messages.push(serde_json::json!({
+                "role": "user",
+                "content": [{"type": "text", "text": "[End of cached context. Continue below.]"}]
+            }));
+        }
+
+        // Working messages follow the prefix.
+        for m in &req.messages {
+            messages.push(anthropic_message(m));
+        }
+
         let mut body = serde_json::json!({
             "model": req.model,
             "max_tokens": 8192,
             "stream": true,
-            "messages": req.messages.iter().map(anthropic_message).collect::<Vec<_>>(),
+            "messages": messages,
             "tools": req.tools.unwrap_or_else(crate::tools::anthropic_tool_specs),
         });
         if let Some(sys) = &req.system {
@@ -79,6 +101,9 @@ impl Provider for AnthropicProvider {
             }
             body["thinking"] = serde_json::Value::Object(thinking);
         }
+
+        // Apply cache_control markers for prompt caching.
+        add_anthropic_cache_control(&mut body, req.cache_retention);
 
         let resp = client
             .post(&url)
@@ -322,6 +347,120 @@ fn parse_anthropic_usage(v: &serde_json::Value) -> Option<Usage> {
         u.cache_creation_tokens = n;
     }
     Some(u)
+}
+
+/// Apply Anthropic-style `cache_control` markers to the request body
+/// for prompt caching. Places markers on:
+/// 1. The last text block of the system prompt (converts string to array)
+/// 2. The last tool definition
+/// 3. The last user/assistant message's text content
+/// 4. A mid-history message (~15 content blocks before the end) so
+///    the 20-block lookback window covers the full conversation.
+fn add_anthropic_cache_control(
+    body: &mut serde_json::Value,
+    retention: crate::config::CacheRetention,
+) {
+    let cc = retention.to_cache_control();
+
+    // 1. System prompt: convert string to content array with cache_control
+    if let Some(sys_val) = body.get_mut("system") {
+        if let Some(sys_str) = sys_val.as_str() {
+            *sys_val = serde_json::json!([{
+                "type": "text",
+                "text": sys_str,
+                "cache_control": cc,
+            }]);
+        }
+    }
+
+    // 2. Last tool definition
+    if let Some(tools_val) = body.get_mut("tools") {
+        if let Some(tools_arr) = tools_val.as_array_mut() {
+            if let Some(last_tool) = tools_arr.last_mut() {
+                if let Some(obj) = last_tool.as_object_mut() {
+                    obj.insert("cache_control".to_string(), cc.clone());
+                }
+            }
+        }
+    }
+
+    // 3 & 4. Message markers: last + mid-history breakpoint
+    if let Some(messages_val) = body.get_mut("messages") {
+        if let Some(messages_arr) = messages_val.as_array_mut() {
+            let mut block_count: u32 = 0;
+            let mut last_user_or_assistant: Option<usize> = None;
+
+            // Walk backward counting Anthropic content blocks
+            for i in (0..messages_arr.len()).rev() {
+                let role = messages_arr[i]
+                    .get("role")
+                    .and_then(|r| r.as_str())
+                    .unwrap_or("");
+                let msg_blocks = count_content_blocks(&messages_arr[i]);
+
+                if role == "user" || role == "assistant" {
+                    if last_user_or_assistant.is_none() {
+                        // This is the last user/assistant message — mark it
+                        last_user_or_assistant = Some(i);
+                    } else if block_count >= 15 {
+                        // Past the 20-block lookback window; add
+                        // a mid-history breakpoint so older content
+                        // is still covered by cache.
+                        add_cache_control_to_text_block(&mut messages_arr[i], &cc);
+                        break;
+                    }
+                    block_count += msg_blocks;
+                } else {
+                    // Tool result messages also occupy content blocks
+                    block_count += msg_blocks;
+                }
+            }
+
+            // Add cache_control to the last user/assistant message
+            if let Some(idx) = last_user_or_assistant {
+                add_cache_control_to_text_block(&mut messages_arr[idx], &cc);
+            }
+        }
+    }
+}
+
+/// Count the number of Anthropic content blocks in a message.
+fn count_content_blocks(msg: &serde_json::Value) -> u32 {
+    match msg.get("content") {
+        Some(serde_json::Value::String(s)) if !s.is_empty() => 1,
+        Some(serde_json::Value::Array(arr)) => arr.len() as u32,
+        _ => 0,
+    }
+}
+
+/// Add `cache_control` to the last text block in a message's content.
+/// If content is a plain string, converts it to a content array first.
+fn add_cache_control_to_text_block(msg: &mut serde_json::Value, cc: &serde_json::Value) {
+    match msg.get_mut("content") {
+        Some(serde_json::Value::String(s)) if !s.is_empty() => {
+            msg["content"] = serde_json::json!([{
+                "type": "text",
+                "text": s,
+                "cache_control": cc,
+            }]);
+        }
+        Some(serde_json::Value::Array(arr)) => {
+            // Find the last text block in the array and add cache_control
+            for block in arr.iter_mut().rev() {
+                if block.get("type").and_then(|t| t.as_str()) == Some("text") {
+                    block["cache_control"] = cc.clone();
+                    return;
+                }
+            }
+            // No text block found; append an empty one with the marker
+            arr.push(serde_json::json!({
+                "type": "text",
+                "text": "",
+                "cache_control": cc,
+            }));
+        }
+        _ => {}
+    }
 }
 
 #[derive(Debug, Deserialize)]

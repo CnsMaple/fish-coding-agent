@@ -455,7 +455,19 @@ pub fn compact_now(app: &mut App, _arg: &str) {
         );
         return;
     }
-    let history: Vec<crate::session::Message> = app.session.messages[start..end].to_vec();
+    // Compute the kept-window boundary: messages after this index
+    // are preserved verbatim after the summary, so the cache prefix
+    // from before compaction partially overlaps.
+    let raw_keep_start = crate::compaction::select_keep_boundary(
+        &app.session.messages[start..end],
+        crate::compaction::DEFAULT_KEEP_TOKENS,
+    )
+    .map(|offset| start + offset);
+    let keep_start = match raw_keep_start {
+        Some(ks) if ks > start && ks < end => ks,
+        _ => end,
+    };
+    let history: Vec<crate::session::Message> = app.session.messages[start..keep_start].to_vec();
     let key = match app.config.effective_api_key(&active_id) {
         Some(k) if !k.is_empty() => k,
         _ => {
@@ -494,7 +506,7 @@ pub fn compact_now(app: &mut App, _arg: &str) {
     });
     app.cancel_state = crate::function::CancelState::Idle;
     tokio::spawn(run_compaction_stream(
-        client, base, key, provider, model, history, cancel_rx, tx, start, end,
+        client, base, key, provider, model, history, cancel_rx, tx, start, end, keep_start,
     ));
 }
 
@@ -798,13 +810,13 @@ Use `list`, `grep`, and `glob` to discover files — never invent or guess paths
     )
 }
 
-/// Build the full system prompt for `agent`. When `Config::prefix_cache`
-/// is enabled, only `system_prompt_core` is sent in the system message
-/// (stable across requests), and `system_prompt_dynamic` is appended
-/// as a separate user message at the end of the prefix.
+/// Return only the static core of the system prompt (never changes
+/// mid-session). The dynamic parts (date, CWD, shell) are sent
+/// separately via `system_prompt_dynamic()` as a user message at the
+/// end of the prefix, so the cacheable prefix stays stable across
+/// requests.
 pub(super) fn system_prompt(agent: crate::permission::Agent, agents_content: &str) -> String {
-    let core = system_prompt_core(agent, agents_content);
-    format!("{core}\n\n{}", system_prompt_dynamic())
+    system_prompt_core(agent, agents_content)
 }
 
 /// Static core system prompt that never changes mid-session.

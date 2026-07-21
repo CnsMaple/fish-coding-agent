@@ -6,6 +6,26 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheRetention {
+    /// Default 5-minute TTL.
+    #[default]
+    Default,
+    /// 1-hour TTL for prompt caching.
+    Long,
+}
+
+impl CacheRetention {
+    /// Return the Anthropic `cache_control` block with optional TTL.
+    pub fn to_cache_control(&self) -> serde_json::Value {
+        match self {
+            CacheRetention::Default => serde_json::json!({"type": "ephemeral"}),
+            CacheRetention::Long => serde_json::json!({"type": "ephemeral", "ttl": "1h"}),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Hash)]
 #[serde(rename_all = "lowercase")]
 pub enum ProviderKind {
@@ -370,6 +390,15 @@ pub fn default_prefix_cache() -> bool {
     true
 }
 
+/// Default for `Config::cache_retention`. Respects the
+/// `PI_CACHE_RETENTION=long` environment variable.
+pub fn default_cache_retention() -> CacheRetention {
+    match std::env::var("PI_CACHE_RETENTION").ok().as_deref() {
+        Some("long" | "1" | "true") => CacheRetention::Long,
+        _ => CacheRetention::Default,
+    }
+}
+
 /// Default for `Config::tool_result_snip_ratio`.
 pub fn default_tool_result_snip_ratio() -> f64 {
     0.6
@@ -456,6 +485,10 @@ pub struct Config {
     /// Default: true.
     #[serde(default = "default_prefix_cache")]
     pub prefix_cache: bool,
+    /// Cache retention policy for prompt caching. `Default` (5-min TTL)
+    /// or `Long` (1-hour TTL). Default: Default.
+    #[serde(default = "default_cache_retention")]
+    pub cache_retention: CacheRetention,
     /// Ratio of context window at which stale tool results are
     /// shortened (cheap in-place operation, no LLM call). Default 0.6
     /// (60%). Mirrors DeepSeek-Reasonix `toolResultSnipRatio`.
@@ -553,6 +586,7 @@ impl Config {
             auto_compact: field(obj, "auto_compact").unwrap_or_default(),
             compact_reserved: field(obj, "compact_reserved").unwrap_or_default(),
             prefix_cache: field(obj, "prefix_cache").unwrap_or_default(),
+            cache_retention: field(obj, "cache_retention").unwrap_or_default(),
             tool_result_snip_ratio: field(obj, "tool_result_snip_ratio").unwrap_or_default(),
             compact_ratio: field(obj, "compact_ratio").unwrap_or_default(),
             compact_force_ratio: field(obj, "compact_force_ratio").unwrap_or_default(),
@@ -599,6 +633,7 @@ impl Config {
             auto_compact: default_auto_compact(),
             compact_reserved: None,
             prefix_cache: true,
+            cache_retention: CacheRetention::Default,
             tool_result_snip_ratio: default_tool_result_snip_ratio(),
             compact_ratio: default_compact_ratio(),
             compact_force_ratio: default_compact_force_ratio(),
@@ -791,6 +826,7 @@ impl Default for Config {
             auto_compact: default_auto_compact(),
             compact_reserved: None,
             prefix_cache: true,
+            cache_retention: CacheRetention::Default,
             tool_result_snip_ratio: default_tool_result_snip_ratio(),
             compact_ratio: default_compact_ratio(),
             compact_force_ratio: default_compact_force_ratio(),
