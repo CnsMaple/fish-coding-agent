@@ -21,6 +21,7 @@ fn make_app() -> App {
             name: String::new(),
             access_key: String::new(),
             secret_key: String::new(),
+            provider_id: String::new(),
         });
     }
     cfg.active = Some(make_id(ProviderKind::Openai, ProviderMode::Key));
@@ -163,6 +164,7 @@ fn settings_save_form_preserves_existing_model_on_edit() {
             name: String::new(),
             access_key: String::new(),
             secret_key: String::new(),
+            provider_id: String::new(),
         },
     );
     let form = crate::function::ConfigFormState::new_for_edit(
@@ -232,6 +234,7 @@ fn commit_model_with_entry_pins_to_bound_same_kind_entry() {
             name: "alibaba".to_string(),
             access_key: String::new(),
             secret_key: String::new(),
+            provider_id: String::new(),
         },
     );
     // Active is the opencode entry, NOT alibaba.
@@ -274,6 +277,7 @@ fn open_model_picker_for_entry_skips_stale_same_kind_cache() {
             name: "alibaba".to_string(),
             access_key: String::new(),
             secret_key: String::new(),
+            provider_id: String::new(),
         },
     );
     // Seed the Openai-kind cache with opencode's models (different
@@ -289,6 +293,7 @@ fn open_model_picker_for_entry_skips_stale_same_kind_cache() {
             request_id: None,
             context_window_tokens: None,
             context_needs_pick: false,
+            modalities: Vec::new(),
         }],
     );
     app.model_cache = cache;
@@ -594,6 +599,7 @@ fn picker_scroll_keeps_cursor_visible() {
             request_id: None,
             context_window_tokens: None,
             context_needs_pick: false,
+            modalities: Vec::new(),
         });
     }
     s.rebuild_filter();
@@ -633,6 +639,7 @@ fn commit_model_picks_model_from_picker_list() {
             request_id: None,
             context_window_tokens: None,
             context_needs_pick: false,
+            modalities: Vec::new(),
         });
     picker
         .models
@@ -642,6 +649,7 @@ fn commit_model_picks_model_from_picker_list() {
             request_id: None,
             context_window_tokens: None,
             context_needs_pick: false,
+            modalities: Vec::new(),
         });
     picker.rebuild_filter();
     picker.cursor = 1;
@@ -848,6 +856,7 @@ fn check_config_does_not_auto_open_settings() {
             name: String::new(),
             access_key: String::new(),
             secret_key: String::new(),
+            provider_id: String::new(),
         },
     );
     app.config.active = Some(id.clone());
@@ -911,6 +920,7 @@ fn check_config_shows_specific_errors_when_some_usable() {
             name: String::new(),
             access_key: String::new(),
             secret_key: String::new(),
+            provider_id: String::new(),
         },
     );
     // Default anthropic:key is still invalid (empty api_key, env unset).
@@ -1582,6 +1592,7 @@ fn settings_form_first_edit_clears_masked_key() {
             name: String::new(),
             access_key: String::new(),
             secret_key: String::new(),
+            provider_id: String::new(),
         },
     );
     let form = crate::function::ConfigFormState::new_for_edit(
@@ -1639,6 +1650,7 @@ fn settings_form_save_preserves_untouched_api_key() {
             name: String::new(),
             access_key: String::new(),
             secret_key: String::new(),
+            provider_id: String::new(),
         },
     );
     let form = crate::function::ConfigFormState::new_for_edit(
@@ -1676,6 +1688,7 @@ fn settings_form_save_uses_edited_key() {
             name: String::new(),
             access_key: String::new(),
             secret_key: String::new(),
+            provider_id: String::new(),
         },
     );
     let mut form = crate::function::ConfigFormState::new_for_edit(
@@ -1840,6 +1853,7 @@ fn provider_picker_shows_user_names_not_kinds() {
             make_id(ProviderKind::Openai, ProviderMode::Key),
             ProviderConfig {
                 name: "staging-openai".to_string(),
+                provider_id: String::new(),
                 ..ProviderConfig::default()
             },
         );
@@ -1847,6 +1861,7 @@ fn provider_picker_shows_user_names_not_kinds() {
             make_id(ProviderKind::Openai, ProviderMode::Env),
             ProviderConfig {
                 name: "prod-openai".to_string(),
+                provider_id: String::new(),
                 ..ProviderConfig::default()
             },
         );
@@ -1854,6 +1869,7 @@ fn provider_picker_shows_user_names_not_kinds() {
             make_id(ProviderKind::Anthropic, ProviderMode::Key),
             ProviderConfig {
                 name: String::new(),
+                provider_id: String::new(),
                 ..ProviderConfig::default()
             },
         );
@@ -1891,6 +1907,7 @@ fn provider_picker_filter_narrows_list() {
         make_id(ProviderKind::Openai, ProviderMode::Key),
         ProviderConfig {
             name: "staging-openai".to_string(),
+            provider_id: String::new(),
             ..ProviderConfig::default()
         },
     );
@@ -1898,6 +1915,7 @@ fn provider_picker_filter_narrows_list() {
         make_id(ProviderKind::Openai, ProviderMode::Env),
         ProviderConfig {
             name: "prod-openai".to_string(),
+            provider_id: String::new(),
             ..ProviderConfig::default()
         },
     );
@@ -1905,6 +1923,7 @@ fn provider_picker_filter_narrows_list() {
         make_id(ProviderKind::Anthropic, ProviderMode::Key),
         ProviderConfig {
             name: "prod-anthropic".to_string(),
+            provider_id: String::new(),
             ..ProviderConfig::default()
         },
     );
@@ -1947,6 +1966,7 @@ fn provider_picker_keeps_cursor_visible_when_scrolling() {
             make_id(ProviderKind::Openai, mode),
             ProviderConfig {
                 name: format!("entry-{i:02}"),
+                provider_id: String::new(),
                 ..ProviderConfig::default()
             },
         );
@@ -1999,6 +2019,7 @@ fn active_name_falls_back_to_kind_when_unset() {
             name: String::new(),
             access_key: String::new(),
             secret_key: String::new(),
+            provider_id: String::new(),
         },
     );
     app.config.active = Some(id.clone());
@@ -2118,6 +2139,7 @@ fn active_name_uses_user_set_value() {
             name: "mybot".to_string(),
             access_key: String::new(),
             secret_key: String::new(),
+            provider_id: String::new(),
         },
     );
     app.config.active = Some(id.clone());
@@ -2141,6 +2163,7 @@ fn active_model_display_shows_no_model_when_empty() {
             name: "mybot".to_string(),
             access_key: String::new(),
             secret_key: String::new(),
+            provider_id: String::new(),
         },
     );
     app.config.active = Some(id.clone());

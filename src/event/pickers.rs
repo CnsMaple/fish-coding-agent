@@ -992,6 +992,11 @@ pub(super) fn trigger_picker_fetch(app: &mut App, state: &mut crate::function::M
             .entry(&target_id)
             .map(|c| c.name.clone())
             .unwrap_or_default();
+        let provider_id = app
+            .config
+            .entry(&target_id)
+            .map(|c| c.provider_id.clone())
+            .unwrap_or_default();
         let cache_path = app
             .model_cache_path
             .parent()
@@ -1007,6 +1012,7 @@ pub(super) fn trigger_picker_fetch(app: &mut App, state: &mut crate::function::M
                 secret_key: &secret_key,
                 cache_path: &cache_path,
                 provider_name: &provider_name,
+                provider_id: &provider_id,
             })
             .await
             {
@@ -1198,6 +1204,15 @@ pub(super) fn handle_settings_enter(app: &mut App, state: &mut crate::function::
         },
         SettingsLevel::ProviderList => {
             if cursor == 0 {
+                // Transitioning to NewProviderKind — reload models.dev
+                // providers from cache (background fetch may have
+                // completed since SettingsState was created).
+                let cache_parent = app
+                    .model_cache_path
+                    .parent()
+                    .unwrap_or(&app.model_cache_path)
+                    .to_path_buf();
+                state.new_provider.load_model_dev_providers(&cache_parent);
                 SettingsLevel::NewProviderKind
             } else {
                 let keys = app.config.configured_provider_ids();
@@ -1208,14 +1223,54 @@ pub(super) fn handle_settings_enter(app: &mut App, state: &mut crate::function::
             }
         }
         SettingsLevel::NewProviderKind => {
-            match state
-                .new_provider
-                .selected_id()
-                .and_then(|id| parse_id(&id).map(|(k, m)| (id, k, m)))
-            {
-                Some((_id, kind, mode)) => SettingsLevel::ConfigForm(
-                    crate::function::ConfigFormState::new_for_create(kind, mode),
-                ),
+            // Reload models.dev providers from cache every time we
+            // enter this level (the background fetch may have completed
+            // since the SettingsState was created).
+            let cache_parent = app
+                .model_cache_path
+                .parent()
+                .unwrap_or(&app.model_cache_path)
+                .to_path_buf();
+            state.new_provider.load_model_dev_providers(&cache_parent);
+
+            let selected = state.new_provider.selected_id();
+            match selected {
+                Some(id) if id.starts_with("__md__/") => {
+                    // models.dev provider — extract provider_id from
+                    // the `__md__/{name}/{provider_id}` format.
+                    let provider_id = id.rsplit('/').next().unwrap_or("").to_string();
+                    // Load ModelData to get base_url and display name.
+                    let cache_path = app
+                        .model_cache_path
+                        .parent()
+                        .unwrap_or(&app.model_cache_path)
+                        .to_path_buf();
+                    let model_data_path = cache_path.join("model-data.json");
+                    let model_data = crate::model_data::ModelData::load(&model_data_path);
+                    let provider_meta = model_data
+                        .as_ref()
+                        .and_then(|d| d.providers.get(&provider_id));
+                    let base_url = provider_meta
+                        .map(|m| m.base_url.clone())
+                        .unwrap_or_default();
+                    let name = provider_meta
+                        .map(|m| m.name.clone())
+                        .unwrap_or_else(|| provider_id.clone());
+
+                    let kind = crate::config::ProviderKind::Openai;
+                    let mode = crate::config::ProviderMode::Key;
+                    let mut form = crate::function::ConfigFormState::new_for_create(kind, mode);
+                    form.name = name;
+                    form.base_url = base_url;
+                    form.provider_id = provider_id;
+                    SettingsLevel::ConfigForm(form)
+                }
+                Some(id) => match parse_id(&id) {
+                    Some((kind, mode)) => SettingsLevel::ConfigForm(
+                        crate::function::ConfigFormState::new_for_create(kind, mode),
+                    ),
+                    None => SettingsLevel::NewProviderKind,
+                },
                 None => SettingsLevel::NewProviderKind,
             }
         }
@@ -1439,6 +1494,7 @@ pub(super) fn settings_save_form(app: &mut App, form: crate::function::ConfigFor
         model,
         model_display,
         name: String::new(),
+        provider_id: form.provider_id.clone(),
     };
     new_cfg.name = form.name.trim().to_string();
 
@@ -1519,6 +1575,11 @@ pub(super) fn settings_save_form(app: &mut App, form: crate::function::ConfigFor
                 .entry(&active_id)
                 .map(|c| c.name.clone())
                 .unwrap_or_default();
+            let provider_id = app
+                .config
+                .entry(&active_id)
+                .map(|c| c.provider_id.clone())
+                .unwrap_or_default();
             let cache_path = app
                 .model_cache_path
                 .parent()
@@ -1535,6 +1596,7 @@ pub(super) fn settings_save_form(app: &mut App, form: crate::function::ConfigFor
                         secret_key: &secret_key,
                         cache_path: &cache_path,
                         provider_name: &provider_name,
+                        provider_id: &provider_id,
                     })
                     .await
                     {
@@ -1749,6 +1811,7 @@ pub(super) fn open_context_picker(
     let model_data = crate::model_data::ModelData::load(&model_data_path).unwrap_or_else(|| {
         crate::model_data::ModelData {
             models: std::collections::HashMap::new(),
+            providers: std::collections::HashMap::new(),
             fetched_at: chrono::Utc::now(),
         }
     });

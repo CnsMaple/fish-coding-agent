@@ -3,12 +3,26 @@ use std::collections::HashMap;
 use std::path::Path;
 
 const MODELS_DEV_URL: &str = "https://models.dev/models.json";
+const API_DEV_URL: &str = "https://models.dev/api.json";
 const CACHE_TTL_HOURS: i64 = 24;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelData {
     pub models: HashMap<String, ModelEntry>,
+    /// Provider metadata from api.json, keyed by provider ID (e.g. "opencode").
+    #[serde(default)]
+    pub providers: HashMap<String, ProviderMeta>,
     pub fetched_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Metadata for a models.dev provider, extracted from api.json.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderMeta {
+    #[serde(default)]
+    pub name: String,
+    /// Base URL for the provider's API (the `api` field from api.json).
+    #[serde(default)]
+    pub base_url: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -49,6 +63,17 @@ struct ModelsDevLimit {
     output: Option<u64>,
 }
 
+/// A provider entry from api.json (provider-specific model data).
+#[derive(Debug, Deserialize)]
+struct ProviderEntry {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    api: String,
+    #[serde(default)]
+    models: HashMap<String, ModelsDevModel>,
+}
+
 impl ModelData {
     pub fn load(path: &Path) -> Option<Self> {
         let raw = std::fs::read_to_string(path).ok()?;
@@ -67,9 +92,22 @@ impl ModelData {
     }
 
     /// Look up the context window for a model by matching the API model ID
-    /// against all models.dev entries. Tries exact match first, then
-    /// prefix match (model_id starts with the models.dev model name).
-    pub fn lookup(&self, _provider_prefix: &str, model_id: &str) -> Option<u64> {
+    /// against all models.dev entries. Tries provider-specific exact match
+    /// first, then canonical exact match, then prefix match.
+    pub fn lookup(&self, provider_prefix: &str, model_id: &str) -> Option<u64> {
+        // Provider-specific exact match — catches models like
+        // "deepseek-v4-flash-free" that only exist under a provider (api.json).
+        let provider_key = format!(
+            "{}/{}",
+            provider_prefix.to_lowercase(),
+            model_id.to_lowercase()
+        );
+        if let Some(entry) = self.models.get(&provider_key) {
+            if let Some(ctx) = entry.context_window {
+                return Some(ctx);
+            }
+        }
+
         let model_id_lower = model_id.to_lowercase();
 
         let mut best_match: Option<(usize, u64)> = None;
@@ -97,6 +135,37 @@ impl ModelData {
             }
         }
         best_match.map(|(_, ctx)| ctx)
+    }
+
+    /// Look up input modalities for a model, using the same matching
+    /// strategy as `lookup`.
+    pub fn lookup_modalities(&self, provider_prefix: &str, model_id: &str) -> Option<Vec<String>> {
+        // Provider-specific exact match first.
+        let provider_key = format!(
+            "{}/{}",
+            provider_prefix.to_lowercase(),
+            model_id.to_lowercase()
+        );
+        if let Some(entry) = self.models.get(&provider_key) {
+            if !entry.modalities.is_empty() {
+                return Some(entry.modalities.clone());
+            }
+        }
+
+        let model_id_lower = model_id.to_lowercase();
+        for (key, entry) in &self.models {
+            if entry.modalities.is_empty() {
+                continue;
+            }
+            let key_lower = key.to_lowercase();
+            let Some(model_name) = key_lower.split_once('/').map(|(_, name)| name) else {
+                continue;
+            };
+            if model_id_lower == model_name {
+                return Some(entry.modalities.clone());
+            }
+        }
+        None
     }
 
     /// Get unique context window + modality combinations for all models of
@@ -132,9 +201,10 @@ pub async fn fetch_models_dev(
     _client: &reqwest::Client,
     cache_path: &Path,
 ) -> Result<ModelData, String> {
-    // Try cache first
+    // Try cache first — but only if it has provider metadata
+    // (migration: old caches don't have providers, force a refetch).
     if let Some(cached) = ModelData::load(cache_path) {
-        if !cached.is_stale() {
+        if !cached.is_stale() && !cached.providers.is_empty() {
             return Ok(cached);
         }
     }
@@ -147,6 +217,7 @@ pub async fn fetch_models_dev(
         .build()
         .map_err(|e| format!("client build failed: {e}"))?;
 
+    // Fetch canonical models (models.json)
     let resp = client
         .get(MODELS_DEV_URL)
         .send()
@@ -168,8 +239,43 @@ pub async fn fetch_models_dev(
         models.insert(id, entry);
     }
 
+    let mut providers = HashMap::new();
+
+    // Also fetch provider-specific models (api.json) and merge them in.
+    if let Ok(api_resp) = client.get(API_DEV_URL).send().await {
+        if let Ok(api_raw) = api_resp.json::<HashMap<String, ProviderEntry>>().await {
+            for (provider_id, provider) in api_raw {
+                let provider_lower = provider_id.to_lowercase();
+                // Store provider metadata.
+                let base_url = if provider.api.is_empty() {
+                    String::new()
+                } else {
+                    provider.api.clone()
+                };
+                providers.insert(
+                    provider_lower.clone(),
+                    ProviderMeta {
+                        name: provider.name,
+                        base_url,
+                    },
+                );
+                for (model_id, m) in provider.models {
+                    let entry = ModelEntry {
+                        context_window: m.limit.as_ref().and_then(|l| l.context),
+                        max_output: m.limit.as_ref().and_then(|l| l.output),
+                        modalities: m.modalities.map(|mods| mods.input).unwrap_or_default(),
+                    };
+                    let key = format!("{provider_lower}/{model_id}");
+                    // Don't overwrite canonical entries.
+                    models.entry(key).or_insert(entry);
+                }
+            }
+        }
+    }
+
     let data = ModelData {
         models,
+        providers,
         fetched_at: chrono::Utc::now(),
     };
     data.save(cache_path);

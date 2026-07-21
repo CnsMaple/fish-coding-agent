@@ -681,6 +681,7 @@ fn model_info_from_cursor_details(m: ModelDetails) -> Option<ModelInfo> {
         request_id: None,
         context_window_tokens: None,
         context_needs_pick: false,
+        modalities: Vec::new(),
     })
 }
 

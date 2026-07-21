@@ -15,6 +15,7 @@ fn make_test_app() -> App {
         name: String::new(),
         access_key: String::new(),
         secret_key: String::new(),
+        provider_id: String::new(),
     });
     cfg.active = Some(make_id(ProviderKind::Openai, ProviderMode::Key));
     let tmp = std::env::temp_dir().join("fish-coding-agent-fns-test.json");

@@ -503,7 +503,11 @@ pub fn compact_now(app: &mut App, _arg: &str) {
 /// the redundant TopLevel) when they are routed here because no model is
 /// configured.
 pub fn open_settings_at(app: &mut App, initial_level: crate::function::SettingsLevel) {
-    let mut state = crate::function::SettingsState::new(&app.config);
+    let cache_parent = app
+        .model_cache_path
+        .parent()
+        .unwrap_or(&app.model_cache_path);
+    let mut state = crate::function::SettingsState::with_cache(&app.config, Some(cache_parent));
     state.level = initial_level;
     state.clamp_cursor(&app.config);
     app.function.push(SidebarTab::Settings(Box::new(state)));

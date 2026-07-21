@@ -292,16 +292,12 @@ pub fn render_new_provider_picker(
     buf: &mut Buffer,
     s: &mut crate::function::NewProviderPickerState,
 ) -> Option<(u16, u16)> {
-    if area.height < 3 {
+    if area.height < 2 {
         return None;
     }
     let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Min(1),
-            Constraint::Length(1),
-        ])
+        .constraints([Constraint::Length(1), Constraint::Min(1)])
         .split(area);
     let search_cursor =
         crate::ui::picker_widget::render_search_row(rows[0], buf, &s.query, s.focus, false);
@@ -334,11 +330,6 @@ pub fn render_new_provider_picker(
             buf.set_line(list_area.x, y, &line, list_area.width);
         }
     }
-    Paragraph::new(Line::from(Span::styled(
-        " Enter: select | type: filter | Esc: back ",
-        Theme::dim(),
-    )))
-    .render(rows[2], buf);
     search_cursor
 }
 

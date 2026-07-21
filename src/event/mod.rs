@@ -230,6 +230,22 @@ where
     }
     refresh_mcp_summary(app);
 
+    // Eagerly fetch models.dev data in the background so the
+    // provider list in /settings is populated when the user opens it.
+    {
+        let model_data_path = app
+            .model_cache_path
+            .parent()
+            .unwrap_or(&app.model_cache_path)
+            .join("model-data.json");
+        let client = app.reqwest.clone();
+        tokio::spawn(async move {
+            if let Err(e) = crate::model_data::fetch_models_dev(&client, &model_data_path).await {
+                tracing::debug!("background models.dev fetch: {e}");
+            }
+        });
+    }
+
     let mut events = EventStream::new();
     let mut tick = interval(Duration::from_millis(100));
     // Faster tick dedicated to scrolling momentum. ~60fps so the
@@ -886,8 +902,6 @@ fn handle_msg(msg: AppMsg, app: &mut App) {
                 crate::config::ProviderKind::Openai => "/models",
                 crate::config::ProviderKind::Anthropic => "/v1/models",
                 crate::config::ProviderKind::Cursor => "",
-                crate::config::ProviderKind::DeepSeek => "/models",
-                crate::config::ProviderKind::MiniMax => "/models",
                 crate::config::ProviderKind::Volcengine => "/models",
             };
             if let Some(crate::function::SidebarTab::ModelPicker(s)) = app

@@ -288,6 +288,9 @@ pub struct ModelInfo {
     /// When true, the user needs to manually pick a context window size.
     #[serde(default)]
     pub context_needs_pick: bool,
+    /// Input modality types from models.dev (e.g. ["text", "image"]).
+    #[serde(default)]
+    pub modalities: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

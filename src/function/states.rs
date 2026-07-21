@@ -384,10 +384,8 @@ pub fn settings_body_lines(
             }
         }
         SettingsLevel::NewProviderKind => {
-            for _ in 0..s.new_provider.filtered.len() {
-                lines.push(ratatui::text::Line::raw(""));
-            }
-            if s.new_provider.filtered.is_empty() {
+            // Search line + list items.
+            for _ in 0..s.new_provider.filtered.len().max(1) + 1 {
                 lines.push(ratatui::text::Line::raw(""));
             }
         }
@@ -474,6 +472,9 @@ pub struct ConfigFormState {
     pub key_modified: bool,
     /// Same for api_key_env.
     pub env_modified: bool,
+    /// models.dev provider ID (not user-editable, set automatically
+    /// when created from models.dev picker).
+    pub provider_id: String,
 }
 
 impl ConfigFormState {
@@ -484,16 +485,11 @@ impl ConfigFormState {
         let id = crate::config::make_id(kind, mode);
         let name = match kind {
             crate::config::ProviderKind::Cursor => "Cursor".to_string(),
-            crate::config::ProviderKind::DeepSeek => "DeepSeek".to_string(),
-            crate::config::ProviderKind::MiniMax => "MiniMax".to_string(),
             crate::config::ProviderKind::Volcengine => "Volcengine".to_string(),
             _ => String::new(),
         };
         let base_url = match kind {
-            crate::config::ProviderKind::Cursor
-            | crate::config::ProviderKind::DeepSeek
-            | crate::config::ProviderKind::MiniMax
-            | crate::config::ProviderKind::Volcengine => {
+            crate::config::ProviderKind::Cursor | crate::config::ProviderKind::Volcengine => {
                 crate::config::default_base_url(kind).to_string()
             }
             _ => String::new(),
@@ -511,6 +507,7 @@ impl ConfigFormState {
             form_error: None,
             key_modified: false,
             env_modified: false,
+            provider_id: String::new(),
         }
     }
 
@@ -532,6 +529,7 @@ impl ConfigFormState {
             form_error: None,
             key_modified: false,
             env_modified: false,
+            provider_id: cfg.provider_id.clone(),
         }
     }
 
@@ -657,7 +655,9 @@ impl SettingsLevel {
         match self {
             SettingsLevel::TopLevel => "Up/Down: nav | Enter: select | Esc: close",
             SettingsLevel::ProviderList => "Up/Down: nav | Enter: select | Esc: back",
-            SettingsLevel::NewProviderKind => "Up/Down: nav | Enter: select | Esc: back",
+            SettingsLevel::NewProviderKind => {
+                "Up/Down: nav | type: filter | Enter: select | Esc: back"
+            }
             SettingsLevel::ExistingActions(_) => "Up/Down: nav | Enter: select | Esc: back",
             SettingsLevel::ConfigForm(_) => {
                 "Up/Down: nav | type: edit | Enter: confirm | Esc: back"
@@ -698,25 +698,73 @@ impl NewProviderPickerState {
         s
     }
 
+    /// Load models.dev providers from the cache and append them to the
+    /// entry list with a special `__md__/{name}/{provider_id}` prefix.
+    /// Idempotent — already-present entries are not added again.
+    pub fn load_model_dev_providers(&mut self, cache_path: &std::path::Path) {
+        let model_data_path = cache_path.join("model-data.json");
+        let Some(data) = crate::model_data::ModelData::load(&model_data_path) else {
+            return;
+        };
+        let mut dev_entries: Vec<String> = data
+            .providers
+            .iter()
+            .map(|(id, meta)| format!("__md__/{}/{}", meta.name, id))
+            .collect();
+        if dev_entries.is_empty() {
+            return;
+        }
+        dev_entries.sort();
+        // Filter out already-present entries.
+        let existing: std::collections::HashSet<String> = self.entries.iter().cloned().collect();
+        let insert_at = self
+            .entries
+            .iter()
+            .position(|id| {
+                crate::config::parse_id(id)
+                    .map(|(k, _)| k == crate::config::ProviderKind::Openai)
+                    .unwrap_or(false)
+            })
+            .unwrap_or(self.entries.len());
+        for entry in dev_entries {
+            if !existing.contains(&entry) {
+                self.entries.insert(insert_at, entry);
+            }
+        }
+        self.rebuild_filter();
+    }
+
     pub fn picker_label(&self, id: &str) -> String {
+        if let Some(rest) = id.strip_prefix("__md__/") {
+            // Format: __md__/{name}/{provider_id}
+            if let Some(name_end) = rest.rfind('/') {
+                return format!("{} (models.dev)", &rest[..name_end]);
+            }
+            return format!("{} (models.dev)", rest);
+        }
         crate::config::parse_id(id)
             .map(|(k, _)| k.picker_label().to_string())
             .unwrap_or_else(|| crate::config::id_display(id))
     }
 
     pub fn rebuild_filter(&mut self) {
-        let q = self.query.to_lowercase();
-        self.filtered = self
-            .entries
-            .iter()
-            .enumerate()
-            .filter(|(_, id)| {
-                q.is_empty()
-                    || id.to_lowercase().contains(&q)
-                    || self.picker_label(id).to_lowercase().contains(&q)
-            })
-            .map(|(i, _)| i)
-            .collect();
+        if self.query.is_empty() {
+            self.filtered = (0..self.entries.len()).collect();
+        } else {
+            let mut scored: Vec<(u32, usize)> = self
+                .entries
+                .iter()
+                .enumerate()
+                .filter_map(|(i, id)| {
+                    let label = self.picker_label(id);
+                    crate::fuzzy::score(&self.query, id)
+                        .or_else(|| crate::fuzzy::score(&self.query, &label))
+                        .map(|sc| (sc, i))
+                })
+                .collect();
+            scored.sort_by_key(|&(sc, i)| (sc, i));
+            self.filtered = scored.into_iter().map(|(_, i)| i).collect();
+        }
         if self.cursor >= self.filtered.len() {
             self.cursor = self.filtered.len().saturating_sub(1);
         }
@@ -755,15 +803,23 @@ pub struct SettingsState {
 }
 
 impl SettingsState {
-    pub fn new(_cfg: &Config) -> Self {
-        Self {
+    pub fn new(cfg: &Config) -> Self {
+        Self::with_cache(cfg, None)
+    }
+
+    pub fn with_cache(_cfg: &Config, model_cache_parent: Option<&std::path::Path>) -> Self {
+        let mut state = Self {
             level: SettingsLevel::TopLevel,
             cursor: 0,
             scroll: 0,
             form_error: None,
             load_error: None,
             new_provider: NewProviderPickerState::new(),
+        };
+        if let Some(cache_path) = model_cache_parent {
+            state.new_provider.load_model_dev_providers(cache_path);
         }
+        state
     }
 
     /// Number of items in the current list view (used to clamp cursor).
@@ -895,18 +951,22 @@ impl ModelPickerState {
     }
 
     pub fn rebuild_filter(&mut self) {
-        let q = self.query.to_lowercase();
-        self.filtered = self
-            .models
-            .iter()
-            .enumerate()
-            .filter(|(_, m)| {
-                q.is_empty()
-                    || m.id.to_lowercase().contains(&q)
-                    || m.display.to_lowercase().contains(&q)
-            })
-            .map(|(i, _)| i)
-            .collect();
+        if self.query.is_empty() {
+            self.filtered = (0..self.models.len()).collect();
+        } else {
+            let mut scored: Vec<(u32, usize)> = self
+                .models
+                .iter()
+                .enumerate()
+                .filter_map(|(i, m)| {
+                    crate::fuzzy::score(&self.query, &m.id)
+                        .or_else(|| crate::fuzzy::score(&self.query, &m.display))
+                        .map(|sc| (sc, i))
+                })
+                .collect();
+            scored.sort_by_key(|&(sc, i)| (sc, i));
+            self.filtered = scored.into_iter().map(|(_, i)| i).collect();
+        }
         if self.cursor >= self.filtered.len() {
             self.cursor = self.filtered.len().saturating_sub(1);
         }

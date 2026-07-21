@@ -188,11 +188,14 @@ pub struct ListModelsArgs<'a> {
     pub secret_key: &'a str,
     pub cache_path: &'a Path,
     pub provider_name: &'a str,
+    /// models.dev provider ID for context-window matching.
+    /// When non-empty, used instead of `provider_name`.
+    pub provider_id: &'a str,
 }
 
 pub async fn list_models(args: ListModelsArgs<'_>) -> Result<Vec<ModelInfo>> {
     let p = make_list_provider(args.kind);
-    let mut models = p
+    let mut models = match p
         .list_models(
             args.client,
             args.base_url,
@@ -200,10 +203,39 @@ pub async fn list_models(args: ListModelsArgs<'_>) -> Result<Vec<ModelInfo>> {
             args.access_key,
             args.secret_key,
         )
-        .await?;
+        .await
+    {
+        Ok(models) => models,
+        Err(e) => {
+            // For models.dev providers, fall back to static model list
+            // from the cache when the live API call fails.
+            if !args.provider_id.is_empty() {
+                tracing::warn!(
+                    "list_models for {} failed, falling back to static models.dev data: {e}",
+                    args.provider_id
+                );
+                if let Some(static_models) =
+                    load_static_models_for_provider(args.cache_path, args.provider_id)
+                {
+                    let mut models = static_models;
+                    fill_context_windows(
+                        args.client,
+                        args.provider_name,
+                        args.provider_id,
+                        &mut models,
+                        args.cache_path,
+                    )
+                    .await;
+                    return Ok(models);
+                }
+            }
+            return Err(e);
+        }
+    };
     fill_context_windows(
         args.client,
         args.provider_name,
+        args.provider_id,
         &mut models,
         args.cache_path,
     )
@@ -212,16 +244,15 @@ pub async fn list_models(args: ListModelsArgs<'_>) -> Result<Vec<ModelInfo>> {
 }
 
 /// Fill context_window_tokens in models using models.dev data.
-/// If `cache_path` is None, uses a default path in the config directory.
-/// Models that are not found in models.dev keep their existing
-/// context_window_tokens (which may be None).
 pub async fn fill_context_windows(
     client: &reqwest::Client,
     provider_name: &str,
+    provider_id: &str,
     models: &mut [ModelInfo],
     cache_path: &Path,
 ) {
     let clean_name = provider_name.to_lowercase();
+    let clean_provider_id = provider_id.to_lowercase();
 
     let model_data_path = cache_path.join("model-data.json");
     let custom_cache_path = cache_path.join("context-cache.json");
@@ -233,6 +264,7 @@ pub async fn fill_context_windows(
             // Fall back to stale cache.
             model_data::ModelData::load(&model_data_path).unwrap_or_else(|| model_data::ModelData {
                 models: std::collections::HashMap::new(),
+                providers: std::collections::HashMap::new(),
                 fetched_at: chrono::Utc::now(),
             })
         }
@@ -249,11 +281,56 @@ pub async fn fill_context_windows(
             model.context_window_tokens = Some(ctx);
             continue;
         }
-        // Try models.dev
-        if let Some(ctx) = model_data.lookup(&clean_name, &model.id) {
+        // Try models.dev: use provider_id when available (models.dev-sourced),
+        // otherwise fall back to user-defined name (custom OpenAI/Anthropic).
+        let lookup_key = if clean_provider_id.is_empty() {
+            &clean_name
+        } else {
+            &clean_provider_id
+        };
+        if let Some(ctx) = model_data.lookup(lookup_key, &model.id) {
             model.context_window_tokens = Some(ctx);
         }
+        // Also populate modalities from models.dev data.
+        if model.modalities.is_empty() {
+            if let Some(mods) = model_data.lookup_modalities(lookup_key, &model.id) {
+                model.modalities = mods;
+            }
+        }
     }
+}
+
+/// Load static model list for a models.dev provider from the cached
+/// models.dev data. Returns `None` when the cache is unavailable or
+/// contains no entries for this provider.
+fn load_static_models_for_provider(cache_path: &Path, provider_id: &str) -> Option<Vec<ModelInfo>> {
+    let model_data_path = cache_path.join("model-data.json");
+    let data = crate::model_data::ModelData::load(&model_data_path)?;
+    let prefix = format!("{}/", provider_id.to_lowercase());
+    let mut models: Vec<ModelInfo> = data
+        .models
+        .iter()
+        .filter(|(key, _)| key.to_lowercase().starts_with(&prefix))
+        .map(|(key, entry)| {
+            let model_name = key
+                .split_once('/')
+                .map(|(_, name)| name.to_string())
+                .unwrap_or_else(|| key.clone());
+            ModelInfo {
+                id: model_name.clone(),
+                display: model_name,
+                request_id: None,
+                context_window_tokens: entry.context_window,
+                context_needs_pick: false,
+                modalities: entry.modalities.clone(),
+            }
+        })
+        .collect();
+    if models.is_empty() {
+        return None;
+    }
+    models.sort_by(|a, b| a.id.cmp(&b.id));
+    Some(models)
 }
 
 pub fn provider(kind: ProviderKind) -> Box<dyn Provider> {
@@ -268,10 +345,7 @@ pub fn provider(kind: ProviderKind) -> Box<dyn Provider> {
 /// (`list_models`) uses `VolcengineProvider` which needs V4 signing.
 fn make_chat_provider(kind: ProviderKind) -> Box<dyn Provider> {
     match kind {
-        ProviderKind::Openai
-        | ProviderKind::DeepSeek
-        | ProviderKind::MiniMax
-        | ProviderKind::Volcengine => Box::new(openai::OpenAiProvider),
+        ProviderKind::Openai | ProviderKind::Volcengine => Box::new(openai::OpenAiProvider),
         ProviderKind::Anthropic => Box::new(anthropic::AnthropicProvider),
         ProviderKind::Cursor => Box::new(cursor::CursorProvider),
     }
@@ -282,9 +356,7 @@ fn make_chat_provider(kind: ProviderKind) -> Box<dyn Provider> {
 /// unlike `make_chat_provider` which maps it to `OpenAiProvider`.
 fn make_list_provider(kind: ProviderKind) -> Box<dyn Provider> {
     match kind {
-        ProviderKind::Openai | ProviderKind::DeepSeek | ProviderKind::MiniMax => {
-            Box::new(openai::OpenAiProvider)
-        }
+        ProviderKind::Openai => Box::new(openai::OpenAiProvider),
         ProviderKind::Anthropic => Box::new(anthropic::AnthropicProvider),
         ProviderKind::Cursor => Box::new(cursor::CursorProvider),
         ProviderKind::Volcengine => Box::new(volcengine::VolcengineProvider),

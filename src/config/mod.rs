@@ -12,8 +12,6 @@ pub enum ProviderKind {
     Openai,
     Anthropic,
     Cursor,
-    DeepSeek,
-    MiniMax,
     Volcengine,
 }
 
@@ -23,8 +21,6 @@ impl ProviderKind {
             ProviderKind::Openai => "openai",
             ProviderKind::Anthropic => "anthropic",
             ProviderKind::Cursor => "cursor",
-            ProviderKind::DeepSeek => "deepseek",
-            ProviderKind::MiniMax => "minimax",
             ProviderKind::Volcengine => "volcengine",
         }
     }
@@ -34,8 +30,6 @@ impl ProviderKind {
             ProviderKind::Openai => "OpenAI",
             ProviderKind::Anthropic => "Anthropic",
             ProviderKind::Cursor => "Cursor",
-            ProviderKind::DeepSeek => "DeepSeek",
-            ProviderKind::MiniMax => "MiniMax",
             ProviderKind::Volcengine => "Volcengine",
         }
     }
@@ -46,8 +40,6 @@ impl ProviderKind {
             ProviderKind::Openai => "OpenAI (custom)",
             ProviderKind::Anthropic => "Anthropic (custom)",
             ProviderKind::Cursor => "Cursor (oauth)",
-            ProviderKind::DeepSeek => "DeepSeek (openai)",
-            ProviderKind::MiniMax => "MiniMax (openai)",
             ProviderKind::Volcengine => "Volcengine (openai)",
         }
     }
@@ -57,20 +49,18 @@ impl ProviderKind {
             "openai" => Some(Self::Openai),
             "anthropic" => Some(Self::Anthropic),
             "cursor" => Some(Self::Cursor),
-            "deepseek" => Some(Self::DeepSeek),
-            "minimax" => Some(Self::MiniMax),
             "volcengine" => Some(Self::Volcengine),
+            // Legacy aliases — still parseable for config migration.
+            "deepseek" | "minimax" => Some(Self::Openai),
             _ => None,
         }
     }
 
-    pub fn all() -> [ProviderKind; 6] {
+    pub fn all() -> [ProviderKind; 4] {
         [
             ProviderKind::Openai,
             ProviderKind::Anthropic,
             ProviderKind::Cursor,
-            ProviderKind::DeepSeek,
-            ProviderKind::MiniMax,
             ProviderKind::Volcengine,
         ]
     }
@@ -323,6 +313,11 @@ pub struct ProviderConfig {
     /// Volcengine Secret Key for model list API (HMAC-SHA256 auth).
     #[serde(default)]
     pub secret_key: String,
+    /// models.dev provider ID for context-window lookups (e.g. "opencode").
+    /// When set, `fill_context_windows` uses this instead of the user-defined
+    /// name to match models from models.dev/api.json. Empty for custom APIs.
+    #[serde(default)]
+    pub provider_id: String,
 }
 
 impl ProviderConfig {
@@ -336,6 +331,7 @@ impl ProviderConfig {
             name: String::new(),
             access_key: String::new(),
             secret_key: String::new(),
+            provider_id: String::new(),
         }
     }
 }
@@ -345,8 +341,6 @@ pub fn default_base_url(kind: ProviderKind) -> &'static str {
         ProviderKind::Openai => "https://api.openai.com/v1",
         ProviderKind::Anthropic => "https://api.anthropic.com",
         ProviderKind::Cursor => "https://api2.cursor.sh",
-        ProviderKind::DeepSeek => "https://api.deepseek.com",
-        ProviderKind::MiniMax => "https://api.minimaxi.com",
         ProviderKind::Volcengine => "https://ark.cn-beijing.volces.com/api/plan/v3",
     }
 }
@@ -356,8 +350,6 @@ pub fn default_api_key_env(kind: ProviderKind) -> &'static str {
         ProviderKind::Openai => "OPENAI_API_KEY",
         ProviderKind::Anthropic => "ANTHROPIC_API_KEY",
         ProviderKind::Cursor => "",
-        ProviderKind::DeepSeek => "DEEPSEEK_API_KEY",
-        ProviderKind::MiniMax => "MINIMAX_API_KEY",
         ProviderKind::Volcengine => "VOLCENGINE_API_KEY",
     }
 }
@@ -572,7 +564,8 @@ impl Config {
 
     fn migrate_from(old: OldConfig) -> Self {
         let mut entries = HashMap::new();
-        for (kind, p) in old.providers {
+        for (kind_str, p) in old.providers {
+            let kind = ProviderKind::from_str_opt(&kind_str).unwrap_or(ProviderKind::Openai);
             entries.insert(
                 make_id(kind, ProviderMode::Key),
                 ProviderConfig {
@@ -584,14 +577,16 @@ impl Config {
                     model: old.active_model.clone(),
                     model_display: String::new(),
                     name: String::new(),
+                    provider_id: String::new(),
                 },
             );
         }
-        let active = entries
-            .keys()
-            .next()
-            .cloned()
-            .or_else(|| Some(make_id(old.active_provider, ProviderMode::Key)));
+        let active = entries.keys().next().cloned().or_else(|| {
+            Some(make_id(
+                ProviderKind::from_str_opt(&old.active_provider).unwrap_or(ProviderKind::Openai),
+                ProviderMode::Key,
+            ))
+        });
         Self {
             active,
             thinking: old.thinking,
@@ -850,10 +845,10 @@ fn tolerant_map<V: DeserializeOwned>(
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct OldConfig {
-    pub active_provider: ProviderKind,
+    pub active_provider: String,
     pub active_model: String,
     pub thinking: ReasoningMode,
-    pub providers: HashMap<ProviderKind, OldProviderConfig>,
+    pub providers: HashMap<String, OldProviderConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -915,7 +910,7 @@ mod tests {
         // invalid value (api_key is a number, not a string). The bad
         // entry is dropped; the good entry survives.
         let openai_id = make_id(ProviderKind::Openai, ProviderMode::Key);
-        let deepseek_id = make_id(ProviderKind::DeepSeek, ProviderMode::Key);
+        let deepseek_id = "deepseek:key";
         let json = format!(
             r#"{{
             "entries": {{
@@ -935,7 +930,7 @@ mod tests {
         let cfg = load_from("bad_entry", &json);
         assert!(cfg.entries.contains_key(&openai_id), "good entry survives");
         assert!(
-            !cfg.entries.contains_key(&deepseek_id),
+            !cfg.entries.contains_key(deepseek_id),
             "bad entry is dropped, not the whole map"
         );
     }

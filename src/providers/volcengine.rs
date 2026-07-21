@@ -131,6 +131,7 @@ impl VolcengineProvider {
                     request_id: None,
                     context_window_tokens: None,
                     context_needs_pick: false,
+                    modalities: Vec::new(),
                 });
             }
         }
@@ -190,6 +191,7 @@ impl VolcengineProvider {
                 request_id: None,
                 context_window_tokens: None,
                 context_needs_pick: false,
+                modalities: Vec::new(),
             });
         }
 
@@ -363,6 +365,7 @@ impl VolcengineProvider {
                         request_id: None,
                         context_window_tokens: context_window,
                         context_needs_pick: false,
+                        modalities: Vec::new(),
                     });
                 }
             }
@@ -435,6 +438,7 @@ impl VolcengineProvider {
                     request_id: None,
                     context_window_tokens: None,
                     context_needs_pick: false,
+                    modalities: Vec::new(),
                 })
             })
             .collect();

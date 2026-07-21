@@ -43,6 +43,7 @@ impl Provider for OpenAiProvider {
                 request_id: None,
                 context_window_tokens: None,
                 context_needs_pick: false,
+                modalities: Vec::new(),
             })
             .collect())
     }
