@@ -151,6 +151,14 @@ pub struct App {
     /// by the mouse handler to detect click-in-session for scroll.
     pub session_area: Option<ratatui::layout::Rect>,
 
+    /// The screen rect of the agents area, updated on each render. Used
+    /// for click-to-focus detection.
+    pub agents_area: Option<ratatui::layout::Rect>,
+
+    /// The screen rect of the function panel area, updated on each render. Used
+    /// for click-to-focus detection.
+    pub function_panel_area: Option<ratatui::layout::Rect>,
+
     /// Screen coordinates of the input cursor, set during rendering.
     /// Used to position the terminal cursor for IME support.
     pub input_cursor_screen: Option<(u16, u16)>,
@@ -332,6 +340,8 @@ impl App {
             thinking_toggle_rows: Vec::new(),
             tool_toggle_rows: Vec::new(),
             session_area: None,
+            agents_area: None,
+            function_panel_area: None,
             hit_rate: HitRate::new(50),
             token_rate: TokenRate::new(50),
             response_started_at: None,

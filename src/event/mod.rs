@@ -2120,6 +2120,27 @@ fn handle_mouse(m: MouseEvent, app: &mut App) {
 
     match m.kind {
         MouseEventKind::Down(MouseButton::Left) => {
+            // Click-to-focus: determine which area was clicked.
+            let in_agents = app
+                .agents_area
+                .map(|a| m.row >= a.y && m.row < a.y + a.height)
+                .unwrap_or(false);
+            let in_panel = app
+                .function_panel_area
+                .map(|a| m.row >= a.y && m.row < a.y + a.height)
+                .unwrap_or(false);
+
+            if in_agents {
+                app.focus_target = crate::function::FocusTarget::AgentsCheckbox;
+            } else if in_panel {
+                app.focus_target = crate::function::FocusTarget::FunctionPanel;
+            } else if in_prompt_row {
+                app.focus_target = crate::function::FocusTarget::Input;
+            } else {
+                // Click in the session area — focus input
+                app.focus_target = crate::function::FocusTarget::Input;
+            }
+
             // Clear any prior selection but DO NOT create a new one yet.
             // We only commit a TUI selection when the user actually drags,
             // so a plain click leaves the screen untouched.

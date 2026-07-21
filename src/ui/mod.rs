@@ -70,7 +70,10 @@ pub fn render(f: &mut Frame, app: &mut App) {
     let cwd_idx = input_idx + 1;
 
     if app.agents_visible {
+        app.agents_area = Some(chunks[agents_idx]);
         render_agents_area(chunks[agents_idx], f.buffer_mut(), app);
+    } else {
+        app.agents_area = None;
     }
     let session_frame_area = chunks[session_idx];
     let content_area = session_content_area(session_frame_area);
@@ -118,7 +121,10 @@ pub fn render(f: &mut Frame, app: &mut App) {
         &mut app.tool_toggle_rows,
     );
     if app.function_visible {
+        app.function_panel_area = Some(chunks[panel_idx]);
         function_panel::render(chunks[panel_idx], f.buffer_mut(), app);
+    } else {
+        app.function_panel_area = None;
     }
     crate::input::render(chunks[input_idx], f.buffer_mut(), app);
     render_cwd(chunks[cwd_idx], f.buffer_mut(), app);
@@ -903,27 +909,44 @@ pub fn render_agents_area(
 ) {
     use crate::theme::Theme;
     use ratatui::text::{Line, Span};
-    use ratatui::widgets::Paragraph;
+    use ratatui::widgets::{Block, Borders, Paragraph};
 
     if area.height < 5 || area.width < 20 {
         return;
     }
+
+    // Wrap in a bordered block
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_set(app.config.border_type.ratatui_set())
+        .border_style(match app.focus_target {
+            crate::function::FocusTarget::AgentsCheckbox => Theme::focused_border(),
+            crate::function::FocusTarget::Input => Theme::unfocused_border(),
+            crate::function::FocusTarget::FunctionPanel => Theme::unfocused_border(),
+        });
+    let inner = block.inner(area);
+    block.render(area, buf);
+
+    if inner.height < 3 {
+        return;
+    }
+
     let logo_lines = [
         "\u{2590}\u{2588}\u{259B}\u{2588}\u{259B}\u{2588}\u{258C}",
         "\u{2590}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{258C}",
     ];
     let logo_width = 7u16;
-    let right_x = area.x + logo_width + 2;
-    let right_w = area.width.saturating_sub(logo_width + 2);
+    let right_x = inner.x + logo_width + 1;
+    let right_w = inner.width.saturating_sub(logo_width + 1);
 
     // Render logo
     for (i, line) in logo_lines.iter().enumerate() {
-        let y = area.y + 1 + i as u16;
+        let y = inner.y + i as u16;
         let logo_line = Line::from(Span::styled(*line, Theme::bold()));
         let p = Paragraph::new(logo_line);
         p.render(
             ratatui::layout::Rect {
-                x: area.x + 1,
+                x: inner.x,
                 y,
                 width: logo_width,
                 height: 1,
@@ -938,26 +961,9 @@ pub fn render_agents_area(
     let p_launch = Paragraph::new(load_line);
     p_launch.render(
         ratatui::layout::Rect {
-            x: area.x + 1,
-            y: area.y + 1 + logo_lines.len() as u16,
-            width: area.width.saturating_sub(area.x + 1),
-            height: 1,
-        },
-        buf,
-    );
-
-    // Render line separator
-    let sep_y = area.y + 4;
-    let sep_line = Line::from(Span::styled(
-        "-".repeat(area.width.saturating_sub(1) as usize),
-        Theme::dim(),
-    ));
-    let p_sep = Paragraph::new(sep_line);
-    p_sep.render(
-        ratatui::layout::Rect {
-            x: area.x,
-            y: sep_y,
-            width: area.width.saturating_sub(1),
+            x: inner.x,
+            y: inner.y + logo_lines.len() as u16,
+            width: inner.width,
             height: 1,
         },
         buf,
@@ -971,7 +977,7 @@ pub fn render_agents_area(
         p.render(
             ratatui::layout::Rect {
                 x: right_x,
-                y: area.y + 1,
+                y: inner.y,
                 width: right_w,
                 height: 1,
             },
@@ -981,8 +987,8 @@ pub fn render_agents_area(
     }
 
     for (i, (path, &enabled)) in entries.iter().enumerate() {
-        let y = area.y + 1 + i as u16;
-        if y >= area.y + 3 {
+        let y = inner.y + i as u16;
+        if y >= inner.y + 2 {
             break;
         }
         let marker = if enabled { "[x]" } else { "[ ]" };
