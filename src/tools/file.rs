@@ -263,7 +263,21 @@ pub(super) async fn plan_review(args: &str) -> Result<String> {
                     arr.iter()
                         .filter_map(|v| v.as_str())
                         .enumerate()
-                        .map(|(i, s)| format!("{}. {}", i + 1, s))
+                        .map(|(i, s)| {
+                            // Strip existing "<N>. " prefix if present
+                            // so auto-numbering doesn't create nested
+                            // lists (e.g. "1. 1. Add X" → outer list
+                            // marker + sub-list marker in markdown).
+                            let step = match s.find(". ") {
+                                Some(pos)
+                                    if pos > 0 && s[..pos].chars().all(|c| c.is_ascii_digit()) =>
+                                {
+                                    s[pos + 2..].trim_start()
+                                }
+                                _ => s,
+                            };
+                            format!("{}. {}", i + 1, step)
+                        })
                         .collect::<Vec<_>>()
                         .join("\n")
                 })
