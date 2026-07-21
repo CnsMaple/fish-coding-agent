@@ -2378,6 +2378,8 @@ pub(crate) fn handle_ctrl_n(app: &mut App) {
         } else {
             app.function
                 .push(crate::function::SidebarTab::Notifications);
+            // Point active at the newly-pushed Notifications tab.
+            app.function.active = app.function.tabs.len().saturating_sub(1);
         }
         app.show_panel();
         app.acknowledge_panel();
@@ -2385,7 +2387,9 @@ pub(crate) fn handle_ctrl_n(app: &mut App) {
         // Remove the Notifications tab.
         if let Some(i) = notif_idx {
             app.function.tabs.remove(i);
-            app.function.active = app.function.active.saturating_sub(1);
+            if app.function.active >= app.function.tabs.len() {
+                app.function.active = app.function.active.saturating_sub(1);
+            }
         }
         app.notifications.clear();
         app.pending_events = 0;

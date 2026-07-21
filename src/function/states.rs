@@ -355,11 +355,12 @@ impl SidebarTab {
     }
 
     /// Dynamic panel height: `min(content_lines + overhead, pct_height)`,
-    /// clamped to an absolute minimum of 4 (2 borders + 1 content + 1 hint).
+    /// clamped to an absolute minimum of `overhead + 1`
+    /// (borders + search/hint rows + at least 1 content line).
     pub fn panel_height(&self, pct_height: u16, app: &crate::function::App) -> u16 {
         let content = self.content_lines(app) as u16;
         let h = content.saturating_add(self.overhead());
-        h.min(pct_height).max(4)
+        h.min(pct_height).max(self.overhead() + 1)
     }
 }
 
