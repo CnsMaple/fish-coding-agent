@@ -382,9 +382,9 @@ pub fn render(f: &mut Frame, app: &mut App) {
         app.selected_text = None;
     }
 
-    if app.force_full_repaint {
+    if app.force_full_repaint && app.inflight.is_none() {
         let buf = f.buffer_mut();
-        let area = *buf.area();
+        let area = app.session_area.unwrap_or(*buf.area());
         for y in area.top()..area.bottom() {
             for x in area.left()..area.right() {
                 if let Some(cell) = buf.cell_mut((x, y)) {
