@@ -213,9 +213,10 @@ pub enum FocusTarget {
 
 impl SidebarTab {
     /// Number of content lines this tab needs to display, given the
-    /// current app state. Used to compute a dynamic panel height that
-    /// shrinks to fit the content and expands up to the 30% cap.
-    pub fn content_lines(&self, app: &crate::function::App) -> usize {
+    /// current app state and available width. Used to compute a dynamic
+    /// panel height that shrinks to fit the content and expands up to
+    /// the 30% cap.
+    pub fn content_lines(&self, app: &crate::function::App, width: u16) -> usize {
         match self {
             Self::PastePreview(s) => {
                 if s.image.is_some() {
@@ -274,15 +275,42 @@ impl SidebarTab {
             Self::Plan(_) => 3,
             Self::Ask(s) => {
                 use crate::function::AskPhase;
+                use crate::ui::function_panel::wrap_plain_text;
+                // Match the body-area width used in render_body:
+                // panel_outer - 2 (borders) - 1 (clip slack) → width - 3
+                let w = (width.saturating_sub(3) as usize).max(8);
                 match s.phase {
-                    AskPhase::Asking => {
-                        let active = s.active.min(s.items.len().saturating_sub(1));
-                        s.items
-                            .get(active)
-                            .map(|it| 1 + it.options.len() + 1)
-                            .unwrap_or(1)
+                    AskPhase::Asking => s
+                        .items
+                        .get(s.active.min(s.items.len().saturating_sub(1)))
+                        .map(|it| {
+                            let mut total = 0usize;
+                            // Question: wrapped at w-3, continuation has 3-space indent
+                            total +=
+                                wrap_plain_text(&it.question, w.saturating_sub(3).max(1)).len();
+                            let opt_cw = w.saturating_sub(5).max(1);
+                            for opt in &it.options {
+                                total += wrap_plain_text(opt, opt_cw).len();
+                            }
+                            let label = if it.custom_input.is_empty() {
+                                "Type your own answer…".to_string()
+                            } else {
+                                format!("Custom: [{}]", it.custom_input)
+                            };
+                            total += wrap_plain_text(&label, opt_cw).len();
+                            total.max(1)
+                        })
+                        .unwrap_or(1),
+                    AskPhase::Reviewing => {
+                        let mut total = 0usize;
+                        let cw = w.saturating_sub(3).max(1);
+                        for (i, it) in s.items.iter().enumerate() {
+                            let ans = it.answered.as_deref().unwrap_or("(no answer)");
+                            let body = format!("Q{}. {}  →  {ans}", i + 1, it.question);
+                            total += wrap_plain_text(&body, cw).len();
+                        }
+                        total.max(1) + 1
                     }
-                    AskPhase::Reviewing => s.items.len() * 2,
                 }
             }
             Self::Todo(_) => app.session.todo_items.len().max(1),
@@ -357,8 +385,8 @@ impl SidebarTab {
     /// Dynamic panel height: `min(content_lines + overhead, pct_height)`,
     /// clamped to an absolute minimum of `overhead + 1`
     /// (borders + search/hint rows + at least 1 content line).
-    pub fn panel_height(&self, pct_height: u16, app: &crate::function::App) -> u16 {
-        let content = self.content_lines(app) as u16;
+    pub fn panel_height(&self, pct_height: u16, app: &crate::function::App, width: u16) -> u16 {
+        let content = self.content_lines(app, width) as u16;
         let h = content.saturating_add(self.overhead());
         h.min(pct_height).max(self.overhead() + 1)
     }

@@ -44,7 +44,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
             .function
             .tabs
             .get(app.function.active)
-            .map_or(4, |t| t.panel_height(pct_height, app));
+            .map_or(4, |t| t.panel_height(pct_height, app, area.width));
         constraints.push(Constraint::Length(panel_height));
     }
 

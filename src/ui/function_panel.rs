@@ -263,7 +263,7 @@ fn display_width(s: &str) -> usize {
     unicode_width::UnicodeWidthStr::width(s)
 }
 
-fn wrap_plain_text(text: &str, width: usize) -> Vec<String> {
+pub fn wrap_plain_text(text: &str, width: usize) -> Vec<String> {
     let width = width.max(1);
     let mut out = Vec::new();
     for raw in text.lines() {
@@ -361,85 +361,161 @@ pub fn list_item(focused: bool, label: &str, value: Option<String>) -> Line<'sta
     Line::from(spans)
 }
 
-/// Body lines for the Asking phase: the active question + its
-/// options. Cursor is marked with `>` and rendered bold; the
-/// implicit "Type your own answer…" row is appended as the last
-/// row.
+/// Returns (display_lines, row_starts) where each logical row maps
+/// to a display-line index via `row_starts`.  The text is wrapped
+/// to fit within `width`.  Each row's CONTENT (without prefix) is
+/// wrapped at `width - prefix_width`, then the styled prefix/indent
+/// is prepended so every rendered line stays within `width`.
 ///
-/// ```text
-/// <question>
-/// >  - <option>
-///    - <option>
-/// ```
+/// Logical rows: 0 = question, 1..N = options, N = freeform.
 pub fn ask_active_question_lines(
     s: &crate::function::AskState,
     active_idx: usize,
-) -> Vec<Line<'static>> {
+    width: usize,
+) -> (Vec<Line<'static>>, Vec<usize>) {
     let Some(it) = s.items.get(active_idx) else {
-        return vec![Line::from(Span::styled("(no question)", Theme::dim()))];
+        return (
+            vec![Line::from(Span::styled("(no question)", Theme::dim()))],
+            vec![0],
+        );
     };
     let mut lines: Vec<Line> = Vec::new();
-    lines.push(Line::from(Span::raw(it.question.clone())));
-    for (j, opt) in it.options.iter().enumerate() {
-        if j == it.cursor {
-            lines.push(Line::from(vec![
-                Span::styled(">  - ", Theme::bold()),
-                Span::styled(opt.clone(), Theme::bold()),
-            ]));
+    let mut row_starts: Vec<usize> = Vec::new();
+    let w = width.max(8);
+
+    // Question row (logical row 0) — no prefix.
+    // Continuation lines get a 3-space visual indent, so wrap at w-3.
+    row_starts.push(lines.len());
+    let qw = w.saturating_sub(3).max(1);
+    let q_wrapped = wrap_plain_text(&it.question, qw);
+    for (i, wr) in q_wrapped.into_iter().enumerate() {
+        if i == 0 {
+            lines.push(Line::from(Span::raw(wr)));
         } else {
-            lines.push(Line::from(Span::raw(format!("   - {opt}"))));
+            lines.push(Line::from(Span::raw(format!("   {wr}"))));
         }
     }
-    let freeform_idx = it.options.len();
-    if freeform_idx == it.cursor {
-        let label = if it.custom_input.is_empty() {
-            "Type your own answer…".to_string()
-        } else {
-            format!("Custom: [{}]", it.custom_input)
-        };
-        lines.push(Line::from(vec![
-            Span::styled(">  - ", Theme::bold()),
-            Span::styled(
-                label,
-                if it.custom_input.is_empty() {
-                    Theme::dim()
+
+    // Option rows
+    for (j, opt) in it.options.iter().enumerate() {
+        row_starts.push(lines.len());
+        let selected = j == it.cursor;
+        let prefix = if selected { ">  - " } else { "   - " };
+        let prefix_w = display_width(prefix);
+        let indent = " ".repeat(prefix_w);
+        let content_w = w.saturating_sub(prefix_w).max(1);
+        let wrapped = wrap_plain_text(opt, content_w);
+        for (i, wr) in wrapped.into_iter().enumerate() {
+            if i == 0 {
+                if selected {
+                    lines.push(Line::from(vec![
+                        Span::styled(">  - ", Theme::bold()),
+                        Span::styled(wr, Theme::bold()),
+                    ]));
                 } else {
-                    Theme::bold()
-                },
-            ),
-        ]));
-    } else {
-        let label = if it.custom_input.is_empty() {
-            "   - Type your own answer…".to_string()
-        } else {
-            format!("   - Custom: [{}]", it.custom_input)
-        };
-        lines.push(Line::from(Span::styled(label, Theme::dim())));
+                    lines.push(Line::from(Span::raw(format!("{prefix}{wr}"))));
+                }
+            } else if selected {
+                lines.push(Line::from(vec![
+                    Span::styled(indent.clone(), Theme::bold()),
+                    Span::styled(wr, Theme::bold()),
+                ]));
+            } else {
+                lines.push(Line::from(Span::raw(format!("{indent}{wr}"))));
+            }
+        }
     }
-    lines
+
+    // Freeform / custom input row
+    let freeform_idx = it.options.len();
+    row_starts.push(lines.len());
+    let selected = freeform_idx == it.cursor;
+    let prefix = if selected { ">  - " } else { "   - " };
+    let prefix_w = display_width(prefix);
+    let indent = " ".repeat(prefix_w);
+    let label = if it.custom_input.is_empty() {
+        "Type your own answer…".to_string()
+    } else {
+        format!("Custom: [{}]", it.custom_input)
+    };
+    let content_w = w.saturating_sub(prefix_w).max(1);
+    let wrapped = wrap_plain_text(&label, content_w);
+    let label_style = if it.custom_input.is_empty() {
+        Theme::dim()
+    } else {
+        Theme::bold()
+    };
+    for (i, wr) in wrapped.into_iter().enumerate() {
+        if i == 0 {
+            if selected {
+                lines.push(Line::from(vec![
+                    Span::styled(">  - ", Theme::bold()),
+                    Span::styled(wr, label_style),
+                ]));
+            } else {
+                lines.push(Line::from(Span::styled(
+                    format!("{prefix}{wr}"),
+                    Theme::dim(),
+                )));
+            }
+        } else if selected {
+            lines.push(Line::from(vec![
+                Span::styled(indent.clone(), Theme::bold()),
+                Span::styled(wr, label_style),
+            ]));
+        } else {
+            lines.push(Line::from(Span::styled(
+                format!("{indent}{wr}"),
+                Theme::dim(),
+            )));
+        }
+    }
+
+    (lines, row_starts)
 }
 
-/// Body lines for the Reviewing phase: one line per Q&A pair, with
-/// the answer shown to the right of the question.  The active pair
-/// (highlighted by the cursor) is prefixed with `>`.
-///
-/// ```text
-/// > Q1. <question>     → <answer>
-///   Q2. <question>     → <answer>
-/// ```
-pub fn ask_review_lines(s: &crate::function::AskState) -> Vec<Line<'static>> {
+/// Returns (display_lines, row_starts) where each item is one
+/// logical row wrapping to fit `width`.  Each row's CONTENT is
+/// wrapped at `width - prefix_width`, then the styled prefix/indent
+/// is prepended so every rendered line stays within `width`.
+pub fn ask_review_lines(
+    s: &crate::function::AskState,
+    width: usize,
+) -> (Vec<Line<'static>>, Vec<usize>) {
     let mut lines: Vec<Line> = Vec::new();
+    let mut row_starts: Vec<usize> = Vec::new();
+    let w = width.max(8);
+
     for (i, it) in s.items.iter().enumerate() {
+        row_starts.push(lines.len());
         let ans = it.answered.as_deref().unwrap_or("(no answer)");
-        let label = format!("Q{}. {}  →  {ans}", i + 1, it.question);
-        if i == s.active {
-            lines.push(Line::from(vec![
-                Span::styled(">  ", Theme::bold()),
-                Span::styled(label, Theme::bold()),
-            ]));
-        } else {
-            lines.push(Line::from(Span::raw(format!("   {label}"))));
+        let body = format!("Q{}. {}  →  {ans}", i + 1, it.question);
+        let is_active = i == s.active;
+        let prefix = if is_active { ">  " } else { "   " };
+        let prefix_w = display_width(prefix);
+        let content_w = w.saturating_sub(prefix_w).max(1);
+        let wrapped = wrap_plain_text(&body, content_w);
+        let indent = " ".repeat(prefix_w);
+        for (j, wr) in wrapped.into_iter().enumerate() {
+            if j == 0 {
+                if is_active {
+                    lines.push(Line::from(vec![
+                        Span::styled(">  ", Theme::bold()),
+                        Span::styled(wr, Theme::bold()),
+                    ]));
+                } else {
+                    lines.push(Line::from(Span::raw(format!("{prefix}{wr}"))));
+                }
+            } else if is_active {
+                lines.push(Line::from(vec![
+                    Span::styled(indent.clone(), Theme::bold()),
+                    Span::styled(wr, Theme::bold()),
+                ]));
+            } else {
+                lines.push(Line::from(Span::raw(format!("{indent}{wr}"))));
+            }
         }
     }
-    lines
+
+    (lines, row_starts)
 }
