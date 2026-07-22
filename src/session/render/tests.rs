@@ -183,6 +183,7 @@ mod content_line_count_tests {
                 cached_line_count_collapsed: None,
                 started_at: None,
                 ended_at: None,
+                visible: false,
             });
         asst.thinking_visible = true;
         s.push(asst);
@@ -399,6 +400,7 @@ mod tool_block_count_tests {
             cached_line_count_collapsed: None,
             started_at: None,
             ended_at: None,
+            visible: false,
         }];
         s.messages[1].thinking_visible = true;
         let width = 80u16;
@@ -616,6 +618,7 @@ mod tool_block_count_tests {
             cached_line_count_collapsed: None,
             started_at: None,
             ended_at: None,
+            visible: false,
         }];
         asst.thinking_visible = true;
         asst.tool_results.push(make_edit_tool());
@@ -654,6 +657,7 @@ mod tool_block_count_tests {
                 cached_line_count_collapsed: None,
                 started_at: None,
                 ended_at: None,
+                visible: false,
             });
         s.messages[1] = asst;
         assert_eq!(s.messages[1].thinking_segments.len(), 1);

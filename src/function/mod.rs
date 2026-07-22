@@ -1,4 +1,5 @@
 use crate::config::{Config, ProviderKind};
+use crate::event::ToggleTarget;
 use crate::function::notifications::{HitRate, ModelCache, Notifications, TokenRate};
 use crate::session::{Role, Session};
 use std::collections::HashSet;
@@ -133,7 +134,7 @@ pub struct App {
     /// `(msg_idx, tool_idx)` captured on Mouse Down when the click
     /// lands inside a tool block. The toggle is deferred to Mouse Up
     /// so a drag (text selection) inside the block cancels the toggle.
-    pub pending_tool_toggle: Option<(usize, usize)>,
+    pub(crate) pending_tool_toggle: Option<ToggleTarget>,
     /// Timestamp of the last mouse event. Used to detect stale drags
     /// when the mouse leaves and re-enters the terminal.
     pub last_mouse_event: Option<Instant>,
@@ -141,8 +142,8 @@ pub struct App {
     /// `config_path` during construction.
     pub model_cache_path: std::path::PathBuf,
     /// Screen y-range of thinking toggle blocks, each paired with the
-    /// index of the corresponding message. Populated after each render.
-    pub thinking_toggle_rows: Vec<(u16, u16, usize)>,
+    /// index of the corresponding message and segment. Populated after each render.
+    pub thinking_toggle_rows: Vec<(u16, u16, usize, usize)>,
     /// Screen y-range of tool result toggle blocks, each paired with
     /// the index of the corresponding message and tool. Populated after
     /// each render.

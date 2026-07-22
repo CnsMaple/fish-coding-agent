@@ -1813,8 +1813,8 @@ impl ScrollAnimator {
     }
 }
 
-enum ToggleTarget {
-    Thinking(usize),
+pub(crate) enum ToggleTarget {
+    Thinking(usize, usize),
     Tool(usize, usize),
 }
 
@@ -1968,9 +1968,9 @@ fn handle_mouse(m: MouseEvent, app: &mut App) {
     // (text selection) cancels it.
     let mut pending_toggle: Option<ToggleTarget> = None;
     if matches!(m.kind, MouseEventKind::Down(MouseButton::Left)) {
-        for &(top, bot, msg_idx) in &app.thinking_toggle_rows {
+        for &(top, bot, msg_idx, seg_idx) in &app.thinking_toggle_rows {
             if m.row >= top && m.row <= bot {
-                pending_toggle = Some(ToggleTarget::Thinking(msg_idx));
+                pending_toggle = Some(ToggleTarget::Thinking(msg_idx, seg_idx));
                 break;
             }
         }
@@ -1991,8 +1991,8 @@ fn handle_mouse(m: MouseEvent, app: &mut App) {
             // selection inside the block. On Mouse Up we only toggle
             // if the user did not end up with a selection.
             app.pending_tool_toggle = match target {
-                ToggleTarget::Thinking(mi) => Some((mi, usize::MAX)),
-                ToggleTarget::Tool(mi, ti) => Some((mi, ti)),
+                ToggleTarget::Thinking(mi, si) => Some(ToggleTarget::Thinking(mi, si)),
+                ToggleTarget::Tool(mi, ti) => Some(ToggleTarget::Tool(mi, ti)),
             };
             app.tui_selection = None;
             // Don't touch tui_drag_start here; let the standard
@@ -2007,110 +2007,119 @@ fn handle_mouse(m: MouseEvent, app: &mut App) {
     }
 
     if matches!(m.kind, MouseEventKind::Up(MouseButton::Left)) {
-        if let Some((msg_idx, tool_idx)) = app.pending_tool_toggle.take() {
-            // If the user has an selection, do not toggle — they are
+        if let Some(toggle) = app.pending_tool_toggle.take() {
+            // If the user has an active selection, do not toggle — they are
             // selecting text inside the block instead of clicking it.
             if let Some(s) = app.tui_selection.as_mut() {
                 s.active = false;
                 return;
             }
-            if tool_idx == usize::MAX {
-                // Thinking toggle.
-                let width = app.session_area.map(|a| a.width as usize).unwrap_or(120);
-                let preview_lines = app.session.tool_preview_lines;
-                let old_delta = if let Some(msg) = app.session.messages.get(msg_idx) {
-                    let segments = crate::session::render::get_thinking_segments(msg);
-                    let old_vis = msg.thinking_visible;
-                    let mut old_h: u32 = 0;
-                    let mut new_h: u32 = 0;
-                    for seg in &segments {
-                        old_h += crate::session::render::thinking_block_line_count(
-                            &seg.content,
-                            old_vis,
-                            preview_lines,
-                            width,
-                        ) as u32;
-                        new_h += crate::session::render::thinking_block_line_count(
-                            &seg.content,
-                            !old_vis,
-                            preview_lines,
-                            width,
-                        ) as u32;
-                    }
-                    if new_h != old_h {
+            match toggle {
+                ToggleTarget::Thinking(msg_idx, seg_idx) => {
+                    // Thinking toggle.
+                    let width = app.session_area.map(|a| a.width as usize).unwrap_or(120);
+                    let preview_lines = app.session.tool_preview_lines;
+                    let old_vis = app
+                        .session
+                        .messages
+                        .get(msg_idx)
+                        .and_then(|msg| msg.thinking_segments.get(seg_idx))
+                        .map(|seg| seg.visible)
+                        .unwrap_or(false);
+                    let seg_content = app
+                        .session
+                        .messages
+                        .get(msg_idx)
+                        .and_then(|msg| msg.thinking_segments.get(seg_idx))
+                        .map(|seg| seg.content.clone())
+                        .unwrap_or_default();
+                    let old_h = crate::session::render::thinking_block_line_count(
+                        &seg_content,
+                        old_vis,
+                        preview_lines,
+                        width,
+                    ) as u32;
+                    let new_h = crate::session::render::thinking_block_line_count(
+                        &seg_content,
+                        !old_vis,
+                        preview_lines,
+                        width,
+                    ) as u32;
+                    let old_delta = if new_h != old_h {
                         Some(new_h as i64 - old_h as i64)
                     } else {
                         None
+                    };
+                    if let Some(msg) = app.session.messages.get_mut(msg_idx) {
+                        if let Some(seg) = msg.thinking_segments.get_mut(seg_idx) {
+                            seg.visible = !seg.visible;
+                            // Invalidate cached line counts for this segment
+                            seg.cached_line_count_expanded = None;
+                            seg.cached_line_count_collapsed = None;
+                        }
+                        msg.bump_version();
                     }
-                } else {
-                    None
-                };
-                if let Some(msg) = app.session.messages.get_mut(msg_idx) {
-                    msg.thinking_visible = !msg.thinking_visible;
-                    msg.bump_version();
-                }
-                app.session.invalidate_layout_cache();
-                if let Some(delta) = old_delta {
-                    if delta > 0 {
-                        app.session.scroll = app.session.scroll.saturating_add(delta as u32);
-                    } else if delta < 0 {
-                        app.session.scroll = app.session.scroll.saturating_sub((-delta) as u32);
+                    app.session.invalidate_layout_cache();
+                    if let Some(delta) = old_delta {
+                        if delta > 0 {
+                            app.session.scroll = app.session.scroll.saturating_add(delta as u32);
+                        } else if delta < 0 {
+                            app.session.scroll = app.session.scroll.saturating_sub((-delta) as u32);
+                        }
+                        let w = app.session_area.map(|a| a.width).unwrap_or(120);
+                        let new_total = app.session.count_all_lines_with_width(w as usize);
+                        app.session.last_rendered_total = Some((w, new_total));
                     }
-                    // Sync last_rendered_total to the new total so
-                    // pin_scroll_for_total on the next frame does NOT
-                    // re-absorb the same delta (double compensation).
-                    let w = app.session_area.map(|a| a.width).unwrap_or(120);
-                    let new_total = app.session.count_all_lines_with_width(w as usize);
-                    app.session.last_rendered_total = Some((w, new_total));
+                    app.set_scroll_anchored(app.session.scroll);
                 }
-                app.set_scroll_anchored(app.session.scroll);
-            } else {
-                // Tool block toggle.
-                let width = app.session_area.map(|a| a.width as usize).unwrap_or(120);
-                let preview_lines = app.session.tool_preview_lines;
-                let old_delta = if let Some(msg) = app.session.messages.get(msg_idx) {
-                    if let Some(tool) = msg.tool_results.get(tool_idx) {
-                        let old_vis = tool.visible;
-                        let old_h = crate::session::render::tool_block_line_count(
-                            tool,
-                            old_vis,
-                            preview_lines,
-                            width,
-                        ) as u32;
-                        let new_h = crate::session::render::tool_block_line_count(
-                            tool,
-                            !old_vis,
-                            preview_lines,
-                            width,
-                        ) as u32;
-                        Some(new_h as i64 - old_h as i64)
+                ToggleTarget::Tool(msg_idx, tool_idx) => {
+                    // Tool block toggle — preserve existing logic.
+                    let width = app.session_area.map(|a| a.width as usize).unwrap_or(120);
+                    let preview_lines = app.session.tool_preview_lines;
+                    let old_delta = if let Some(msg) = app.session.messages.get(msg_idx) {
+                        if let Some(tool) = msg.tool_results.get(tool_idx) {
+                            let old_vis = tool.visible;
+                            let old_h = crate::session::render::tool_block_line_count(
+                                tool,
+                                old_vis,
+                                preview_lines,
+                                width,
+                            ) as u32;
+                            let new_h = crate::session::render::tool_block_line_count(
+                                tool,
+                                !old_vis,
+                                preview_lines,
+                                width,
+                            ) as u32;
+                            Some(new_h as i64 - old_h as i64)
+                        } else {
+                            None
+                        }
                     } else {
                         None
+                    };
+                    if let Some(msg) = app.session.messages.get_mut(msg_idx) {
+                        if let Some(tool) = msg.tool_results.get_mut(tool_idx) {
+                            tool.visible = !tool.visible;
+                        }
+                        msg.bump_version();
                     }
-                } else {
-                    None
-                };
-                if let Some(msg) = app.session.messages.get_mut(msg_idx) {
-                    if let Some(tool) = msg.tool_results.get_mut(tool_idx) {
-                        tool.visible = !tool.visible;
+                    app.session.invalidate_layout_cache();
+                    if let Some(delta) = old_delta {
+                        if delta > 0 {
+                            app.session.scroll = app.session.scroll.saturating_add(delta as u32);
+                        } else if delta < 0 {
+                            app.session.scroll = app.session.scroll.saturating_sub((-delta) as u32);
+                        }
+                        // Sync last_rendered_total to the new total so
+                        // pin_scroll_for_total on the next frame does NOT
+                        // re-absorb the same delta (double compensation).
+                        let w = app.session_area.map(|a| a.width).unwrap_or(120);
+                        let new_total = app.session.count_all_lines_with_width(w as usize);
+                        app.session.last_rendered_total = Some((w, new_total));
                     }
-                    msg.bump_version();
+                    app.set_scroll_anchored(app.session.scroll);
                 }
-                app.session.invalidate_layout_cache();
-                if let Some(delta) = old_delta {
-                    if delta > 0 {
-                        app.session.scroll = app.session.scroll.saturating_add(delta as u32);
-                    } else if delta < 0 {
-                        app.session.scroll = app.session.scroll.saturating_sub((-delta) as u32);
-                    }
-                    // Sync last_rendered_total to the new total so
-                    // pin_scroll_for_total on the next frame does NOT
-                    // re-absorb the same delta (double compensation).
-                    let w = app.session_area.map(|a| a.width).unwrap_or(120);
-                    let new_total = app.session.count_all_lines_with_width(w as usize);
-                    app.session.last_rendered_total = Some((w, new_total));
-                }
-                app.set_scroll_anchored(app.session.scroll);
             }
             app.tui_selection = None;
             app.tui_drag_start = None;

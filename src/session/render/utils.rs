@@ -116,13 +116,13 @@ pub fn total_thinking_line_count(m: &Message, session: &Session, width: usize) -
     let segments = get_thinking_segments(m);
     let mut total = 0;
     for seg in &segments {
-        let visible = match session.display {
-            crate::config::ThinkingDisplay::Show => m.thinking_visible,
-            crate::config::ThinkingDisplay::ShowWhileStreaming => m.streaming || m.thinking_visible,
+        let seg_visible = match session.display {
+            crate::config::ThinkingDisplay::Show => seg.visible,
+            crate::config::ThinkingDisplay::ShowWhileStreaming => m.streaming || seg.visible,
             _ => false,
         };
         total +=
-            thinking_block_line_count(&seg.content, visible, session.tool_preview_lines, width);
+            thinking_block_line_count(&seg.content, seg_visible, session.tool_preview_lines, width);
     }
     total
 }

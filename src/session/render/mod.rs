@@ -320,6 +320,8 @@ pub fn build_message_lines(
             /// from `started_at`/`ended_at`. `None` when timing
             /// info is unavailable (e.g. legacy sessions).
             duration: Option<std::time::Duration>,
+            /// Whether this thinking segment should be expanded.
+            visible: bool,
         },
         Tool(usize), // index into m.tool_results
     }
@@ -369,6 +371,7 @@ pub fn build_message_lines(
                         closed: seg.closed,
                         tool_results_len_at_open: seg.tool_results_len_at_open,
                         duration,
+                        visible: seg.visible,
                     },
                 });
             }
@@ -472,11 +475,12 @@ pub fn build_message_lines(
                 content,
                 closed,
                 duration,
+                visible,
                 ..
             } => {
                 let visible = match session.display {
-                    ThinkingDisplay::Show => m.thinking_visible,
-                    ThinkingDisplay::ShowWhileStreaming => m.streaming || m.thinking_visible,
+                    ThinkingDisplay::Show => visible,
+                    ThinkingDisplay::ShowWhileStreaming => m.streaming || visible,
                     _ => false,
                 };
                 let colors = active_colors();

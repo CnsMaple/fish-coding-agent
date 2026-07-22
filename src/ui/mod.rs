@@ -292,10 +292,10 @@ pub fn render(f: &mut Frame, app: &mut App) {
                     let seg = &m.thinking_segments[*si];
                     let expanded = (app.config.thinking_display
                         == crate::config::ThinkingDisplay::Show
-                        && m.thinking_visible)
+                        && seg.visible)
                         || (app.config.thinking_display
                             == crate::config::ThinkingDisplay::ShowWhileStreaming
-                            && (m.streaming || m.thinking_visible));
+                            && (m.streaming || seg.visible));
                     let lines = if expanded {
                         seg.cached_line_count_expanded.unwrap_or(0) as usize
                     } else {
@@ -312,6 +312,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
                             screen_top,
                             screen_bot.saturating_sub(1),
                             msg_idx,
+                            *si,
                         ));
                     }
                     line_idx += lines;

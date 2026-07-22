@@ -68,6 +68,8 @@ fn make_test_app() -> App {
         thinking_toggle_rows: Vec::new(),
         tool_toggle_rows: Vec::new(),
         session_area: None,
+        agents_area: None,
+        function_panel_area: None,
         input_cursor_screen: None,
         function_panel_cursor: None,
         paste_blocks: VecDeque::new(),

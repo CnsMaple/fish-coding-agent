@@ -82,6 +82,7 @@ pub fn get_thinking_segments(m: &Message) -> Vec<ThinkingSegment> {
             cached_line_count_collapsed: None,
             started_at: None,
             ended_at: None,
+            visible: m.thinking_visible,
         }];
     }
     vec![]

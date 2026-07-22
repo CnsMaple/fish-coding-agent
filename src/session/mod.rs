@@ -80,6 +80,9 @@ pub struct ThinkingSegment {
     /// the segment is still streaming.
     #[serde(default)]
     pub ended_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Whether this thinking segment is currently expanded.
+    #[serde(default)]
+    pub visible: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -935,6 +938,7 @@ impl Session {
                         cached_line_count_collapsed: None,
                         started_at: Some(chrono::Utc::now()),
                         ended_at: None,
+                        visible: false,
                     });
                 }
                 m.invalidate_render_caches();
@@ -1200,11 +1204,11 @@ impl Session {
                 && crate::session::render::message_has_thinking(m)
                 && self.display != crate::config::ThinkingDisplay::Hide;
             if show_thinking {
-                let expanded = (self.display == crate::config::ThinkingDisplay::Show
-                    && m.thinking_visible)
-                    || (self.display == crate::config::ThinkingDisplay::ShowWhileStreaming
-                        && (m.streaming || m.thinking_visible));
                 for seg in m.thinking_segments.iter_mut() {
+                    let expanded = (self.display == crate::config::ThinkingDisplay::Show
+                        && seg.visible)
+                        || (self.display == crate::config::ThinkingDisplay::ShowWhileStreaming
+                            && (m.streaming || seg.visible));
                     if expanded {
                         if seg.cached_line_count_expanded.is_none() {
                             seg.cached_line_count_expanded =
