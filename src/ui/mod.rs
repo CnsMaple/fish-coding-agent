@@ -564,26 +564,20 @@ fn render_cwd(area: Rect, buf: &mut Buffer, app: &App) {
         };
         let hint_w = UnicodeWidthStr::width(hint.as_str());
         let sep = " | ";
-        let prefix = "~ ";
-        let fixed_w = hint_w + sep.len() + prefix.len();
+        let fixed_w = hint_w + sep.len();
         let path_max = left_w.saturating_sub(fixed_w);
         let truncated = truncate_path(path, path_max);
         let line = Line::from(vec![
             Span::styled(hint, Theme::dim()),
             Span::styled(sep, Theme::dim()),
-            Span::styled(prefix, Theme::dim()),
             Span::styled(truncated, Theme::dim()),
         ]);
         let p = ratatui::widgets::Paragraph::new(line);
         p.render(left_area, buf);
     } else {
-        let prefix = "~ ";
-        let path_max = left_w.saturating_sub(prefix.len());
+        let path_max = left_w;
         let truncated = truncate_path(path, path_max);
-        let line = Line::from(vec![
-            Span::styled(prefix, Theme::dim()),
-            Span::styled(truncated, Theme::dim()),
-        ]);
+        let line = Line::from(vec![Span::styled(truncated, Theme::dim())]);
         let p = ratatui::widgets::Paragraph::new(line);
         p.render(left_area, buf);
     }

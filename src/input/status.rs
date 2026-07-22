@@ -333,7 +333,7 @@ impl StatusBar {
         } else {
             None
         };
-        spans.push(Span::raw(" | hit["));
+        spans.push(Span::raw(" hit["));
         spans.push(Span::styled(fmt_pct_int(self.hit_cur), Theme::base()));
         spans.push(Span::raw("|"));
         spans.push(Span::styled(fmt_pct_int(self.hit_avg), Theme::dim()));
