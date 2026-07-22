@@ -875,8 +875,19 @@ impl App {
     /// restore `previous_mode` and hide the panel.
     pub fn jump_to_plan(&mut self) {
         if self.mode == AppMode::Plan {
-            self.set_mode(self.previous_mode);
-            self.maybe_hide_panel();
+            // Already in Plan mode: focus the Plan tab (if any) without
+            // exiting Plan mode, so Tab doesn't unexpectedly switch to Yolo.
+            if let Some((i, _)) = self
+                .function
+                .tabs
+                .iter()
+                .enumerate()
+                .find(|(_, t)| matches!(t, SidebarTab::Plan(_)))
+            {
+                self.function.active = i;
+                self.show_panel();
+                self.acknowledge_panel();
+            }
             return;
         }
         self.previous_mode = self.mode;
@@ -1245,9 +1256,6 @@ impl App {
             self.focus_target = FocusTarget::Input;
             self.function_panel_cursor = None;
             self.function_visible = false;
-            if self.mode == AppMode::Plan {
-                self.set_mode(self.previous_mode);
-            }
         }
     }
 }

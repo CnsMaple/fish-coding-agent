@@ -1302,10 +1302,17 @@ async fn handle_key(k: crossterm::event::KeyEvent, app: &mut App) {
         }
     }
 
-    if app.focus_target == crate::function::FocusTarget::FunctionPanel
-        && dispatch_to_active_tab(k, app).await
-    {
-        return;
+    if app.focus_target == crate::function::FocusTarget::FunctionPanel {
+        if dispatch_to_active_tab(k, app).await {
+            return;
+        }
+        // Tab didn't consume the key — only Esc/Tab/BackTab have
+        // panel-level semantics; all other keys (including Enter)
+        // must not fall through to input-level handlers.
+        match k.code {
+            KeyCode::Esc | KeyCode::Tab | KeyCode::BackTab => {}
+            _ => return,
+        }
     }
 
     // Handle Enter/Space for agents checkbox toggle
@@ -1381,6 +1388,18 @@ async fn handle_key(k: crossterm::event::KeyEvent, app: &mut App) {
                 // Notification tab, hide the panel so we return to the
                 // default state.
                 app.maybe_hide_panel();
+                // If the Plan tab was the one that was closed, restore
+                // the previous mode so the user doesn't unexpectedly stay
+                // in Plan mode with no Plan tab.
+                if app.mode == crate::function::AppMode::Plan
+                    && !app
+                        .function
+                        .tabs
+                        .iter()
+                        .any(|t| matches!(t, crate::function::SidebarTab::Plan(_)))
+                {
+                    app.set_mode(app.previous_mode);
+                }
             }
         }
         KeyCode::Tab => {
