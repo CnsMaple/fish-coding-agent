@@ -875,18 +875,17 @@ impl App {
     /// restore `previous_mode` and hide the panel.
     pub fn jump_to_plan(&mut self) {
         if self.mode == AppMode::Plan {
-            // Already in Plan mode: focus the Plan tab (if any) without
-            // exiting Plan mode, so Tab doesn't unexpectedly switch to Yolo.
-            if let Some((i, _)) = self
-                .function
+            // Already in Plan mode: Tab toggles back to the previous mode
+            // and closes the Plan tab.
+            self.set_mode(self.previous_mode);
+            self.function
                 .tabs
-                .iter()
-                .enumerate()
-                .find(|(_, t)| matches!(t, SidebarTab::Plan(_)))
-            {
-                self.function.active = i;
-                self.show_panel();
-                self.acknowledge_panel();
+                .retain(|t| !matches!(t, SidebarTab::Plan(_)));
+            if self.function.active >= self.function.tabs.len() {
+                self.function.active = self.function.tabs.len().saturating_sub(1);
+            }
+            if self.function.tabs.is_empty() {
+                self.function_visible = false;
             }
             return;
         }
