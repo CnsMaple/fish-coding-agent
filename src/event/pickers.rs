@@ -213,9 +213,9 @@ pub(super) async fn handle_plan_key(
         }
         KeyCode::Esc => {
             close_active_function_tab(app);
-            app.set_mode(app.previous_mode);
             true
         }
+
         _ => false,
     }
 }

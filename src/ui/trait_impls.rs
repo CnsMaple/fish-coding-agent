@@ -492,9 +492,11 @@ impl TabWidget for crate::function::PlanState {
     fn title(&self) -> &str {
         "plan"
     }
+
     fn hint(&self) -> &str {
-        " Enter: approve | R: reject | S: save | Esc: close "
+        " Enter: approve | Alt+R: reject | Alt+S: save | Esc: close "
     }
+
     fn content_height(&self, _ctx: &TabCtx) -> usize {
         3
     }

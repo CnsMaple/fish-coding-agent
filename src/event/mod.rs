@@ -1351,18 +1351,6 @@ async fn handle_key(k: crossterm::event::KeyEvent, app: &mut App) {
                 // Notification tab, hide the panel so we return to the
                 // default state.
                 app.maybe_hide_panel();
-                // If the Plan tab was the one that was closed, restore
-                // the previous mode so the user doesn't unexpectedly stay
-                // in Plan mode with no Plan tab.
-                if app.mode == crate::function::AppMode::Plan
-                    && !app
-                        .function
-                        .tabs
-                        .iter()
-                        .any(|t| matches!(t, crate::function::SidebarTab::Plan(_)))
-                {
-                    app.set_mode(app.previous_mode);
-                }
             }
         }
         KeyCode::Tab => {
@@ -1385,14 +1373,11 @@ async fn handle_key(k: crossterm::event::KeyEvent, app: &mut App) {
                 return;
             }
 
-            // If the active sidebar tab is a Plan and the input buffer is
-            // empty, Enter approves the plan directly from the input box
-            // (no need to Alt+L into the panel first). A non-empty buffer
-            // falls through to the normal submit path so the user can still
-            // type additional args/instructions; handle_plan_key already
-            // appends them when approving from the panel.
-            if app.input.buffer.trim().is_empty()
-                && k.modifiers.is_empty()
+            // If the active sidebar tab is a Plan, Enter approves the plan
+            // directly from the input box (no need to Alt+L into the panel
+            // first). Any text in the input buffer is appended as
+            // additional args/instructions by handle_plan_key.
+            if k.modifiers.is_empty()
                 && matches!(
                     app.function.tabs.get(app.function.active),
                     Some(crate::function::SidebarTab::Plan(_))
