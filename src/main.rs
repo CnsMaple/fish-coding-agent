@@ -13,19 +13,60 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
 use fish_coding_agent::ui::backend::CursorTrackingBackend;
+use std::io::Write;
+use std::sync::{Arc, Mutex};
 use tracing_subscriber::EnvFilter;
+
+/// Thread-safe log writer that shares one file handle across all tracing events.
+/// Cloning cheaply shares the same `Arc<Mutex<...>>`.
+struct TracingLog(Arc<Mutex<Box<dyn Write + Send>>>);
+
+impl Clone for TracingLog {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
+impl Write for TracingLog {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).write(buf)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).flush()
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
     install_panic_hook();
 
+    let tracing_writer: Box<dyn Write + Send> = config::paths::config_dir()
+        .ok()
+        .and_then(|dir| {
+            let path = dir.join("fish-coding-agent.log");
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+                .inspect(|_| {
+                    // Bleat the path so the user knows where logs live.
+                    let _ = writeln!(std::io::stderr(), "tracing log → {}", path.display());
+                })
+                .ok()
+        })
+        .map(|f| Box::new(f) as Box<dyn Write + Send>)
+        .unwrap_or_else(|| {
+            // Fallback: discard tracing output silently.
+            Box::new(std::io::sink()) as Box<dyn Write + Send>
+        });
+    let tracing_log = TracingLog(Arc::new(Mutex::new(tracing_writer)));
+
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-            // Default: fish-coding-agent at info, everything else at warn.
-            // Users can override via RUST_LOG env var.
-            "warn,fish_coding_agent=info".parse().unwrap()
-        }))
-        .with_writer(std::io::stderr)
+        .with_env_filter(
+            EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "warn,fish_coding_agent=info".parse().unwrap()),
+        )
+        .with_writer(move || tracing_log.clone())
         .init();
 
     let load_start = std::time::Instant::now();
