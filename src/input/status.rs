@@ -226,9 +226,14 @@ impl StatusBar {
     }
 
     pub fn update_token_usage(&mut self, total: u64) {
-        self.token_total = Some(total);
+        // Never decrease — the conversation only grows, even when
+        // snip/prune internally trims old tool results for the API.
+        // Using the monotonic value gives the user a stable ctx%
+        // that does not oscillate between requests.
+        self.token_total = Some(self.token_total.map_or(total, |old| old.max(total)));
+        let t = self.token_total.unwrap();
         self.token_pct = if self.context_window_known && self.context_window_tokens > 0 {
-            Some(total as f64 / self.context_window_tokens as f64)
+            Some(t as f64 / self.context_window_tokens as f64)
         } else {
             None
         };
@@ -386,7 +391,7 @@ fn fmt_tokens_k(tokens: u64) -> String {
             format!("{:.1}k", v)
         }
     } else if tokens > 0 {
-        format!("{}k", 1)
+        tokens.to_string()
     } else {
         "0k".to_string()
     }

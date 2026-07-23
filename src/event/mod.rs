@@ -1031,13 +1031,11 @@ fn handle_msg(msg: AppMsg, app: &mut App) {
             } else {
                 app.notify(ToastLevel::Warn, "compaction range was empty");
             }
-            // Reset the "triggered" status indicator so the bar
-            // returns to showing the new headroom percentage.
-            if let Some(total) = app.status.token_total {
-                app.status.update_token_usage(total);
-            } else {
-                app.status.compact_triggered = false;
-            }
+            // Re-estimate token usage from the compacted session so the
+            // monotonic token_total doesn't keep auto-compaction looping
+            // on the pre-compaction high-water mark.
+            app.status
+                .update_token_usage(estimate_session_tokens(&app.session.messages));
         }
         AppMsg::CompactionFailed { error } => {
             use crate::function::notifications::ToastLevel;
@@ -1045,13 +1043,35 @@ fn handle_msg(msg: AppMsg, app: &mut App) {
             app.cancel_state = CancelState::Idle;
             app.compacting = false;
             app.notify(ToastLevel::Fail, format!("compact failed: {error}"));
-            if let Some(total) = app.status.token_total {
-                app.status.update_token_usage(total);
-            } else {
-                app.status.compact_triggered = false;
-            }
+            // Same as above — re-estimate from current messages so
+            // token_total reflects the actual session size.
+            app.status
+                .update_token_usage(estimate_session_tokens(&app.session.messages));
         }
     }
+}
+
+/// Estimate the total input tokens currently in the session messages.
+/// Used after compaction to reset `token_total` to a value that
+/// reflects the actual session size, rather than keeping the
+/// pre-compaction high-water mark which would cause auto-compaction
+/// to loop.
+fn estimate_session_tokens(messages: &[crate::session::Message]) -> u64 {
+    let mut total = 0u64;
+    for m in messages {
+        total += crate::compaction::estimate_tokens(&m.content);
+        total += crate::compaction::estimate_tokens(&m.thinking);
+        for tc in &m.tool_calls {
+            total += crate::compaction::estimate_tokens(&tc.name);
+            total += crate::compaction::estimate_tokens(&tc.arguments);
+        }
+        for tr in &m.tool_results {
+            total += crate::compaction::estimate_tokens(&tr.name);
+            total += crate::compaction::estimate_tokens(&tr.title);
+            total += crate::compaction::estimate_tokens(&tr.content);
+        }
+    }
+    total
 }
 
 /// Text used as the synthetic follow-up message after a successful
