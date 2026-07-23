@@ -538,29 +538,44 @@ pub(super) fn expand_paste_blocks(mut raw: String, paste_blocks: &mut VecDeque<S
     raw
 }
 
-/// Replace `[skill:<name>]` markers with the skill template body.
-/// Skills are looked up from disk on each call.
+/// Replace `[skill:<name>]` markers in `raw` with the skill template
+/// body wrapped in a fenced code block titled `skill:<name>`. Uses a
+/// fence character count that avoids conflicts with nested fences in
+/// the skill body.
 pub(super) fn expand_skill_blocks(mut raw: String) -> String {
     loop {
-        let before = raw.clone();
-        let remaining = &before;
-        let Some(marker_start) = remaining.find("[skill:") else {
+        let Some(start) = raw.find("[skill:") else {
             break;
         };
-        let after_marker = &remaining[marker_start + 7..];
-        let Some(bracket_end) = after_marker.find(']') else {
+        let after = raw[start + 7..].to_string();
+        let Some(end) = after.find(']') else {
             break;
         };
-        let name = &after_marker[..bracket_end];
+        let name = after[..end].to_string();
         if name.is_empty() || name.contains(' ') || name.contains('\n') {
             break;
         }
-        let template = crate::skill::expand_into(name).unwrap_or_default();
-        let marker_len = 7 + bracket_end + 1; // "[skill:" + name + "]"
-        raw.replace_range(marker_start..marker_start + marker_len, &template);
-        if raw == before {
-            break;
-        }
+        let marker_len = 7 + end + 1;
+        let body = crate::skill::expand_into(&name).unwrap_or_else(|| format!("[skill:{name}]"));
+        let body = body.strip_suffix('\n').unwrap_or(&body);
+        // Determine the minimum fence depth that won't collide with
+        // any backtick run inside the body.
+        let body_backticks = body
+            .split('\n')
+            .filter_map(|l| {
+                let trimmed = l.trim();
+                if trimmed.starts_with('`') {
+                    Some(trimmed.len() - trimmed.trim_start_matches('`').len())
+                } else {
+                    None
+                }
+            })
+            .max()
+            .unwrap_or(0);
+        let fence_depth = (body_backticks + 1).clamp(3, 10);
+        let fence = "`".repeat(fence_depth);
+        let block = format!("{fence}skill:{name}\n{body}\n{fence}");
+        raw.replace_range(start..start + marker_len, &block);
     }
     raw
 }

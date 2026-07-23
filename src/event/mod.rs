@@ -2228,36 +2228,7 @@ fn submit_input(app: &mut App) {
         app.sync_completion();
         return;
     }
-    if let Some(rest) = raw.strip_prefix('/') {
-        let mut parts = rest.splitn(2, char::is_whitespace);
-        let cmd: String = parts.next().unwrap_or("").to_lowercase();
-        let arg: String = parts.next().unwrap_or("").trim().to_string();
-        // Treat `/skill:foo` and `/mcp:foo` as one-shot top-level
-        // commands: split the name off the colon so the dispatch
-        // table sees `skill` + `foo` rather than a single unknown
-        // token.
-        // Treat `/skill:foo` and `/mcp:foo` as one-shot top-level
-        // commands: split the name off the colon so the dispatch
-        // table sees `skill` + `foo` rather than a single unknown
-        // token. The trailing `arg` is also forwarded so the user
-        // can write `/skill:<name> 加上一些额外说明` and have the
-        // extra text treated as the skill's invocation args.
-        if let Some((base, name)) = cmd.split_once(':') {
-            if base == "skill" {
-                crate::commands::dispatch_skill(app, name.trim(), &arg);
-                app.sync_completion();
-                return;
-            }
-            if base == "mcp" {
-                crate::commands::dispatch(app, base, name.trim());
-                app.sync_completion();
-                return;
-            }
-        }
-        crate::commands::dispatch(app, &cmd, &arg);
-    } else {
-        crate::commands::send_chat(app, raw, image_parts);
-    }
+    crate::commands::send_chat(app, raw, image_parts);
     app.sync_completion();
 }
 

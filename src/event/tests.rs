@@ -1040,70 +1040,6 @@ fn enter_action_matrix_matches_labels() {
 }
 
 #[test]
-fn submit_input_dispatches_skill_colon_form() {
-    // `/skill:<name>` must submit as a slash command, NOT pass
-    // the whole `/skill:<name>` string to the chat as a plain
-    // message. The new contract is "send immediately": the
-    // skill body is pushed as a user message with skill_ref set,
-    // and the input buffer is cleared (no manual edit step).
-    let names = crate::skill::list_names();
-    let pick = names
-        .first()
-        .cloned()
-        .expect("test host must have at least one skill under ~/.agents/skills/");
-    let mut app = make_app_with_provider();
-    app.input.buffer = format!("/skill:{pick}");
-    app.input.cursor = app.input.buffer.len();
-    submit_input(&mut app);
-
-    let user_msg = app
-        .session
-        .messages
-        .iter()
-        .rev()
-        .find(|m| matches!(m.role, crate::session::Role::User))
-        .expect("skill dispatch must push a user message");
-    assert_ne!(
-        user_msg.content,
-        format!("/skill:{pick}"),
-        "the literal `/skill:<name>` must NOT be the message content - the skill body must be inlined",
-    );
-    assert!(
-        user_msg.skill_ref.is_some(),
-        "skill message must carry skill_ref for the [skill] block",
-    );
-    assert!(
-        app.input.buffer.is_empty(),
-        "input buffer must be empty after the immediate-send dispatch",
-    );
-}
-
-#[test]
-fn submit_input_skill_colon_with_args_picks_up_trailing_text() {
-    // `/skill:<name> 加上一些额外说明` must capture the trailing
-    // text into skill_ref.args and append it to the AI prompt.
-    let names = crate::skill::list_names();
-    let pick = names
-        .first()
-        .cloned()
-        .expect("test host must have at least one skill under ~/.agents/skills/");
-    let mut app = make_app_with_provider();
-    let user_args = "加上一些额外说明";
-    app.input.buffer = format!("/skill:{pick} {user_args}");
-    app.input.cursor = app.input.buffer.len();
-    submit_input(&mut app);
-    let user_msg = app
-        .session
-        .messages
-        .iter()
-        .rev()
-        .find(|m| matches!(m.role, crate::session::Role::User))
-        .expect("skill dispatch must push a user message");
-    let skill_ref = user_msg.skill_ref.as_ref().expect("skill_ref must be set");
-    assert_eq!(skill_ref.args.as_deref(), Some(user_args));
-    assert!(user_msg.content.contains(user_args));
-}
-
 #[test]
 fn dispatch_skill_sends_immediately_with_skill_ref() {
     // /skill:<name> (or dispatch("skill", name)) used to populate
@@ -2684,43 +2620,6 @@ fn continue_no_arg_sends_meaningful_cue_and_keeps_streaming_slot() {
         app.session.streaming_id,
         Some(len - 1),
         "streaming id should target the last (assistant) message after /continue"
-    );
-}
-
-#[test]
-fn continue_with_arg_appends_to_cue() {
-    // `/continue foo` must seed the API request with
-    // "Continue from where you left off.\n\nfoo", remove the
-    // synthetic user message from the session log, and keep the
-    // assistant placeholder as the streaming target.
-    let mut app = chat_app();
-    use crate::session::{Message, Role};
-    app.session
-        .push(Message::new(Role::Assistant, "half".to_string()));
-
-    app.input.buffer = "/continue foo".to_string();
-    app.input.cursor = app.input.buffer.len();
-    submit_input(&mut app);
-
-    let last_user = app
-        .session
-        .messages
-        .iter()
-        .rev()
-        .find(|m| matches!(m.role, Role::User));
-    assert!(
-        last_user.is_none(),
-        "the /continue synthetic user message must be removed from the session"
-    );
-    assert!(
-        app.inflight.is_some(),
-        "inflight must be armed so /continue arms the spinner"
-    );
-    let len = app.session.messages.len();
-    assert_eq!(
-        app.session.streaming_id,
-        Some(len - 1),
-        "streaming id should target the assistant placeholder after /continue"
     );
 }
 
