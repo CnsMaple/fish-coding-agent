@@ -83,7 +83,8 @@ impl StatusBar {
         // directory prefix as `~` so the line stays compact.
         if let Some(home) = dirs::home_dir() {
             if let Ok(stripped) = p.strip_prefix(&home) {
-                self.cwd = format!("~/{}/", stripped.display());
+                let sep = std::path::MAIN_SEPARATOR;
+                self.cwd = format!("~{sep}{}", stripped.display());
                 return;
             }
         }
@@ -342,7 +343,7 @@ impl StatusBar {
         spans.push(Span::raw("]"));
 
         if let Some(ref mcp) = self.mcp_summary {
-            spans.push(Span::raw(" | "));
+            spans.push(Span::raw(" "));
             spans.push(Span::styled("mcp:", Theme::dim()));
             spans.push(Span::styled(mcp.clone(), Theme::base()));
         }
