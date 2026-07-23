@@ -2,8 +2,9 @@
 
 An AI CLI coding agent with a TUI written in Rust. Supports multiple
 providers (OpenAI, Anthropic, Cursor, DeepSeek, MiniMax, Volcengine),
-MCP servers, skills, plan/ask/todo workflows, session persistence with
-auto-compaction, and a rich set of built-in tools.
+MCP servers (local stdio & remote OAuth), skills, plan/ask/todo workflows,
+session persistence with auto-compaction, a command palette, and a rich
+set of built-in tools.
 
 ## Build
 
@@ -27,26 +28,31 @@ written automatically. The loader migrates from the old format and
 self-heals bad fields (a single corrupt entry is dropped, not the whole
 file).
 
+Logs are written to `<config_dir>/logs/` (not stderr) to avoid TUI
+corruption.
+
 ## TUI layout
 
 Top-to-bottom vertical stack:
 
 1. **Agents splash** — ASCII logo + load-duration + checkboxes for
    discovered `agents.md` files (`~/.agents/agents.md` and `./agents.md`).
-   Shown only on a fresh session before the first input.
-2. **Session panel** — scrollable markdown transcript with thinking,
-   tool, `[skill]`, and attachment blocks; right-edge scrollbar; mouse
-   selection; click a block to collapse/expand.
+   Shown only on a fresh session before the first input. Click to focus.
+2. **Session panel** — scrollable markdown transcript with thinking
+   blocks (per-segment collapse/expand), tool result blocks with live
+   elapsed timer, `[skill]`, and attachment blocks; right-edge scrollbar;
+   mouse selection; click a block to collapse/expand.
 3. **Function panel** — hidden by default (only the `Notifications` tab
    exists). Dynamic height = `min(content + overhead, 30% of remaining)`,
    min 4 rows. Title bar lists all open tabs (` | ` separated, active in
    bold). Fail-level toasts force-show the panel; other toasts bump the
-   `[!N]` unread badge. Slash commands and completion auto-show it.
+   `[!N]` unread badge. `Ctrl+P` or slash commands auto-show it.
    `Ctrl+N` toggles it; closing via `Ctrl+N` clears the notification
    queue (transient toast model).
 4. **Input block** — grows with wrapped content (capped so the session
    keeps ≥50% of the viewport). Hardware cursor; scrollbar when scrolled.
-5. **CWD line** — `~ <path>` on the left; right-aligned live stats:
+   Undo/redo (Ctrl+Z/Y) with 100-snapshot stack; paste preview (Alt+V).
+5. **CWD line** — `<path>` on the left; right-aligned live stats:
    token usage, context-window headroom %, cache-hit rate, token/sec,
    MCP summary (`2✓ 1✗`), and an elapsed timer with progressive
    Esc-cancel (`esc to interrupt` → `esc again`).
@@ -67,6 +73,7 @@ Config schema (new format; the loader auto-migrates the old one):
   "theme": "default",
   "auto_compact": true,
   "compact_reserved": null,
+  "cache_retention": "normal",
   "entries": {
     "openai:key": {
       "api_key": "",
@@ -74,6 +81,15 @@ Config schema (new format; the loader auto-migrates the old one):
       "base_url": "https://api.openai.com/v1",
       "model": "gpt-4o-mini",
       "name": "OpenAI",
+      "access_key": "",
+      "secret_key": ""
+    },
+    "anthropic:key": {
+      "api_key": "",
+      "api_key_env": "ANTHROPIC_API_KEY",
+      "base_url": "https://api.anthropic.com",
+      "model": "claude-3-5-sonnet-latest",
+      "name": "Anthropic",
       "access_key": "",
       "secret_key": ""
     }
@@ -112,7 +128,7 @@ gray at the bottom.
 
 | Level            | Items                                                                  |
 |------------------|------------------------------------------------------------------------|
-| top level        | set provider · thinking display · tool display · enter behavior · border type · theme · auto compact · tool preview lines |
+| top level        | set provider · thinking display · tool display · enter behavior · border type · theme · auto compact · tool preview lines · cache retention |
 | `set provider`   | + new provider  /  openai:key, ...                                     |
 | `new`            | OpenAI (custom) / Anthropic (custom) / Cursor (oauth) / DeepSeek / MiniMax / Volcengine |
 | existing entry   | edit  /  delete                                                        |
@@ -127,6 +143,7 @@ Hot-switchable options:
 - **Theme** — `default` (terminal defaults) / `light-eucalyptus` / `dark-eucalyptus`
 - **Tool preview lines** — 3–50 (default 10): collapsed tool block lines before the `Ctrl+O` expand hint
 - **Auto-compact** — on/off
+- **Cache retention** — `normal` / `aggressive` (controls prompt cache TTL markers)
 
 ## Slash commands
 
@@ -154,6 +171,15 @@ Hot-switchable options:
 | `/hotkey` [`/help` `/keys`] | Keyboard reference                                                       |
 | `/quit` [`/exit` `/q`]      | Quit                                                                     |
 
+### Command palette (`Ctrl+P`)
+
+Opens a fuzzy-searchable command palette that replaces the old
+slash-triggered completion. Type a command name or partial match;
+`Enter` executes the selected command. Supports all available slash
+commands (`/settings`, `/model`, `/think`, etc.), plus prefix inputs
+(`!`, `!!`, `$`, `$$`). The palette auto-shows the function panel;
+`Esc` closes it.
+
 ### Prefix tool inputs (typed directly, no chat round-trip)
 
 | Prefix  | Runs                                  |
@@ -176,13 +202,19 @@ Hot-switchable options:
 
 All providers stream via SSE. Live **cache-hit rate** parsed from usage:
 OpenAI `prompt_tokens_details.cached_tokens`, Anthropic
-`cache_read_input_tokens` + `cache_creation_input_tokens`. Reasoning
-levels map to Anthropic `thinking` (off→omitted, adaptive→`adaptive`,
-else `enabled` with a budget) or OpenAI `reasoning_effort`. Model list
-is cached in `model-cache.json`; context-window data is augmented from
-models.dev (`model-data.json`) with manual overrides in
-`context-cache.json`. Rate-limit errors surface as Warn toasts that
-auto-clear on success; context-overflow errors trigger compaction+retry.
+`cache_read_input_tokens` + `cache_creation_input_tokens`, DeepSeek
+`prompt_tokens_details.cached_tokens`. Reasoning levels map to
+Anthropic `thinking` (off→omitted, adaptive→`adaptive`,
+else `enabled` with a budget) or OpenAI `reasoning_effort`. DeepSeek
+supports **prefix-cache** via a stable `prefix_messages` mechanism that
+maximises cache reuse across requests.
+
+Model list is cached in `model-cache.json`; context-window data is
+augmented from **models.dev** (`model-data.json`) with provider-specific
+and canonical model matching, plus manual overrides in `context-cache.json`.
+When a live model list API fails, the system falls back to static model
+lists from the models.dev cache. Rate-limit errors surface as Warn toasts
+that auto-clear on success; context-overflow errors trigger compaction+retry.
 
 ## MCP
 
@@ -250,9 +282,10 @@ the system prompt; the `skill` tool can load them at runtime.
 
 Sessions persist as JSON under `<config_dir>/sessions/<id>/session.json`
 (capturing messages, todos, provider/model/thinking, token totals,
-context window, max output, auto_compact, MCP summary). Pasted images
-are stored in `sessions/<id>/assets/<sha>.png`. Titles auto-derive from
-the first user prompt. Input history is capped at 200 entries.
+context window, max output, auto_compact, MCP summary, input history).
+Pasted images are stored in `sessions/<id>/assets/<sha>.png`. Titles
+auto-derive from the first user prompt. Input history is capped at 200
+entries, persisted across session resume/fork.
 
 - **Auto-compact** (default on) fires when
   `used >= ctx_window - reserved`, where
@@ -262,6 +295,9 @@ the first user prompt. Input history is capped at 200 entries.
 - **Manual `/compact`** ignores `auto_compact`; tries `plan_cutoff`
   (keeps the last 2 turns) then falls back to force-trim; output capped
   at 500 000 chars. The `skill` tool is never pruned.
+- **DeepSeek prefix-cache** — the compaction summary keeps the first
+  system messages as a stable `prefix_messages` block, maximising
+  prefix-cache reuse across requests.
 - **Overflow recovery** — context-length errors trigger compaction+retry.
 
 The summary template is structured Markdown
@@ -277,6 +313,7 @@ supports incremental updates via a `previous_summary`.
 | Ctrl+Q             | Quit (cancels inflight)                                                 |
 | Ctrl+C             | Copy selection (full-TUI > input) / clear input                          |
 | Ctrl+I             | Focus input; closes all non-Notifications tabs                          |
+| Ctrl+P             | Open the command palette (replaces slash-triggered completion)          |
 | Ctrl+L             | Clear session                                                           |
 | Ctrl+N             | Toggle the Notifications panel (dedicated)                              |
 | Ctrl+Z / Ctrl+Y   | Undo / redo input (100-snapshot stack)                                  |
@@ -285,7 +322,6 @@ supports incremental updates via a `previous_summary`.
 | Ctrl+U             | Clear the entire input buffer                                            |
 | Ctrl+K             | Truncate from cursor to end of line                                      |
 | Alt+L              | Cycle focus: Input → FunctionPanel → AgentsCheckbox → Input             |
-| Alt+V              | Open the paste-preview panel (clipboard image or text)                   |
 | Tab                | Complete the focused candidate; else jump to/switch to the Plan tab     |
 | Shift+Tab          | Cycle sidebar tabs (wraps last→first)                                    |
 | Enter              | Submit; or insert newline (see `enter_behavior`)                         |
@@ -314,7 +350,7 @@ supports incremental updates via a `previous_summary`.
 
 ## Function panel tabs
 
-`Notifications` (always present, `Ctrl+N`) · `Completion` (auto on `/`) ·
+`Notifications` (always present, `Ctrl+N`) · `CommandPalette` (Ctrl+P) ·
 `Settings` · `ModelPicker` · `ProviderPicker` · `ThinkingPicker` ·
 `TimelinePicker` · `SessionPicker` · `SessionRename` · `Plan` · `Ask` ·
 `Todo` · `ToolPicker` · `PastePreview` · `Hotkey`.
@@ -328,8 +364,9 @@ after every modification.
 
 ## Logging
 
-`tracing-subscriber` to stderr; default filter
-`warn,fish_coding_agent=info`, overridable via `RUST_LOG`. On panic the
+`tracing-subscriber` to file; default filter
+`warn,fish_coding_agent=info`, overridable via `RUST_LOG`. Logs are
+written to `<config_dir>/logs/` to avoid TUI corruption. On panic the
 terminal is restored, the message + optional backtrace is printed and
 persisted to `<config_dir>/panic-<ts>.log`.
 

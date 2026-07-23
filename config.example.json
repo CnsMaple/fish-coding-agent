@@ -9,6 +9,7 @@
   "theme": "default",
   "auto_compact": true,
   "compact_reserved": null,
+  "cache_retention": "normal",
   "entries": {
     "openai:key": {
       "api_key": "",
