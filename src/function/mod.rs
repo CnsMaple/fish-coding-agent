@@ -578,6 +578,7 @@ impl App {
                 max_output_tokens: self.status.max_output_tokens,
                 auto_compact: self.status.auto_compact,
                 mcp_summary: self.status.mcp_summary.clone(),
+                input_history: self.input.history.clone(),
             },
         ) {
             self.notify(
@@ -639,6 +640,7 @@ impl App {
         self.block_undo_stack.clear();
         self.block_redo_stack.clear();
         self.input.clear_undo();
+        self.input.history.clear();
         self.disabled_tools.clear();
         clear_disabled_tools();
         // Remove the todo tab when the session is cleared.
@@ -742,6 +744,7 @@ impl App {
                     self.status.set_max_output_tokens(stored.max_output_tokens);
                 }
                 self.status.set_auto_compact(stored.auto_compact);
+                self.input.history = stored.input_history;
                 self.refresh_mcp_summary();
                 self.focus_target = FocusTarget::Input;
                 self.function_panel_cursor = None;
@@ -842,6 +845,7 @@ impl App {
                     self.status.set_max_output_tokens(stored.max_output_tokens);
                 }
                 self.status.set_auto_compact(stored.auto_compact);
+                self.input.history = stored.input_history;
                 self.refresh_mcp_summary();
                 self.session.invalidate_layout_cache();
                 if !stored.todo_items.is_empty() {

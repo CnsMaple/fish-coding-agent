@@ -33,6 +33,8 @@ pub struct StoredSession {
     pub auto_compact: bool,
     #[serde(default)]
     pub mcp_summary: Option<String>,
+    #[serde(default)]
+    pub input_history: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -100,6 +102,7 @@ pub struct SaveMeta {
     pub max_output_tokens: u64,
     pub auto_compact: bool,
     pub mcp_summary: Option<String>,
+    pub input_history: Vec<String>,
 }
 
 pub fn save(id: &str, title: &str, cwd: &Path, session: &Session, meta: SaveMeta) -> Result<()> {
@@ -127,6 +130,7 @@ pub fn save(id: &str, title: &str, cwd: &Path, session: &Session, meta: SaveMeta
         max_output_tokens: meta.max_output_tokens,
         auto_compact: meta.auto_compact,
         mcp_summary: meta.mcp_summary,
+        input_history: meta.input_history,
     };
     let raw = serde_json::to_string_pretty(&stored)?;
     std::fs::write(&path, raw).with_context(|| format!("write {}", path.display()))?;
@@ -187,6 +191,7 @@ pub fn fork(source_id: &str, cwd: &Path, title: Option<&str>) -> Result<StoredSe
         max_output_tokens: source.max_output_tokens,
         auto_compact: source.auto_compact,
         mcp_summary: source.mcp_summary,
+        input_history: source.input_history,
     };
     write_stored(&forked)?;
     Ok(forked)
