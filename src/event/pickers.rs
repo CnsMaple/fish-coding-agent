@@ -522,6 +522,61 @@ pub(super) async fn handle_ask_key(
         AskPhase::Reviewing => 0,
     };
 
+    // When editing_custom is active, the user is typing in the main
+    // input buffer. Enter/Esc commit or cancel; Char/Backspace modify
+    // the buffer; Left/Right save and navigate; Up/Down stay in edit.
+    if state.editing_custom {
+        match k.code {
+            KeyCode::Enter => {
+                // Commit: write buffer to custom_input → answer.
+                let text = app.input.buffer.clone();
+                state.items[state.active].custom_input = text.clone();
+                state.items[state.active].answered = Some(text);
+                state.editing_custom = false;
+                app.input.buffer = state.saved_input_buffer.clone();
+                app.input.cursor = app.input.buffer.len();
+                if state.all_answered() {
+                    state.phase = AskPhase::Reviewing;
+                } else if let Some(next) = state.next_unanswered(state.active + 1) {
+                    state.active = next;
+                    state.items[next].cursor = 0;
+                }
+                return true;
+            }
+            KeyCode::Esc => {
+                // Cancel: restore saved buffer.
+                app.input.buffer = state.saved_input_buffer.clone();
+                app.input.cursor = app.input.buffer.len();
+                state.editing_custom = false;
+                return true;
+            }
+            KeyCode::Up | KeyCode::Down => {
+                // Ignored while editing (stay in input buffer).
+                return true;
+            }
+            KeyCode::Left | KeyCode::Right => {
+                // Save buffer to custom_input, cancel edit, then
+                // fall through to the navigation handler below.
+                let text = app.input.buffer.clone();
+                state.items[state.active].custom_input = text;
+                state.editing_custom = false;
+                app.input.buffer = state.saved_input_buffer.clone();
+                app.input.cursor = app.input.buffer.len();
+            }
+            KeyCode::Char(c) => {
+                app.input.buffer.push(c);
+                app.input.cursor = app.input.buffer.len();
+                return true;
+            }
+            KeyCode::Backspace => {
+                app.input.buffer.pop();
+                app.input.cursor = app.input.buffer.len();
+                return true;
+            }
+            _ => {}
+        }
+    }
+
     match k.code {
         KeyCode::Up => {
             if state.phase == AskPhase::Reviewing {
@@ -553,7 +608,7 @@ pub(super) async fn handle_ask_key(
         }
         KeyCode::Left => {
             if state.phase == AskPhase::Reviewing {
-                return true;
+                state.phase = AskPhase::Asking;
             }
             if state.active > 0 {
                 state.active -= 1;
@@ -562,21 +617,18 @@ pub(super) async fn handle_ask_key(
         }
         KeyCode::Right => {
             if state.phase == AskPhase::Reviewing {
-                return true;
+                state.phase = AskPhase::Asking;
             }
             if state.active + 1 < state.items.len() {
                 state.active += 1;
             } else if state.all_answered() {
-                // Past the last question and everything is answered:
-                // jump to the review step.
                 state.phase = AskPhase::Reviewing;
             }
             true
         }
         KeyCode::Enter => {
             if state.phase == AskPhase::Reviewing {
-                // Whole batch approved. Send a single summary turn
-                // and close the tab.
+                // Whole batch approved.
                 let summary = state.build_summary();
                 close_active_function_tab(app);
                 crate::commands::send_chat(app, summary, Vec::new());
@@ -589,31 +641,15 @@ pub(super) async fn handle_ask_key(
             let is_freeform = cursor >= state.items[q_idx].options.len();
 
             if is_freeform {
-                let custom = state.items[q_idx].custom_input.clone();
-                if custom.trim().is_empty() {
-                    // No text typed yet — tell the LLM to wait.
-                    let question = state.items[q_idx].question.clone();
-                    let prompt = format!(
-                        "(Question: {question})\nPlease wait — the user is typing a free-form answer."
-                    );
-                    crate::commands::send_chat(app, prompt, Vec::new());
-                    return true;
-                }
-                // Use the typed custom input as the answer.
-                state.items[q_idx].answered = Some(custom);
-                state.items[q_idx].custom_input.clear();
-                if state.all_answered() {
-                    state.phase = AskPhase::Reviewing;
-                } else if let Some(next) = state.next_unanswered(q_idx + 1) {
-                    state.active = next;
-                    state.items[next].cursor = 0;
-                }
+                // Enter edit mode: copy custom_input to main buffer.
+                state.saved_input_buffer = app.input.buffer.clone();
+                app.input.buffer = state.items[q_idx].custom_input.clone();
+                app.input.cursor = app.input.buffer.len();
+                state.editing_custom = true;
                 return true;
             }
 
-            // Picked a model-supplied option. Write the answer,
-            // advance to the next unanswered question, or flip to
-            // the review step if everything is answered.
+            // Picked a model-supplied option.
             let answer = state.items[q_idx].options[cursor].clone();
             state.items[q_idx].answered = Some(answer);
             if state.all_answered() {
@@ -624,39 +660,16 @@ pub(super) async fn handle_ask_key(
             }
             true
         }
-        KeyCode::Backspace => {
-            if state.phase == AskPhase::Asking {
-                if let Some(it) = state.items.get_mut(state.active) {
-                    if it.cursor >= it.options.len() && !it.custom_input.is_empty() {
-                        it.custom_input.pop();
-                        return true;
-                    }
-                }
-            }
-            false
-        }
-        KeyCode::Char(c) => {
-            if state.phase == AskPhase::Asking {
-                if let Some(it) = state.items.get_mut(state.active) {
-                    if it.cursor >= it.options.len() {
-                        it.custom_input.push(c);
-                        return true;
-                    }
-                }
-            }
-            false
-        }
+        KeyCode::Backspace => false,
+        KeyCode::Char(_) => false,
         KeyCode::Esc => {
             if state.phase == AskPhase::Reviewing {
-                // Esc in Reviewing goes back to Asking so the user
-                // can fix an answer.
                 state.phase = AskPhase::Asking;
                 if let Some(idx) = state.next_unanswered(0) {
                     state.active = idx;
                 }
                 return true;
             }
-            // Esc in Asking dismisses the entire ask round.
             let summary = state.build_dismiss_summary();
             close_active_function_tab(app);
             crate::commands::send_chat(app, summary, Vec::new());

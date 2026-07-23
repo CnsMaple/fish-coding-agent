@@ -1864,6 +1864,13 @@ pub struct AskState {
     pub phase: AskPhase,
     /// Scroll offset for the body view.
     pub scroll: usize,
+    /// When true, the user is editing a custom answer via the main
+    /// input buffer. Enter on the freeform row copies `custom_input`
+    /// to `app.input.buffer`, sets this flag, and saves a snapshot.
+    pub editing_custom: bool,
+    /// Snapshot of `app.input.buffer` taken before entering edit mode,
+    /// restored on Esc (cancel).
+    pub saved_input_buffer: String,
 }
 
 impl AskState {
@@ -1873,6 +1880,8 @@ impl AskState {
             active: 0,
             phase: AskPhase::Asking,
             scroll: 0,
+            editing_custom: false,
+            saved_input_buffer: String::new(),
         }
     }
 
@@ -1885,6 +1894,7 @@ impl AskState {
         // Adding a question puts us back in the asking phase: the
         // user has at least one new thing to answer.
         self.phase = AskPhase::Asking;
+        self.editing_custom = false;
     }
 
     /// Number of rows in the picker for the active question

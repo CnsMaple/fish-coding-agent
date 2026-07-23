@@ -664,15 +664,17 @@ impl TabWidget for crate::function::AskState {
     }
     fn render_hint(&self, area: Rect, buf: &mut Buffer, _ctx: &TabCtx) {
         use crate::function::AskPhase;
-        let hint = match self.phase {
-            AskPhase::Asking => {
-                if self.items.len() > 1 {
+        let hint = if self.editing_custom {
+            " Enter: done | Esc: cancel | \u{2190}/\u{2192}: switch "
+        } else {
+            match self.phase {
+                AskPhase::Asking => {
                     " \u{2191}/\u{2193}: navigate | \u{2190}/\u{2192}: switch | Enter: pick | Esc: cancel "
-                } else {
-                    " \u{2191}/\u{2193}: navigate | Enter: pick | Esc: cancel "
+                }
+                AskPhase::Reviewing => {
+                    " \u{2191}/\u{2193}: scroll | \u{2190}/\u{2192}: switch | Enter: send all | Esc: cancel "
                 }
             }
-            AskPhase::Reviewing => " \u{2191}/\u{2193}: scroll | Enter: send all | Esc: cancel ",
         };
         Paragraph::new(Line::from(Span::styled(hint, Theme::dim()))).render(area, buf);
     }

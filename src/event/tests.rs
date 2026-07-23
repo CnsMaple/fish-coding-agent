@@ -1040,7 +1040,6 @@ fn enter_action_matrix_matches_labels() {
 }
 
 #[test]
-#[test]
 fn submit_input_dispatches_skill_colon_form() {
     // `/skill:<name>` must submit as a slash command, NOT pass
     // the whole `/skill:<name>` string to the chat as a plain
@@ -1105,13 +1104,6 @@ fn submit_input_skill_colon_with_args_picks_up_trailing_text() {
     assert!(user_msg.content.contains(user_args));
 }
 
-#[test]
-#[test]
-#[test]
-#[test]
-#[test]
-#[test]
-#[test]
 #[test]
 fn dispatch_skill_sends_immediately_with_skill_ref() {
     // /skill:<name> (or dispatch("skill", name)) used to populate
@@ -1215,9 +1207,6 @@ fn dispatch_mcp_unknown_name_toasts() {
     assert!(app.input.buffer.is_empty());
 }
 
-#[test]
-#[test]
-#[test]
 #[test]
 fn settings_form_up_down_moves_focus() {
     // Up/Down must update form.focused in the ConfigForm level, not just
