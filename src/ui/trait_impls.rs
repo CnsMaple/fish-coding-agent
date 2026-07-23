@@ -905,37 +905,82 @@ impl TabWidget for crate::function::PastePreviewState {
     }
 }
 
-impl TabWidget for crate::function::CompletionState {
+impl TabWidget for crate::function::CommandPaletteState {
     fn title(&self) -> &str {
-        "completion"
+        "command palette"
+    }
+    fn has_search(&self) -> bool {
+        true
     }
     fn content_height(&self, _ctx: &TabCtx) -> usize {
-        self.candidates.len()
+        self.entries.len().max(1)
+    }
+    fn render_search(&mut self, area: Rect, buf: &mut Buffer, _ctx: &TabCtx) -> Option<(u16, u16)> {
+        crate::ui::picker_widget::render_search_row(
+            area,
+            buf,
+            &self.query,
+            crate::function::PickerFocus::Search,
+            true,
+        )
     }
     fn render_body(&mut self, area: Rect, buf: &mut Buffer, _ctx: &TabCtx) -> Option<(u16, u16)> {
-        if self.candidates.is_empty() {
-            Paragraph::new(Line::from(Span::styled("[no completion]", Theme::dim())))
+        if self.entries.is_empty() {
+            Paragraph::new(Line::from(Span::styled("[no matches]", Theme::dim())))
                 .wrap(Wrap { trim: false })
                 .render(area, buf);
             return None;
         }
-        let range = visible_window(
+        let range = crate::ui::function_panel::visible_window(
             self.cursor,
             &mut self.scroll,
             area.height as usize,
-            self.candidates.len(),
+            self.entries.len(),
         );
         for row in range {
-            let c = &self.candidates[row];
+            let entry = &self.entries[row];
             let is_cursor = row == self.cursor;
             let y = area.y + (row - self.scroll) as u16;
-            let line = if is_cursor {
-                Line::from(vec![
-                    Span::styled("> ", Theme::bold()),
-                    Span::raw(c.clone()),
-                ])
-            } else {
-                Line::from(Span::raw(format!("  {c}")))
+            let line = match entry {
+                crate::function::PaletteEntry::Command { name, description } => {
+                    if is_cursor {
+                        Line::from(vec![
+                            Span::styled("> ", Theme::bold()),
+                            Span::styled(*name, Theme::bold()),
+                            Span::raw("  "),
+                            Span::styled(*description, Theme::dim()),
+                        ])
+                    } else {
+                        Line::from(vec![
+                            Span::raw("  "),
+                            Span::styled(*name, Theme::bold()),
+                            Span::raw("  "),
+                            Span::styled(*description, Theme::dim()),
+                        ])
+                    }
+                }
+                crate::function::PaletteEntry::Skill {
+                    name,
+                    description,
+                    selected,
+                } => {
+                    let checkbox = if *selected { "[x]" } else { "[ ]" };
+                    if is_cursor {
+                        Line::from(vec![
+                            Span::styled("> ", Theme::bold()),
+                            Span::raw(format!("{} [skill:{}]", checkbox, name)),
+                            Span::raw("  "),
+                            Span::styled(description, Theme::dim()),
+                        ])
+                    } else {
+                        Line::from(vec![
+                            Span::raw("  "),
+                            Span::raw(format!("{} [skill:{}]", checkbox, name)),
+                            Span::raw("  "),
+                            Span::styled(description, Theme::dim()),
+                        ])
+                    }
+                }
             };
             buf.set_line(area.x, y, &line, area.width);
         }
@@ -949,7 +994,7 @@ impl TabWidget for HotkeyTab {
         "hotkey"
     }
     fn content_height(&self, _ctx: &TabCtx) -> usize {
-        18
+        19
     }
     fn render_body(&mut self, area: Rect, buf: &mut Buffer, _ctx: &TabCtx) -> Option<(u16, u16)> {
         let rows: Vec<(&str, &str)> = vec![
@@ -962,7 +1007,7 @@ impl TabWidget for HotkeyTab {
             ("Ctrl+C", "Quit"),
             ("Ctrl+L", "Clear session"),
             ("Ctrl+N", "Toggle notifications panel"),
-            ("/", "Open completion"),
+            ("Ctrl+P", "Open command palette"),
             ("/timeline", "Jump to latest prompt"),
             ("/session", "Manage and resume sessions"),
             ("/retry", "Retry previous prompt"),

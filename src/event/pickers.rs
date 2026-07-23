@@ -51,6 +51,9 @@ pub(super) async fn dispatch_to_active_tab(k: crossterm::event::KeyEvent, app: &
         crate::function::SidebarTab::Ask(state) => handle_ask_key(k, app, state).await,
         crate::function::SidebarTab::Todo(state) => handle_todo_key(k, app, state).await,
         crate::function::SidebarTab::ToolPicker(state) => handle_tool_picker_key(k, app, state),
+        crate::function::SidebarTab::CommandPalette(state) => {
+            handle_command_palette_key(k, app, state)
+        }
         _ => false,
     };
     if active < app.function.tabs.len()
@@ -75,6 +78,157 @@ pub(super) async fn dispatch_to_active_tab(k: crossterm::event::KeyEvent, app: &
     }
     consumed
 }
+
+/// Handle keys for the CommandPalette tab (Ctrl+P).
+pub(super) fn handle_command_palette_key(
+    k: crossterm::event::KeyEvent,
+    app: &mut App,
+    state: &mut crate::function::CommandPaletteState,
+) -> bool {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    match k.code {
+        KeyCode::Enter => {
+            if state.entries.is_empty() || state.cursor >= state.entries.len() {
+                return true;
+            }
+            let entry = &state.entries[state.cursor].clone();
+            match entry {
+                crate::function::PaletteEntry::Command { name, .. } => {
+                    // Close the palette tab first, then execute the command.
+                    close_active_function_tab(app);
+                    match *name {
+                        "model" => crate::commands::open_model_picker(app),
+                        "settings" => crate::commands::open_settings(app),
+                        "session" => crate::commands::open_session_picker(
+                            app,
+                            crate::function::SessionPickerMode::Manage,
+                        ),
+                        "timeline" => crate::commands::open_timeline_picker(app),
+                        "think" => crate::commands::open_thinking_picker(app),
+                        "tool" => crate::commands::open_tool_picker(app),
+                        "hotkey" => crate::commands::open_hotkey(app),
+                        "retry" => crate::commands::retry_last_prompt(app),
+                        "continue" => crate::commands::continue_response(app, ""),
+                        "compact" => crate::commands::compact_now(app, ""),
+                        "new" => {
+                            app.start_new_session();
+                            app.notify(ToastLevel::Info, "new session");
+                        }
+                        "plan" => {
+                            app.set_mode(crate::function::AppMode::Plan);
+                            app.notify(ToastLevel::Info, "mode: plan");
+                        }
+                        "yolo" => {
+                            app.set_mode(crate::function::AppMode::Yolo);
+                            app.notify(ToastLevel::Info, "mode: yolo");
+                        }
+                        "clear" => {
+                            app.start_new_session();
+                            app.notify(ToastLevel::Info, "session cleared");
+                        }
+                        _ => {}
+                    }
+                    true
+                }
+                crate::function::PaletteEntry::Skill { .. } => {
+                    // Insert all selected skills (or just the focused one) as markers.
+                    let selected: Vec<String> = state
+                        .entries
+                        .iter()
+                        .filter_map(|e| match e {
+                            crate::function::PaletteEntry::Skill {
+                                name,
+                                selected: true,
+                                ..
+                            } => Some(name.clone()),
+                            _ => None,
+                        })
+                        .collect();
+                    let names = if selected.is_empty() {
+                        // Nothing selected → insert just the focused skill.
+                        vec![state.entries[state.cursor]
+                            .clone()
+                            .name()
+                            .unwrap_or_default()
+                            .to_string()]
+                    } else {
+                        selected
+                    };
+                    if !names.is_empty() {
+                        app.push_input_undo();
+                        for name in &names {
+                            if app.input.has_selection() {
+                                app.input.delete_selection();
+                            }
+                            app.input.insert_str(&format!("[skill:{}]", name));
+                        }
+                    }
+                    close_active_function_tab(app);
+                    true
+                }
+            }
+        }
+        KeyCode::Char(' ') if k.modifiers.is_empty() => {
+            state.toggle_selected();
+            true
+        }
+        KeyCode::Esc => {
+            // Before closing, insert all selected skills as markers.
+            let selected: Vec<String> = state
+                .entries
+                .iter()
+                .filter_map(|e| match e {
+                    crate::function::PaletteEntry::Skill {
+                        name,
+                        selected: true,
+                        ..
+                    } => Some(name.clone()),
+                    _ => None,
+                })
+                .collect();
+            if !selected.is_empty() {
+                app.push_input_undo();
+                for name in &selected {
+                    if app.input.has_selection() {
+                        app.input.delete_selection();
+                    }
+                    app.input.insert_str(&format!("[skill:{}]", name));
+                }
+            }
+            close_active_function_tab(app);
+            true
+        }
+        KeyCode::Up => {
+            state.move_up();
+            true
+        }
+        KeyCode::Down => {
+            state.move_down();
+            true
+        }
+        KeyCode::Backspace => {
+            state.query.pop();
+            state.rebuild_filter();
+            true
+        }
+        KeyCode::Char(c)
+            if !k
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+        {
+            state.query.push(c);
+            state.rebuild_filter();
+            true
+        }
+        KeyCode::Tab | KeyCode::BackTab => {
+            // Tab/BackTab are handled by the panel-level dispatch,
+            // not consumed here.
+            false
+        }
+        _ => false,
+    }
+}
+
 pub(super) fn close_active_function_tab(app: &mut App) {
     let active = app.function.active;
     if active < app.function.tabs.len() {

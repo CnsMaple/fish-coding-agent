@@ -323,7 +323,7 @@ fn open_mcp_logout(app: &mut App, arg: &str) {
     app.notify(ToastLevel::Ok, format!("OAuth tokens removed for `{name}`"));
 }
 
-fn retry_last_prompt(app: &mut App) {
+pub fn retry_last_prompt(app: &mut App) {
     if app.inflight.is_some() {
         app.notify(ToastLevel::Warn, MSG_REQUEST_IN_FLIGHT);
         return;
@@ -344,7 +344,7 @@ fn retry_last_prompt(app: &mut App) {
     crate::commands::send_chat(app, prompt, Vec::new());
 }
 
-fn continue_response(app: &mut App, arg: &str) {
+pub fn continue_response(app: &mut App, arg: &str) {
     if app.inflight.is_some() {
         app.notify(ToastLevel::Warn, MSG_REQUEST_IN_FLIGHT);
         return;

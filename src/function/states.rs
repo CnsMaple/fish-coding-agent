@@ -88,54 +88,6 @@ pub trait FilterablePicker {
     }
 }
 
-/// Transient command-completion state, shown while the input buffer
-/// looks like a partial slash command.
-#[derive(Debug)]
-pub struct CompletionState {
-    pub candidates: Vec<String>,
-    pub cursor: usize,
-    pub scroll: usize,
-}
-
-impl CompletionState {
-    pub fn new(prefix: &str) -> Self {
-        let candidates = crate::input::completion_candidates_for(prefix);
-        let mut s = Self {
-            candidates,
-            cursor: 0,
-            scroll: 0,
-        };
-        s.clamp_cursor();
-        s
-    }
-
-    pub fn clamp_cursor(&mut self) {
-        if self.candidates.is_empty() {
-            self.cursor = 0;
-        } else if self.cursor >= self.candidates.len() {
-            self.cursor = self.candidates.len() - 1;
-        }
-    }
-
-    pub fn move_up(&mut self) {
-        if self.candidates.is_empty() {
-            return;
-        }
-        if self.cursor == 0 {
-            self.cursor = self.candidates.len() - 1;
-        } else {
-            self.cursor -= 1;
-        }
-    }
-
-    pub fn move_down(&mut self) {
-        if self.candidates.is_empty() {
-            return;
-        }
-        self.cursor = (self.cursor + 1) % self.candidates.len();
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppMode {
     Plan,
@@ -184,11 +136,206 @@ impl Default for TodoTabState {
     }
 }
 
+/// A single entry in the command palette (Ctrl+P).
+#[derive(Debug, Clone)]
+pub enum PaletteEntry {
+    Command {
+        name: &'static str,
+        description: &'static str,
+    },
+    Skill {
+        name: String,
+        description: String,
+        selected: bool,
+    },
+}
+
+impl PaletteEntry {
+    /// Get the display name of this entry.
+    pub fn name(&self) -> Option<&str> {
+        match self {
+            PaletteEntry::Command { name, .. } => Some(name),
+            PaletteEntry::Skill { name, .. } => Some(name.as_str()),
+        }
+    }
+}
+
+/// Command-palette state, opened via Ctrl+P.
+#[derive(Debug)]
+pub struct CommandPaletteState {
+    pub query: String,
+    pub cursor: usize,
+    pub scroll: usize,
+    /// Filtered entries matching the current query.
+    pub entries: Vec<PaletteEntry>,
+}
+
+impl CommandPaletteState {
+    pub fn new() -> Self {
+        let all = Self::build_all();
+        Self {
+            query: String::new(),
+            cursor: 0,
+            scroll: 0,
+            entries: all,
+        }
+    }
+
+    fn build_all() -> Vec<PaletteEntry> {
+        let mut v: Vec<PaletteEntry> = vec![
+            PaletteEntry::Command {
+                name: "model",
+                description: "Switch provider/model",
+            },
+            PaletteEntry::Command {
+                name: "settings",
+                description: "Open settings",
+            },
+            PaletteEntry::Command {
+                name: "session",
+                description: "Manage sessions",
+            },
+            PaletteEntry::Command {
+                name: "timeline",
+                description: "Jump to message",
+            },
+            PaletteEntry::Command {
+                name: "think",
+                description: "Configure thinking mode",
+            },
+            PaletteEntry::Command {
+                name: "tool",
+                description: "Toggle tools",
+            },
+            PaletteEntry::Command {
+                name: "hotkey",
+                description: "Show key bindings",
+            },
+            PaletteEntry::Command {
+                name: "retry",
+                description: "Retry last prompt",
+            },
+            PaletteEntry::Command {
+                name: "continue",
+                description: "Continue response",
+            },
+            PaletteEntry::Command {
+                name: "compact",
+                description: "Compact session",
+            },
+            PaletteEntry::Command {
+                name: "new",
+                description: "New session",
+            },
+            PaletteEntry::Command {
+                name: "plan",
+                description: "Switch to plan mode",
+            },
+            PaletteEntry::Command {
+                name: "yolo",
+                description: "Switch to yolo mode",
+            },
+            PaletteEntry::Command {
+                name: "clear",
+                description: "Clear session",
+            },
+        ];
+        for skill in crate::skill::load_all() {
+            v.push(PaletteEntry::Skill {
+                name: skill.name,
+                description: skill.description,
+                selected: false,
+            });
+        }
+        v
+    }
+
+    pub fn rebuild_filter(&mut self) {
+        let q = self.query.to_lowercase();
+        if q.is_empty() {
+            self.entries = Self::build_all();
+        } else if q == "skill" || q.starts_with("skill:") {
+            // Show all skills, optionally filtered by the text after "skill:".
+            let suffix = q.strip_prefix("skill:").unwrap_or("").trim();
+            let all = Self::build_all();
+            self.entries = all
+                .into_iter()
+                .filter(|e| match e {
+                    PaletteEntry::Skill { name, .. } => {
+                        if suffix.is_empty() {
+                            true
+                        } else {
+                            name.to_lowercase().contains(suffix)
+                                || crate::fuzzy::score(suffix, name).is_some()
+                        }
+                    }
+                    PaletteEntry::Command { .. } => false,
+                })
+                .collect();
+            self.clamp_cursor();
+        } else {
+            self.entries = Self::build_all()
+                .into_iter()
+                .filter(|e| {
+                    let name = match e {
+                        PaletteEntry::Command { name, .. } => name,
+                        PaletteEntry::Skill { name, .. } => name.as_str(),
+                    };
+                    name.to_lowercase().contains(&q) || crate::fuzzy::score(&q, name).is_some()
+                })
+                .collect();
+        }
+        self.clamp_cursor();
+    }
+
+    fn clamp_cursor(&mut self) {
+        if self.entries.is_empty() {
+            self.cursor = 0;
+        } else if self.cursor >= self.entries.len() {
+            self.cursor = self.entries.len().saturating_sub(1);
+        }
+    }
+
+    pub fn move_up(&mut self) {
+        if self.entries.is_empty() {
+            return;
+        }
+        if self.cursor == 0 {
+            self.cursor = self.entries.len() - 1;
+        } else {
+            self.cursor -= 1;
+        }
+    }
+
+    pub fn move_down(&mut self) {
+        if self.entries.is_empty() {
+            return;
+        }
+        self.cursor = (self.cursor + 1) % self.entries.len();
+    }
+
+    /// Toggle the `selected` flag of the skill at the current cursor.
+    /// No-op for command entries.
+    pub fn toggle_selected(&mut self) {
+        if let Some(PaletteEntry::Skill {
+            ref mut selected, ..
+        }) = self.entries.get_mut(self.cursor)
+        {
+            *selected = !*selected;
+        }
+    }
+}
+
+impl Default for CommandPaletteState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// One sidebar tab entry.
 #[derive(Debug)]
 pub enum SidebarTab {
     Notifications,
-    Completion(CompletionState),
     PastePreview(Box<PastePreviewState>),
     Settings(Box<SettingsState>),
     ModelPicker(ModelPickerState),
@@ -202,6 +349,7 @@ pub enum SidebarTab {
     Todo(TodoTabState),
     ToolPicker(ToolPickerState),
     Hotkey,
+    CommandPalette(CommandPaletteState),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -234,7 +382,6 @@ impl SidebarTab {
                     app.notifications.items.len()
                 }
             }
-            Self::Completion(s) => s.candidates.len(),
             Self::Settings(s) => settings_body_lines(s, &app.config).len(),
             Self::ModelPicker(s) => {
                 if s.fetching || s.fetch_error.is_some() || s.models.is_empty() {
@@ -322,6 +469,7 @@ impl SidebarTab {
                 }
             }
             Self::Hotkey => 18,
+            Self::CommandPalette(s) => s.entries.len().max(1),
         }
     }
 
@@ -336,6 +484,7 @@ impl SidebarTab {
                 | Self::TimelinePicker(_)
                 | Self::SessionPicker(_)
                 | Self::ToolPicker(_)
+                | Self::CommandPalette(_)
         )
     }
 
@@ -364,8 +513,8 @@ impl SidebarTab {
             Self::ToolPicker(_) => " Space: toggle | Enter: confirm | Esc: close ",
             Self::Hotkey => "",
             Self::PastePreview(_) => " Enter: paste | Esc: cancel ",
-            Self::Completion(_) => "",
             Self::Settings(_) => " ",
+            Self::CommandPalette(_) => " Enter: execute/skill | Space: toggle | Esc: close ",
         }
     }
 
@@ -1827,7 +1976,6 @@ impl FunctionPanel {
         match self.tabs.get(self.active) {
             Some(SidebarTab::Notifications) => "notifications",
             Some(SidebarTab::PastePreview(_)) => "paste",
-            Some(SidebarTab::Completion(_)) => "completion",
             Some(SidebarTab::Settings(_)) => "settings",
             Some(SidebarTab::ModelPicker(_)) => "model picker",
             Some(SidebarTab::ProviderPicker(_)) => "provider",
@@ -1840,6 +1988,7 @@ impl FunctionPanel {
             Some(SidebarTab::Todo(_)) => "todo",
             Some(SidebarTab::ToolPicker(_)) => "tools",
             Some(SidebarTab::Hotkey) => "hotkey",
+            Some(SidebarTab::CommandPalette(_)) => "command palette",
             None => "?",
         }
     }

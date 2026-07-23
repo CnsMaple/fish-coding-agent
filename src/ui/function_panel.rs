@@ -47,7 +47,6 @@ pub fn render(area: Rect, buf: &mut Buffer, app: &mut App) {
         }
         let name = match tab {
             SidebarTab::Notifications => "notifications",
-            SidebarTab::Completion(_) => "completion",
             SidebarTab::Settings(_) => "settings",
             SidebarTab::ModelPicker(_) => "model picker",
             SidebarTab::ProviderPicker(_) => "provider",
@@ -61,6 +60,7 @@ pub fn render(area: Rect, buf: &mut Buffer, app: &mut App) {
             SidebarTab::PastePreview(_) => "paste",
             SidebarTab::ToolPicker(_) => "tools",
             SidebarTab::Hotkey => "hotkey",
+            SidebarTab::CommandPalette(_) => "command palette",
         };
         if i == app.function.active {
             title_spans.push(Span::styled(format!(" {name} "), Theme::bold()));
@@ -97,7 +97,6 @@ pub fn render(area: Rect, buf: &mut Buffer, app: &mut App) {
                 render_notifications(inner, buf, app);
                 None
             }
-            SidebarTab::Completion(s) => s.render_tab(inner, buf, &ctx),
             SidebarTab::Settings(s) => s.render_tab(inner, buf, &ctx),
             SidebarTab::ModelPicker(s) => s.render_tab(inner, buf, &ctx),
             SidebarTab::ProviderPicker(s) => s.render_tab(inner, buf, &ctx),
@@ -110,6 +109,7 @@ pub fn render(area: Rect, buf: &mut Buffer, app: &mut App) {
             SidebarTab::PastePreview(s) => s.render_tab(inner, buf, &ctx),
             SidebarTab::Todo(s) => s.render_tab(inner, buf, &ctx),
             SidebarTab::ToolPicker(s) => s.render_tab(inner, buf, &ctx),
+            SidebarTab::CommandPalette(s) => s.render_tab(inner, buf, &ctx),
             SidebarTab::Hotkey => {
                 use crate::ui::trait_impls::HotkeyTab;
                 let mut hk = HotkeyTab;

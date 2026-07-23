@@ -1053,7 +1053,6 @@ pub fn sidebar_tab_name(t: &SidebarTab) -> &'static str {
     match t {
         SidebarTab::Notifications => "notifications",
         SidebarTab::PastePreview(_) => "paste",
-        SidebarTab::Completion(_) => "completion",
         SidebarTab::Settings(_) => "settings",
         SidebarTab::ModelPicker(_) => "model picker",
         SidebarTab::ProviderPicker(_) => "provider",
@@ -1066,6 +1065,7 @@ pub fn sidebar_tab_name(t: &SidebarTab) -> &'static str {
         SidebarTab::Todo(_) => "todo",
         SidebarTab::ToolPicker(_) => "tools",
         SidebarTab::Hotkey => "hotkey",
+        SidebarTab::CommandPalette(_) => "command palette",
     }
 }
 

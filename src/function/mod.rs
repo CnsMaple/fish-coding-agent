@@ -1177,67 +1177,8 @@ impl App {
         self.focus_target = FocusTarget::FunctionPanel;
     }
 
-    /// Ensure the Completion sidebar tab reflects the current input buffer.
-    /// - If the buffer is a partial `/` command, populate (or create) the tab
-    ///   with matching candidates and reset its cursor.
-    /// - Otherwise, remove the tab if it is present. If that leaves the
-    ///   function panel with no function tabs, hide the panel so the user
-    ///   returns to the default hidden state.
     pub fn sync_completion(&mut self) {
-        let buffer = self.input.buffer.clone();
-        let cursor = self.input.cursor;
-        let prefix = if buffer.starts_with('/') && !buffer[..cursor].contains('\n') {
-            buffer[..cursor].to_string()
-        } else {
-            String::new()
-        };
-
-        let pos = self
-            .function
-            .tabs
-            .iter()
-            .position(|t| matches!(t, SidebarTab::Completion(_)));
-
-        let candidates = if prefix.is_empty() {
-            Vec::new()
-        } else {
-            crate::input::completion_candidates_for(&prefix)
-        };
-
-        if candidates.is_empty() {
-            if let Some(idx) = pos {
-                self.function.tabs.remove(idx);
-                if self.function.active >= self.function.tabs.len() {
-                    self.function.active = self.function.tabs.len().saturating_sub(1);
-                }
-                self.maybe_hide_panel();
-            }
-            return;
-        }
-
-        match pos {
-            Some(idx) => {
-                if let SidebarTab::Completion(s) = &mut self.function.tabs[idx] {
-                    s.candidates = candidates;
-                    s.clamp_cursor();
-                }
-            }
-            None => {
-                self.function.push(SidebarTab::Completion(CompletionState {
-                    candidates,
-                    cursor: 0,
-                    scroll: 0,
-                }));
-                // Typing `/` is a "function trigger" — the user must see
-                // the candidate list, so auto-show the panel and focus
-                // the new Completion tab.
-                self.function.active = self.function.tabs.len() - 1;
-                // Completion is shown while the user is still typing in
-                // the input — keep focus on the input so typing continues.
-                self.function_visible = true;
-                self.acknowledge_panel();
-            }
-        }
+        // No-op: completion via `/` is removed in favor of Ctrl+P command palette.
     }
 
     /// Hide the function panel when the last tab is removed. Called

@@ -1242,6 +1242,12 @@ async fn handle_key(k: crossterm::event::KeyEvent, app: &mut App) {
         return;
     }
 
+    // Ctrl+P: open command palette.
+    if ctrl && matches!(k.code, KeyCode::Char('p') | KeyCode::Char('P')) {
+        handle_ctrl_p(app);
+        return;
+    }
+
     // Alt+L: cycle focus between Input -> FunctionPanel -> AgentsCheckbox -> Input.
     if k.modifiers.contains(KeyModifiers::ALT)
         && matches!(k.code, KeyCode::Char('l') | KeyCode::Char('L'))
@@ -1374,9 +1380,6 @@ async fn handle_key(k: crossterm::event::KeyEvent, app: &mut App) {
             }
         }
         KeyCode::Tab => {
-            if complete_focused_candidate(app) {
-                return;
-            }
             // Tab jumps to the Plan tab (or creates one).
             app.jump_to_plan();
         }
@@ -1385,14 +1388,6 @@ async fn handle_key(k: crossterm::event::KeyEvent, app: &mut App) {
             cycle_sidebar_forward(app);
         }
         KeyCode::Enter => {
-            // If the completion tab is showing for a partial command, complete
-            // the buffer with the focused candidate, then submit.
-            if completion_is_focused(app) {
-                complete_focused_candidate(app);
-                submit_input(app);
-                return;
-            }
-
             // If the active sidebar tab is a Plan, Enter approves the plan
             // directly from the input box (no need to Alt+L into the panel
             // first). Any text in the input buffer is appended as
@@ -1580,69 +1575,17 @@ async fn handle_key(k: crossterm::event::KeyEvent, app: &mut App) {
             scroll_session_page(app, false);
         }
         KeyCode::Up => {
-            if completion_is_focused(app) {
-                if let Some(idx) = completion_idx(app) {
-                    if let crate::function::SidebarTab::Completion(s) = &mut app.function.tabs[idx]
-                    {
-                        s.move_up();
-                    }
-                }
-            } else if !app.input.move_up_line() {
+            if !app.input.move_up_line() {
                 app.input.history_prev();
             }
         }
         KeyCode::Down => {
-            if completion_is_focused(app) {
-                if let Some(idx) = completion_idx(app) {
-                    if let crate::function::SidebarTab::Completion(s) = &mut app.function.tabs[idx]
-                    {
-                        s.move_down();
-                    }
-                }
-            } else if !app.input.move_down_line() {
+            if !app.input.move_down_line() {
                 app.input.history_next();
             }
         }
         _ => {}
     }
-}
-
-/// Returns the index of the Completion sidebar tab, if any.
-fn completion_idx(app: &App) -> Option<usize> {
-    app.function
-        .tabs
-        .iter()
-        .position(|t| matches!(t, crate::function::SidebarTab::Completion(_)))
-}
-
-fn complete_focused_candidate(app: &mut App) -> bool {
-    let Some(idx) = completion_idx(app) else {
-        return false;
-    };
-    let Some(cand) = (match &app.function.tabs[idx] {
-        crate::function::SidebarTab::Completion(s) => s.candidates.get(s.cursor).cloned(),
-        _ => None,
-    }) else {
-        return false;
-    };
-    app.input.buffer = cand;
-    app.input.cursor = app.input.buffer.len();
-    app.input.clear_selection();
-    app.sync_completion();
-    true
-}
-
-/// True if the Completion tab is present and has at least one candidate.
-/// In this state Up/Down navigate candidates, Tab completes, and Enter
-/// executes the focused candidate.
-fn completion_is_focused(app: &App) -> bool {
-    let Some(idx) = completion_idx(app) else {
-        return false;
-    };
-    matches!(
-        &app.function.tabs[idx],
-        crate::function::SidebarTab::Completion(s) if !s.candidates.is_empty()
-    )
 }
 
 /// Compute the byte index in the input buffer corresponding to a screen column,
@@ -2277,6 +2220,7 @@ fn submit_input(app: &mut App) {
         return;
     }
     let raw = expand_paste_blocks(clean_text, &mut app.paste_blocks);
+    let raw = expand_skill_blocks(raw);
     if raw.is_empty() && image_parts.is_empty() {
         return;
     }
@@ -2314,7 +2258,6 @@ fn submit_input(app: &mut App) {
     } else {
         crate::commands::send_chat(app, raw, image_parts);
     }
-    // The buffer is now empty, so the completion tab (if any) should close.
     app.sync_completion();
 }
 
@@ -2394,4 +2337,24 @@ pub(crate) fn handle_ctrl_n(app: &mut App) {
         app.function.active = i;
         app.acknowledge_panel();
     }
+}
+
+/// Ctrl+P: open the command palette as a sidebar tab.
+/// If already open, re-focus it. Otherwise push a new one.
+pub(crate) fn handle_ctrl_p(app: &mut App) {
+    if let Some(idx) = app
+        .function
+        .tabs
+        .iter()
+        .position(|t| matches!(t, crate::function::SidebarTab::CommandPalette(_)))
+    {
+        app.function.active = idx;
+    } else {
+        app.function
+            .push(crate::function::SidebarTab::CommandPalette(
+                crate::function::CommandPaletteState::new(),
+            ));
+    }
+    app.show_panel();
+    app.acknowledge_panel();
 }
