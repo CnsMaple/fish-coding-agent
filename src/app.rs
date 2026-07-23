@@ -53,4 +53,41 @@ impl App {
     pub fn invalidate_tool_specs(&mut self) {
         self.mcp_tools_dirty = true;
     }
+
+    /// Refresh the MCP status summary displayed in the status bar.
+    /// Reads the live snapshot from the MCP service and aggregates
+    /// per-server statuses into a compact string like `"2✓ 1✗"`.
+    pub fn refresh_mcp_summary(&mut self) {
+        let snap = crate::mcp::try_snapshot_or_empty();
+        let mut connected = 0u32;
+        let mut failed = 0u32;
+        let mut other = 0u32;
+
+        for status in snap.status.values() {
+            match status {
+                crate::mcp::McpStatus::Connected => connected += 1,
+                crate::mcp::McpStatus::Failed { .. } => failed += 1,
+                crate::mcp::McpStatus::Disabled => {}
+                _ => other += 1,
+            }
+        }
+
+        let active = connected + failed + other;
+        if active == 0 {
+            self.status.set_mcp_summary(None);
+            return;
+        }
+
+        let mut parts = Vec::new();
+        if connected > 0 {
+            parts.push(format!("{connected}✓"));
+        }
+        if failed > 0 {
+            parts.push(format!("{failed}✗"));
+        }
+        if other > 0 {
+            parts.push(format!("{other}⚠"));
+        }
+        self.status.set_mcp_summary(Some(parts.join(" ")));
+    }
 }

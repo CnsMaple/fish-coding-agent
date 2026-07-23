@@ -742,7 +742,7 @@ impl App {
                     self.status.set_max_output_tokens(stored.max_output_tokens);
                 }
                 self.status.set_auto_compact(stored.auto_compact);
-                self.status.set_mcp_summary(stored.mcp_summary.clone());
+                self.refresh_mcp_summary();
                 self.focus_target = FocusTarget::Input;
                 self.function_panel_cursor = None;
                 if stored.todo_items.is_empty() {
@@ -842,7 +842,7 @@ impl App {
                     self.status.set_max_output_tokens(stored.max_output_tokens);
                 }
                 self.status.set_auto_compact(stored.auto_compact);
-                self.status.set_mcp_summary(stored.mcp_summary.clone());
+                self.refresh_mcp_summary();
                 self.session.invalidate_layout_cache();
                 if !stored.todo_items.is_empty() {
                     self.open_todo_tab();

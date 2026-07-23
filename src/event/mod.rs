@@ -229,7 +229,7 @@ where
         let sink = crate::mcp::AppMsgEventSink::new(tx_for_mcp);
         svc.bind_event_sink(std::sync::Arc::new(sink)).await;
     }
-    refresh_mcp_summary(app);
+    app.refresh_mcp_summary();
 
     // Eagerly fetch models.dev data in the background so the
     // provider list in /settings is populated when the user opens it.
@@ -640,43 +640,6 @@ fn handle_todowrite_result(app: &mut App, content: &str) {
     }
 }
 
-/// Refresh the MCP status summary displayed in the status bar.
-/// Reads the live snapshot from the MCP service and aggregates
-/// per-server statuses into a compact string like `"2✓ 1✗"`.
-fn refresh_mcp_summary(app: &mut App) {
-    let snap = crate::mcp::try_snapshot_or_empty();
-    let mut connected = 0u32;
-    let mut failed = 0u32;
-    let mut other = 0u32;
-
-    for status in snap.status.values() {
-        match status {
-            crate::mcp::McpStatus::Connected => connected += 1,
-            crate::mcp::McpStatus::Failed { .. } => failed += 1,
-            crate::mcp::McpStatus::Disabled => {}
-            _ => other += 1,
-        }
-    }
-
-    let active = connected + failed + other;
-    if active == 0 {
-        app.status.set_mcp_summary(None);
-        return;
-    }
-
-    let mut parts = Vec::new();
-    if connected > 0 {
-        parts.push(format!("{connected}✓"));
-    }
-    if failed > 0 {
-        parts.push(format!("{failed}✗"));
-    }
-    if other > 0 {
-        parts.push(format!("{other}⚠"));
-    }
-    app.status.set_mcp_summary(Some(parts.join(" ")));
-}
-
 fn handle_msg(msg: AppMsg, app: &mut App) {
     match msg {
         AppMsg::ChatDelta(s) => {
@@ -1000,7 +963,7 @@ fn handle_msg(msg: AppMsg, app: &mut App) {
         }
         AppMsg::McpStatusChanged { name, status } => {
             tracing::debug!(server = %name, status = %status.label(), "mcp status changed");
-            refresh_mcp_summary(app);
+            app.refresh_mcp_summary();
         }
         AppMsg::McpAuthRequired { server, url, error } => {
             if !url.is_empty() {
