@@ -274,16 +274,19 @@ impl CommandPaletteState {
                 .collect();
             self.clamp_cursor();
         } else {
-            self.entries = Self::build_all()
+            let mut scored: Vec<(u32, PaletteEntry)> = Self::build_all()
                 .into_iter()
-                .filter(|e| {
-                    let name = match e {
-                        PaletteEntry::Command { name, .. } => name,
-                        PaletteEntry::Skill { name, .. } => name.as_str(),
-                    };
-                    name.to_lowercase().contains(&q) || crate::fuzzy::score(&q, name).is_some()
+                .filter_map(|e| {
+                    let name = e.name().unwrap_or("");
+                    if name.to_lowercase().contains(&q) {
+                        Some((crate::fuzzy::score(&q, name).unwrap_or(0), e))
+                    } else {
+                        crate::fuzzy::score(&q, name).map(|sc| (sc, e))
+                    }
                 })
                 .collect();
+            scored.sort_by_key(|&(sc, _)| sc);
+            self.entries = scored.into_iter().map(|(_, e)| e).collect();
         }
         self.clamp_cursor();
     }
@@ -1717,18 +1720,23 @@ impl SessionPickerState {
 
     pub fn rebuild_filter(&mut self) {
         let q = self.query.to_lowercase();
-        self.filtered = self
-            .entries
-            .iter()
-            .enumerate()
-            .filter(|(_, e)| {
-                q.is_empty()
-                    || e.title.to_lowercase().contains(&q)
-                    || e.cwd.to_lowercase().contains(&q)
-                    || e.id.to_lowercase().contains(&q)
-            })
-            .map(|(i, _)| i)
-            .collect();
+        if q.is_empty() {
+            self.filtered = (0..self.entries.len()).collect();
+        } else {
+            let mut scored: Vec<(u32, usize)> = self
+                .entries
+                .iter()
+                .enumerate()
+                .filter_map(|(i, e)| {
+                    crate::fuzzy::score(&q, &e.title)
+                        .or_else(|| crate::fuzzy::score(&q, &e.cwd))
+                        .or_else(|| crate::fuzzy::score(&q, &e.id))
+                        .map(|sc| (sc, i))
+                })
+                .collect();
+            scored.sort_by_key(|&(sc, i)| (sc, i));
+            self.filtered = scored.into_iter().map(|(_, i)| i).collect();
+        }
         if self.cursor >= self.filtered.len() {
             self.cursor = self.filtered.len().saturating_sub(1);
         }
