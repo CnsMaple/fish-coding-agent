@@ -164,6 +164,7 @@ pub(super) fn handle_command_palette_key(
                         }
                     }
                     close_active_function_tab(app);
+                    app.focus_target = crate::function::FocusTarget::Input;
                     true
                 }
             }
@@ -196,6 +197,7 @@ pub(super) fn handle_command_palette_key(
                 }
             }
             close_active_function_tab(app);
+            app.focus_target = crate::function::FocusTarget::Input;
             true
         }
         KeyCode::Up => {
