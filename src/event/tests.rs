@@ -1040,7 +1040,6 @@ fn enter_action_matrix_matches_labels() {
 }
 
 #[test]
-#[test]
 fn dispatch_skill_sends_immediately_with_skill_ref() {
     // /skill:<name> (or dispatch("skill", name)) used to populate
     // the input buffer for the user to edit. The contract changed:
@@ -1927,6 +1926,7 @@ fn esc_key() -> KeyEvent {
     KeyEvent::new(KeyCode::Esc, KeyModifiers::empty())
 }
 
+#[allow(dead_code)]
 fn enter_key() -> KeyEvent {
     KeyEvent::new(KeyCode::Enter, KeyModifiers::empty())
 }

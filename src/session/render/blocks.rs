@@ -320,6 +320,8 @@ pub(super) fn build_tool_block_rows(
             width,
             bg,
         )
+    } else if tool.name == "todowrite" {
+        build_todowrite_rows(&tool.content, visible, preview_lines, width, bg)
     } else {
         let (output, footer) = tool_display_content(tool);
         let title_highlighted = tool.name == "shell_command" || tool.name == "command";
@@ -1092,12 +1094,44 @@ pub(super) fn box_row_line(text: &str, width: usize, bg: Color) -> Line<'static>
     let text = strip_control_chars(text);
     let text = truncate_str_to_width(&text, max_content);
     let pad = max_content.saturating_sub(visible_width(&text));
-    Line::from(vec![
+    let line = Line::from(vec![
         Span::styled("| ", dim_bg_style(bg)),
-        Span::styled(text, bg_style(bg)),
+        Span::styled(text.clone(), bg_style(bg)),
         Span::styled(" ".repeat(pad), bg_style(bg)),
         Span::styled(" |", dim_bg_style(bg)),
-    ])
+    ]);
+    if line.width() == width {
+        line
+    } else {
+        eprintln!(
+            "[box_row_line] width mismatch: Line::width()={} != width={}, pad={}, max_content={}",
+            line.width(),
+            width,
+            pad,
+            max_content
+        );
+        let mut flat = String::new();
+        flat.push_str("| ");
+        flat.push_str(&text);
+        let pad_str = " ".repeat(pad);
+        flat.push_str(&pad_str);
+        flat.push_str(" |");
+        let flat = truncate_str_to_width(&flat, width);
+        let flat_pad = width.saturating_sub(visible_width(&flat));
+        let flat_str = if flat_pad > 0 {
+            let mut s = flat;
+            if s.ends_with(" |") {
+                let pos = s.len() - 2;
+                s.insert_str(pos, &" ".repeat(flat_pad));
+            } else {
+                s.push_str(&" ".repeat(flat_pad));
+            }
+            s
+        } else {
+            flat
+        };
+        Line::from(Span::styled(flat_str, bg_style(bg)))
+    }
 }
 
 fn box_row_line_dim(text: &str, width: usize) -> Line<'static> {
@@ -1106,10 +1140,40 @@ fn box_row_line_dim(text: &str, width: usize) -> Line<'static> {
     let text = truncate_str_to_width(&text, max_content);
     let pad = max_content.saturating_sub(visible_width(&text));
     let line_str = format!("| {}{} |", text, " ".repeat(pad));
-    Line::from(Span::styled(
-        line_str,
+    let line = Line::from(Span::styled(
+        line_str.clone(),
         Style::default().add_modifier(Modifier::DIM),
-    ))
+    ));
+    if line.width() == width {
+        line
+    } else {
+        eprintln!(
+            "[box_row_line_dim] width mismatch: Line::width()={} != width={}, pad={}, max_content={}, text_len={}",
+            line.width(),
+            width,
+            pad,
+            max_content,
+            visible_width(&text),
+        );
+        let flat = truncate_str_to_width(&line_str, width);
+        let flat_pad = width.saturating_sub(visible_width(&flat));
+        let flat_str = if flat_pad > 0 {
+            let mut s = flat;
+            if s.ends_with(" |") {
+                let pos = s.len() - 2;
+                s.insert_str(pos, &" ".repeat(flat_pad));
+            } else {
+                s.push_str(&" ".repeat(flat_pad));
+            }
+            s
+        } else {
+            flat
+        };
+        Line::from(Span::styled(
+            flat_str,
+            Style::default().add_modifier(Modifier::DIM),
+        ))
+    }
 }
 
 fn box_row_line_spans(spans: Vec<Span<'static>>, width: usize, bg: Color) -> Line<'static> {
@@ -1365,6 +1429,80 @@ fn build_python_command_rows(
         rows.push(border_line(width, bg));
     }
     Some(rows)
+}
+
+/// Render a `todowrite` tool result as a stylised todo list with
+/// status icons and colours inside a boxed block.
+fn build_todowrite_rows(
+    content: &str,
+    visible: bool,
+    preview_lines: usize,
+    width: usize,
+    bg: Color,
+) -> Vec<Line<'static>> {
+    let width = width.max(4);
+    let mut rows = Vec::new();
+
+    // Parse todos from the inner JSON
+    let todos: Vec<(String, String)> = serde_json::from_str::<serde_json::Value>(content)
+        .ok()
+        .and_then(|v| {
+            v.get("todos")?.as_array().map(|arr| {
+                arr.iter()
+                    .filter_map(|item| {
+                        let content = item.get("content")?.as_str()?.to_string();
+                        let status = item
+                            .get("status")
+                            .and_then(|s| s.as_str())
+                            .unwrap_or("pending")
+                            .to_string();
+                        Some((content, status))
+                    })
+                    .collect::<Vec<_>>()
+            })
+        })
+        .unwrap_or_default();
+
+    let title = format!(" todowrite ({} items) ", todos.len());
+    rows.push(border_with_label_line(width, &title, bg));
+
+    let inner_w = width.saturating_sub(4).max(1);
+
+    if todos.is_empty() {
+        rows.extend(box_row_lines("(no tasks)", width, bg));
+    } else if visible || todos.len() <= preview_lines {
+        // Show all items
+        for (todo_content, status) in &todos {
+            let (icon, fg) = match status.as_str() {
+                "completed" => (" \u{2713}", Color::Green),  // ✓
+                "in_progress" => (" \u{25CF}", Color::Cyan), // ●
+                _ => (" \u{25CB}", Color::Yellow),           // ○
+            };
+            let line_text = format!("{icon} {todo_content}");
+            for wrapped in wrap_line(&line_text, inner_w) {
+                let spans = vec![Span::styled(wrapped, Style::default().fg(fg).bg(bg))];
+                rows.push(box_row_line_spans(spans, width, bg));
+            }
+        }
+    } else {
+        let skip = todos.len() - preview_lines;
+        for (todo_content, status) in todos.iter().skip(skip) {
+            let (icon, fg) = match status.as_str() {
+                "completed" => (" \u{2713}", Color::Green),
+                "in_progress" => (" \u{25CF}", Color::Cyan),
+                _ => (" \u{25CB}", Color::Yellow),
+            };
+            let line_text = format!("{icon} {todo_content}");
+            for wrapped in wrap_line(&line_text, inner_w) {
+                let spans = vec![Span::styled(wrapped, Style::default().fg(fg).bg(bg))];
+                rows.push(box_row_line_spans(spans, width, bg));
+            }
+        }
+        rows.push(click_hint_line(skip, width, bg));
+    }
+
+    rows.push(border_line(width, bg));
+    rows
 }
 
 fn tool_display_content(tool: &ToolResultBlock) -> (String, String) {
