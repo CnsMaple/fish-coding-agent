@@ -345,7 +345,6 @@ pub enum SidebarTab {
     SessionPicker(SessionPickerState),
     SessionRename(SessionRenameState),
     Plan(PlanState),
-    Ask(AskState),
     Todo(TodoTabState),
     ToolPicker(ToolPickerState),
     Hotkey,
@@ -364,7 +363,7 @@ impl SidebarTab {
     /// current app state and available width. Used to compute a dynamic
     /// panel height that shrinks to fit the content and expands up to
     /// the 30% cap.
-    pub fn content_lines(&self, app: &crate::function::App, width: u16) -> usize {
+    pub fn content_lines(&self, app: &crate::function::App, _width: u16) -> usize {
         match self {
             Self::PastePreview(s) => {
                 if s.image.is_some() {
@@ -420,46 +419,6 @@ impl SidebarTab {
             }
             Self::SessionRename(_) => 1,
             Self::Plan(_) => 3,
-            Self::Ask(s) => {
-                use crate::function::AskPhase;
-                use crate::ui::function_panel::wrap_plain_text;
-                // Match the body-area width used in render_body:
-                // panel_outer - 2 (borders) - 1 (clip slack) → width - 3
-                let w = (width.saturating_sub(3) as usize).max(8);
-                match s.phase {
-                    AskPhase::Asking => s
-                        .items
-                        .get(s.active.min(s.items.len().saturating_sub(1)))
-                        .map(|it| {
-                            let mut total = 0usize;
-                            // Question: wrapped at w-3, continuation has 3-space indent
-                            total +=
-                                wrap_plain_text(&it.question, w.saturating_sub(3).max(1)).len();
-                            let opt_cw = w.saturating_sub(5).max(1);
-                            for opt in &it.options {
-                                total += wrap_plain_text(opt, opt_cw).len();
-                            }
-                            let label = if it.custom_input.is_empty() {
-                                "Type your own answer…".to_string()
-                            } else {
-                                format!("Custom: [{}]", it.custom_input)
-                            };
-                            total += wrap_plain_text(&label, opt_cw).len();
-                            total.max(1)
-                        })
-                        .unwrap_or(1),
-                    AskPhase::Reviewing => {
-                        let mut total = 0usize;
-                        let cw = w.saturating_sub(3).max(1);
-                        for (i, it) in s.items.iter().enumerate() {
-                            let ans = it.answered.as_deref().unwrap_or("(no answer)");
-                            let body = format!("Q{}. {}  →  {ans}", i + 1, it.question);
-                            total += wrap_plain_text(&body, cw).len();
-                        }
-                        total.max(1) + 1
-                    }
-                }
-            }
             Self::Todo(_) => app.session.todo_items.len().max(1),
             Self::ToolPicker(s) => {
                 if s.filtered.is_empty() {
@@ -509,7 +468,6 @@ impl SidebarTab {
             Self::SessionPicker(_) => " ",
             Self::SessionRename(_) => " Enter: save | Ctrl+E: edit | Esc: close ",
             Self::Plan(_) => " Enter: approve | Alt+R: reject | Alt+S: save | Esc: close ",
-            Self::Ask(_) => " ",
             Self::Todo(_) => " ",
             Self::ToolPicker(_) => " Space: toggle | Enter: confirm | Esc: close ",
             Self::Hotkey => "",
@@ -1850,174 +1808,6 @@ impl PlanState {
     }
 }
 
-/// One question in the AskState stack. Options are the model-supplied
-/// choices; the last visible row in the picker for THIS question is
-/// the implicit "Type your own answer…" choice, which is not stored
-/// here. `cursor` is the per-question picker row (only meaningful in
-/// `AskPhase::Asking`).
-#[derive(Debug, Clone)]
-pub struct AskItem {
-    pub question: String,
-    pub options: Vec<String>,
-    pub cursor: usize,
-    pub scroll: usize,
-    pub answered: Option<String>,
-    /// Buffer for free-form typing when the cursor is on the
-    /// "Type your own answer…" row.
-    pub custom_input: String,
-}
-
-impl AskItem {
-    pub fn new(question: String, options: Vec<String>) -> Self {
-        Self {
-            question,
-            options,
-            // 0 is the first option; the final row (the implicit
-            // freeform input) is index `options.len()`.
-            cursor: 0,
-            scroll: 0,
-            answered: None,
-            custom_input: String::new(),
-        }
-    }
-
-    /// Number of rows in the picker for THIS question: every option
-    /// plus one for the implicit "Type your own answer…" row.
-    pub fn row_count(&self) -> usize {
-        self.options.len() + 1
-    }
-}
-
-/// Phase of the ask picker.
-///
-/// - `Asking` — the user is picking an answer for the active
-///   question. Enter writes the answer (advancing or going to
-///   Reviewing when every question is answered), Up/Down moves the
-///   picker row, Left/Right switches the active question.
-/// - `Reviewing` — every question has an answer; the tab shows a
-///   read-only preview of all Q/A pairs. Enter sends the whole batch
-///   to the LLM; Esc goes back to `Asking` so the user can fix one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AskPhase {
-    Asking,
-    Reviewing,
-}
-
-/// Multiple `ask` tool calls (possibly issued in parallel) are
-/// queued into a single `AskState`. The tab strip in the UI shows
-/// every question as a sub-tab (`Q1 Q2 Q3 Confirm`) and one
-/// question is rendered at a time.
-#[derive(Debug, Clone)]
-pub struct AskState {
-    pub items: Vec<AskItem>,
-    /// Active question in `Asking` phase; the picker shows this
-    /// question's options.
-    pub active: usize,
-    pub phase: AskPhase,
-    /// Scroll offset for the body view.
-    pub scroll: usize,
-    /// When true, the user is editing a custom answer via the main
-    /// input buffer. Enter on the freeform row copies `custom_input`
-    /// to `app.input.buffer`, sets this flag, and saves a snapshot.
-    pub editing_custom: bool,
-    /// Snapshot of `app.input.buffer` taken before entering edit mode,
-    /// restored on Esc (cancel).
-    pub saved_input_buffer: String,
-}
-
-impl AskState {
-    pub fn new(question: String, options: Vec<String>) -> Self {
-        Self {
-            items: vec![AskItem::new(question, options)],
-            active: 0,
-            phase: AskPhase::Asking,
-            scroll: 0,
-            editing_custom: false,
-            saved_input_buffer: String::new(),
-        }
-    }
-
-    /// Append a new question (typically from a parallel `ask` tool
-    /// call). The new question becomes the active one so the user
-    /// can answer it next.
-    pub fn push(&mut self, question: String, options: Vec<String>) {
-        self.items.push(AskItem::new(question, options));
-        self.active = self.items.len() - 1;
-        // Adding a question puts us back in the asking phase: the
-        // user has at least one new thing to answer.
-        self.phase = AskPhase::Asking;
-        self.editing_custom = false;
-    }
-
-    /// Number of rows in the picker for the active question
-    /// (options + implicit "Type your own…" choice).
-    pub fn row_count(&self) -> usize {
-        self.items
-            .get(self.active)
-            .map(|it| it.row_count())
-            .unwrap_or(0)
-    }
-
-    /// True if every question in the queue has an answer.
-    pub fn all_answered(&self) -> bool {
-        !self.items.is_empty() && self.items.iter().all(|it| it.answered.is_some())
-    }
-
-    /// Find the next unanswered question after `from`, wrapping.
-    /// Returns `None` if everything is already answered.
-    pub fn next_unanswered(&self, from: usize) -> Option<usize> {
-        let n = self.items.len();
-        if n == 0 {
-            return None;
-        }
-        for offset in 0..n {
-            let idx = (from + offset) % n;
-            if self.items[idx].answered.is_none() {
-                return Some(idx);
-            }
-        }
-        None
-    }
-
-    /// Build the user-message that gets sent to the LLM in the
-    /// reviewing phase. One paragraph per Q/A pair, in the original
-    /// order. Free-form answers are stored verbatim (the user typed
-    /// them in the main input, prefixed with the question by the
-    /// `submit_input` flow that triggered the answer).
-    pub fn build_summary(&self) -> String {
-        let mut out = String::from("(Answers to your questions:)\n");
-        for (i, it) in self.items.iter().enumerate() {
-            if let Some(ans) = &it.answered {
-                out.push_str(&format!("\nQ{}. {}\n   A. {}\n", i + 1, it.question, ans));
-            }
-        }
-        out.push_str("\n(All questions answered. Proceed.)");
-        out
-    }
-
-    /// Build the dismiss message for Esc. Includes any answers the
-    /// user already gave (they were on record), and notes each
-    /// unanswered question as "dismissed" so the LLM knows to fill
-    /// in defaults or proceed.
-    pub fn build_dismiss_summary(&self) -> String {
-        let mut out = String::from("(Ask round dismissed by the user.)\n");
-        for (i, it) in self.items.iter().enumerate() {
-            match &it.answered {
-                Some(ans) => {
-                    out.push_str(&format!("\nQ{}. {}\n   A. {}\n", i + 1, it.question, ans))
-                }
-                None => out.push_str(&format!(
-                    "\nQ{}. {}\n   A. (dismissed — no explicit answer)\n",
-                    i + 1,
-                    it.question
-                )),
-            }
-        }
-        out.push_str("\n(Proceed using the answers above, or sensible defaults.)");
-        out
-    }
-}
-
 /// Top-level state for the function panel.
 #[derive(Debug)]
 pub struct FunctionPanel {
@@ -2046,7 +1836,6 @@ impl FunctionPanel {
             Some(SidebarTab::SessionPicker(_)) => "sessions",
             Some(SidebarTab::SessionRename(_)) => "rename",
             Some(SidebarTab::Plan(_)) => "plan",
-            Some(SidebarTab::Ask(_)) => "ask",
             Some(SidebarTab::Todo(_)) => "todo",
             Some(SidebarTab::ToolPicker(_)) => "tools",
             Some(SidebarTab::Hotkey) => "hotkey",

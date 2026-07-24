@@ -269,14 +269,24 @@ pub(super) fn tool_defs() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "ask",
-            description: "Ask the user a clarifying question. The question is shown in the session and as a toast. The user types their answer into the main input; the conversation resumes when they submit. Use this in plan mode to confirm tradeoffs before drafting a plan, and in build mode when a single decision blocks the next step.".to_string(),
+            description: "Ask the user one or more clarifying questions. All questions are shown in a single block in the session. The user types their answers into the main input; the conversation resumes when they submit. Use this in plan mode to confirm tradeoffs before drafting a plan, and in build mode when a decision blocks the next step.".to_string(),
             schema: json!({
                 "type": "object",
                 "properties": {
-                    "question": { "type": "string", "description": "The question to present to the user." },
-                    "options": { "type": "array", "items": { "type": "string" }, "description": "Optional list of suggested answers; rendered as bullets under the question." }
+                    "questions": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "question": { "type": "string", "description": "A question to present to the user." },
+                                "options": { "type": "array", "items": { "type": "string" }, "description": "Optional list of suggested answers; rendered as bullets under the question." }
+                            },
+                            "required": ["question"]
+                        },
+                        "description": "One or more questions to ask the user. All questions are shown together in a single block."
+                    }
                 },
-                "required": ["question"],
+                "required": ["questions"],
                 "additionalProperties": false
             }),
         },

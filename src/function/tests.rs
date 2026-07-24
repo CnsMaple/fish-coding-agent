@@ -145,89 +145,6 @@ fn open_plan_keeps_input_focus_while_showing_panel() {
 }
 
 #[test]
-fn open_ask_pushes_first_question() {
-    let mut app = make_test_app();
-    app.open_ask("Q?".to_string(), vec!["a".to_string(), "b".to_string()]);
-    // Notifications tab at 0, Ask tab at 1.
-    let state = match app.function.tabs.get(1) {
-        Some(SidebarTab::Ask(s)) => s.clone(),
-        _ => panic!("expected ask tab"),
-    };
-    assert_eq!(state.items.len(), 1);
-    assert_eq!(state.items[0].question, "Q?");
-    assert_eq!(state.items[0].options, vec!["a", "b"]);
-    // The per-question cursor starts on the first option.
-    assert_eq!(state.items[0].cursor, 0);
-}
-
-#[test]
-fn open_ask_appends_to_existing_tab() {
-    let mut app = make_test_app();
-    app.open_ask("first".to_string(), vec!["a".to_string()]);
-    app.open_ask("second".to_string(), vec!["x".to_string(), "y".to_string()]);
-    let state = match app.function.tabs.get(1) {
-        Some(SidebarTab::Ask(s)) => s.clone(),
-        _ => panic!(),
-    };
-    assert_eq!(state.items.len(), 2);
-    // Adding a question makes it the active one so the user
-    // answers it next.
-    assert_eq!(state.active, 1);
-    assert_eq!(state.items[1].question, "second");
-}
-
-#[test]
-fn ask_row_count_includes_options_and_freeform() {
-    let s = AskState::new("q".to_string(), vec!["a".into(), "b".into(), "c".into()]);
-    // The picker for this question has 3 options + 1 implicit
-    // "Type your own answer…" row.
-    assert_eq!(s.items[0].row_count(), 4);
-    assert_eq!(s.row_count(), 4);
-}
-
-#[test]
-fn ask_all_answered_after_picking_last() {
-    let mut s = AskState::new("q".to_string(), vec!["a".into()]);
-    s.items[0].answered = Some("a".to_string());
-    assert!(s.all_answered());
-}
-
-#[test]
-fn ask_all_answered_false_when_pending() {
-    let s = AskState::new("q".to_string(), vec!["a".into()]);
-    assert!(!s.all_answered());
-}
-
-#[test]
-fn ask_next_unanswered_wraps() {
-    let mut s = AskState::new("q1".to_string(), vec!["a".into()]);
-    s.push("q2".to_string(), vec!["b".into()]);
-    s.push("q3".to_string(), vec!["c".into()]);
-    s.items[0].answered = Some("a".to_string());
-    s.items[2].answered = Some("c".to_string());
-    // From index 1, the next unanswered is index 1 itself.
-    assert_eq!(s.next_unanswered(1), Some(1));
-    // From index 2 (answered), wrap and find index 1.
-    assert_eq!(s.next_unanswered(2), Some(1));
-    // From index 0 (answered), wrap and find index 1.
-    assert_eq!(s.next_unanswered(0), Some(1));
-}
-
-#[test]
-fn ask_build_summary_lists_all_pairs() {
-    let mut s = AskState::new("Q1?".to_string(), vec!["a".into()]);
-    s.push("Q2?".to_string(), vec!["x".into()]);
-    s.items[0].answered = Some("a".to_string());
-    s.items[1].answered = Some("x".to_string());
-    let summary = s.build_summary();
-    assert!(summary.contains("Q1"));
-    assert!(summary.contains("Q2"));
-    assert!(summary.contains("a"));
-    assert!(summary.contains("x"));
-    assert!(summary.contains("Proceed"));
-}
-
-#[test]
 fn thinking_picker_ensure_cursor_visible_scrolls_down() {
     use crate::function::ThinkingPickerState;
     let mut s = ThinkingPickerState::new();
@@ -257,15 +174,4 @@ fn thinking_picker_no_scroll_when_fits() {
     s.cursor = 1;
     crate::ui::function_panel::ensure_cursor_visible(s.cursor, &mut s.scroll, 3);
     assert_eq!(s.scroll, 0, "no scroll needed when total fits visible");
-}
-
-/// `push` places the new question at the end and makes it
-/// active so the user can answer it next.
-#[test]
-fn ask_push_makes_new_question_active() {
-    let mut s = AskState::new("q1".to_string(), vec!["a".into()]);
-    s.items[0].cursor = 1; // user has scrolled within q1
-    s.push("q2".to_string(), vec!["x".into()]);
-    assert_eq!(s.active, 1);
-    assert_eq!(s.items[1].cursor, 0);
 }

@@ -297,30 +297,43 @@ pub(super) async fn plan_review(args: &str) -> Result<String> {
 
 pub(super) async fn ask_question(args: &str) -> Result<String> {
     let value: serde_json::Value = serde_json::from_str(args)?;
-    let question = value
-        .get("question")
-        .and_then(|v| v.as_str())
-        .map(str::trim)
-        .unwrap_or("");
-    if question.is_empty() {
-        return Err(anyhow!("question is empty"));
-    }
-    let options: Vec<String> = value
-        .get("options")
+    let questions = value
+        .get("questions")
         .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(|s| s.trim().to_string()))
-                .filter(|s| !s.is_empty())
-                .collect()
+        .ok_or_else(|| anyhow!("`questions` must be a non-empty array"))?;
+    if questions.is_empty() {
+        return Err(anyhow!("`questions` array is empty"));
+    }
+    let parsed: Vec<serde_json::Value> = questions
+        .iter()
+        .map(|q| {
+            let question = q
+                .get("question")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .unwrap_or("")
+                .to_string();
+            if question.is_empty() {
+                return Err(anyhow!("a question in the array is empty"));
+            }
+            let options: Vec<String> = q
+                .get("options")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.trim().to_string()))
+                        .filter(|s| !s.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default();
+            Ok(json!({ "question": question, "options": options }))
         })
-        .unwrap_or_default();
+        .collect::<Result<Vec<_>>>()?;
     Ok(json!({
         "kind": "ask",
-        "question": question,
-        "options": options,
+        "questions": parsed,
         "status": "pending",
-        "instruction": "Do not call this tool again. The question is now shown to the user in the session. Stop and wait for the user to type their answer into the main input. Their reply will be sent back to you automatically -- you will be re-prompted with the user's response."
+        "instruction": "Do not call this tool again. The questions are now shown to the user in the session. Stop and wait for the user to type their answers into the main input. Their replies will be sent back to you automatically -- you will be re-prompted with the user's response."
     })
     .to_string())
 }

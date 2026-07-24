@@ -182,11 +182,11 @@ async fn plan_tool_payload_contains_kind() {
 }
 
 #[tokio::test]
-async fn ask_tool_payload_contains_kind_and_question() {
+async fn ask_tool_payload_contains_kind_and_questions() {
     let result = execute_tool_with_agent(
         crate::permission::Agent::Plan,
         "ask",
-        r#"{"question":"which API?","options":["v1","v2"]}"#,
+        r#"{"questions":[{"question":"which API?","options":["v1","v2"]}]}"#,
         Path::new("."),
     )
     .await;
@@ -195,20 +195,25 @@ async fn ask_tool_payload_contains_kind_and_question() {
     let inner: serde_json::Value =
         serde_json::from_str(v.get("result").and_then(|s| s.as_str()).unwrap()).unwrap();
     assert_eq!(inner.get("kind").and_then(|s| s.as_str()), Some("ask"));
+    let questions = inner.get("questions").and_then(|s| s.as_array()).unwrap();
+    assert_eq!(questions.len(), 1);
     assert_eq!(
-        inner.get("question").and_then(|s| s.as_str()),
+        questions[0].get("question").and_then(|s| s.as_str()),
         Some("which API?")
     );
-    let options = inner.get("options").and_then(|s| s.as_array()).unwrap();
+    let options = questions[0]
+        .get("options")
+        .and_then(|s| s.as_array())
+        .unwrap();
     assert_eq!(options.len(), 2);
 }
 
 #[tokio::test]
-async fn ask_tool_rejects_empty_question() {
+async fn ask_tool_rejects_empty_questions() {
     let result = execute_tool_with_agent(
         crate::permission::Agent::Build,
         "ask",
-        r#"{"question":"   "}"#,
+        r#"{"questions":[]}"#,
         Path::new("."),
     )
     .await;

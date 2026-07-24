@@ -4,8 +4,7 @@
 
 use crate::theme::Theme;
 use crate::ui::function_panel::{
-    ask_active_question_lines, ask_review_lines, ensure_cursor_visible, list_item,
-    render_new_provider_picker, visible_window,
+    ensure_cursor_visible, list_item, render_new_provider_picker, visible_window,
 };
 use crate::ui::tab_widget::{TabCtx, TabWidget};
 use ratatui::buffer::Buffer;
@@ -550,133 +549,6 @@ impl TabWidget for crate::function::PlanState {
             );
         }
         None
-    }
-}
-
-impl TabWidget for crate::function::AskState {
-    fn title(&self) -> &str {
-        "ask"
-    }
-    fn hint(&self) -> &str {
-        " "
-    }
-    fn content_height(&self, _ctx: &TabCtx) -> usize {
-        use crate::function::AskPhase;
-        match self.phase {
-            AskPhase::Asking => {
-                let active = self.active.min(self.items.len().saturating_sub(1));
-                self.items
-                    .get(active)
-                    .map(|it| 1 + it.options.len() + 1)
-                    .unwrap_or(1)
-            }
-            AskPhase::Reviewing => self.items.len(),
-        }
-    }
-    fn render_body(&mut self, area: Rect, buf: &mut Buffer, _ctx: &TabCtx) -> Option<(u16, u16)> {
-        use crate::function::AskPhase;
-        if area.height < 1 {
-            return None;
-        }
-        let total = self.items.len();
-        let active_idx = self.active.min(total.saturating_sub(1));
-        if total > 0 {
-            let mut tab_spans: Vec<Span> = Vec::new();
-            for (i, it) in self.items.iter().enumerate() {
-                let answered = it.answered.is_some();
-                let label = format!("q{}", i + 1);
-                let (style, mark) = if self.phase == AskPhase::Asking && i == active_idx {
-                    (
-                        Theme::underlined().add_modifier(ratatui::style::Modifier::BOLD),
-                        " ",
-                    )
-                } else if answered {
-                    (Theme::dim(), "\u{2713}")
-                } else {
-                    (Theme::base(), " ")
-                };
-                tab_spans.push(Span::styled(format!(" {mark}{label} "), style));
-            }
-            if total > 0 && (self.all_answered() || self.phase == AskPhase::Reviewing) {
-                let style = if self.phase == AskPhase::Reviewing {
-                    Theme::underlined().add_modifier(ratatui::style::Modifier::BOLD)
-                } else {
-                    Theme::dim()
-                };
-                tab_spans.push(Span::styled(" confirm ", style));
-            }
-            if !tab_spans.is_empty() {
-                buf.set_line(area.x, area.y, &Line::from(tab_spans), area.width);
-            }
-        }
-        let body_area = Rect {
-            y: area.y + 1,
-            height: area.height.saturating_sub(1),
-            ..area
-        };
-        // Use width-1 so wrapping happens BEFORE the clip boundary.
-        // This ensures the next typed character immediately appears on
-        // the continuation line instead of being silently clipped.
-        let w = (body_area.width as usize).saturating_sub(1).max(8);
-        let (body_lines, row_starts) = match self.phase {
-            AskPhase::Asking => ask_active_question_lines(self, active_idx, w),
-            AskPhase::Reviewing => ask_review_lines(self, w),
-        };
-        let total_display_lines = body_lines.len();
-        if total_display_lines == 0 {
-            return None;
-        }
-        // Convert logical cursor to display-line index via row_starts.
-        let cursor_dl = match self.phase {
-            AskPhase::Asking => {
-                let logical = self.items[active_idx].cursor + 1; // +1 for question row
-                row_starts.get(logical).copied().unwrap_or(0)
-            }
-            AskPhase::Reviewing => row_starts.get(self.active).copied().unwrap_or(0),
-        };
-        // Display-line-level scroll with cursor-visible enforcement.
-        let vh = body_area.height as usize;
-        let max_scroll = total_display_lines.saturating_sub(vh);
-        let scroll = &mut self.scroll;
-        if *scroll > max_scroll {
-            *scroll = max_scroll;
-        }
-        if cursor_dl < *scroll {
-            *scroll = cursor_dl;
-        } else if cursor_dl >= *scroll + vh {
-            *scroll = cursor_dl.saturating_add(1).saturating_sub(vh);
-        }
-        *scroll = (*scroll).min(max_scroll);
-        // Clear the body area before rendering to prevent ghost
-        // characters from previous frames.
-        for cy in body_area.y..body_area.y + body_area.height {
-            for cx in body_area.x..body_area.x + body_area.width {
-                buf[(cx, cy)].set_symbol(" ");
-            }
-        }
-        // Render visible display lines.
-        let end = (*scroll + vh).min(total_display_lines);
-        for (row, line) in body_lines.iter().enumerate().take(end).skip(*scroll) {
-            let y = body_area.y + (row - *scroll) as u16;
-            buf.set_line(body_area.x, y, line, body_area.width);
-        }
-        None
-    }
-    fn render_hint(&self, area: Rect, buf: &mut Buffer, _ctx: &TabCtx) {
-        use crate::function::AskPhase;
-        let hint = if self.editing_custom {
-            " Enter: done | Esc: cancel | \u{2190}/\u{2192}: switch "
-        } else {
-            match self.phase {
-                AskPhase::Asking => {
-                    " \u{2191}/\u{2193}: navigate | \u{2190}/\u{2192}: switch | Enter: pick | Esc: cancel "
-                }
-                AskPhase::Reviewing => {
-                    " \u{2191}/\u{2193}: scroll | \u{2190}/\u{2192}: switch | Enter: send all | Esc: cancel "
-                }
-            }
-        };
-        Paragraph::new(Line::from(Span::styled(hint, Theme::dim()))).render(area, buf);
     }
 }
 

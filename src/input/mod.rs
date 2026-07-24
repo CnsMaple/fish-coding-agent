@@ -1061,7 +1061,6 @@ pub fn sidebar_tab_name(t: &SidebarTab) -> &'static str {
         SidebarTab::SessionPicker(_) => "sessions",
         SidebarTab::SessionRename(_) => "rename",
         SidebarTab::Plan(_) => "plan",
-        SidebarTab::Ask(_) => "ask",
         SidebarTab::Todo(_) => "todo",
         SidebarTab::ToolPicker(_) => "tools",
         SidebarTab::Hotkey => "hotkey",

@@ -978,61 +978,10 @@ impl App {
         true
     }
 
-    /// Open (or extend) an ask picker tab. If an Ask tab is already
-    /// open, the new question is appended to its queue and becomes
-    /// the active one.
-    pub fn open_ask(&mut self, question: String, options: Vec<String>) {
-        // Ensure the Notifications tab exists so the toast is recorded.
-        let notif_exists = self
-            .function
-            .tabs
-            .iter()
-            .any(|t| matches!(t, SidebarTab::Notifications));
-        if !notif_exists {
-            self.function.push(SidebarTab::Notifications);
-        }
-        // Surface a short toast summary so the notification panel records it.
-        self.notifications.push(
-            crate::function::notifications::ToastLevel::Info,
-            format!("AI asks: {}", {
-                let s = question.trim();
-                if s.chars().count() > 60 {
-                    let cut: String = s.chars().take(57).collect();
-                    format!("{cut}…")
-                } else {
-                    s.to_string()
-                }
-            }),
-        );
-        // Ensure the panel is visible when it was hidden.
-        if !self.function_visible {
-            self.show_panel();
-        }
-
-        // Also accumulate the merged-list body so a single `+--- Ask
-        // ---+` block can land in the session at the end of the
-        // assistant turn (one block per turn, no matter how many ask
-        // tool calls the model emitted in parallel).
+    /// Append an ask question to the accumulated snapshot.
+    /// Called when the LLM emits an `ask` tool call.
+    pub fn push_ask(&mut self, question: String, options: Vec<String>) {
         self.accumulate_ask_snapshot(&question, &options);
-
-        if let Some((i, _)) = self
-            .function
-            .tabs
-            .iter_mut()
-            .enumerate()
-            .find(|(_, t)| matches!(t, SidebarTab::Ask(_)))
-        {
-            if let SidebarTab::Ask(state) = &mut self.function.tabs[i] {
-                state.push(question, options);
-                state.active = state.items.len().saturating_sub(1);
-            }
-            self.function.active = i;
-        } else {
-            self.function
-                .push(SidebarTab::Ask(AskState::new(question, options)));
-        }
-        self.show_panel();
-        self.acknowledge_panel();
     }
 
     pub fn open_todo_tab(&mut self) {

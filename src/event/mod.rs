@@ -584,26 +584,39 @@ fn open_tool_function_panel(app: &mut App, name: &str, content: &str) {
         return;
     }
     if kind == "ask" {
-        let question = value
-            .get("question")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .trim()
-            .to_string();
-        if question.is_empty() {
-            return;
-        }
-        let options: Vec<String> = value
-            .get("options")
+        let questions = value
+            .get("questions")
             .and_then(|v| v.as_array())
             .map(|arr| {
                 arr.iter()
-                    .filter_map(|v| v.as_str().map(|s| s.trim().to_string()))
-                    .filter(|s| !s.is_empty())
-                    .collect()
+                    .filter_map(|q| {
+                        let question = q
+                            .get("question")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .trim()
+                            .to_string();
+                        if question.is_empty() {
+                            return None;
+                        }
+                        let options: Vec<String> = q
+                            .get("options")
+                            .and_then(|v| v.as_array())
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(|v| v.as_str().map(|s| s.trim().to_string()))
+                                    .filter(|s| !s.is_empty())
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        Some((question, options))
+                    })
+                    .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        app.open_ask(question, options);
+        for (question, options) in questions {
+            app.push_ask(question, options);
+        }
     }
 }
 
