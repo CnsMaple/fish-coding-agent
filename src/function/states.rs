@@ -485,6 +485,7 @@ impl SidebarTab {
                 | Self::SessionPicker(_)
                 | Self::ToolPicker(_)
                 | Self::CommandPalette(_)
+                | Self::Settings(_)
         )
     }
 
@@ -551,7 +552,12 @@ pub fn settings_body_lines(
     let mut lines: Vec<ratatui::text::Line<'static>> = Vec::new();
     match &s.level {
         SettingsLevel::TopLevel => {
-            for _ in 0..8 {
+            let count = if s.query.is_empty() {
+                8
+            } else {
+                s.filtered.len()
+            };
+            for _ in 0..count.max(1) {
                 lines.push(ratatui::text::Line::raw(""));
             }
         }
@@ -978,6 +984,10 @@ pub struct SettingsState {
     /// Error reason when config failed to parse, so we can show it.
     pub load_error: Option<String>,
     pub new_provider: NewProviderPickerState,
+    /// Search query for TopLevel filtering.
+    pub query: String,
+    /// Filtered indices into top-level items (empty = show all).
+    pub filtered: Vec<usize>,
 }
 
 impl SettingsState {
@@ -993,6 +1003,8 @@ impl SettingsState {
             form_error: None,
             load_error: None,
             new_provider: NewProviderPickerState::new(),
+            query: String::new(),
+            filtered: Vec::new(),
         };
         if let Some(cache_path) = model_cache_parent {
             state.new_provider.load_model_dev_providers(cache_path);
@@ -1000,10 +1012,50 @@ impl SettingsState {
         state
     }
 
+    /// The 8 top-level settings item labels.
+    pub fn top_level_keys() -> [&'static str; 8] {
+        [
+            "set provider",
+            "thinking display",
+            "tool display",
+            "enter behavior",
+            "border type",
+            "theme",
+            "auto compact",
+            "tool preview lines",
+        ]
+    }
+
+    /// Rebuild the filtered index list for TopLevel based on `self.query`.
+    pub fn rebuild_filter(&mut self) {
+        if self.query.is_empty() {
+            self.filtered.clear();
+        } else {
+            let q = self.query.to_lowercase();
+            self.filtered = Self::top_level_keys()
+                .iter()
+                .enumerate()
+                .filter_map(|(i, label)| {
+                    if label.contains(&q) || crate::fuzzy::score(&q, label).is_some() {
+                        Some(i)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+        }
+    }
+
     /// Number of items in the current list view (used to clamp cursor).
     pub fn list_len(&self, cfg: &Config) -> usize {
         match &self.level {
-            SettingsLevel::TopLevel => 8, // set provider, thinking display, tool display, enter behavior, border type, theme, auto compact, tool preview lines
+            SettingsLevel::TopLevel => {
+                if self.query.is_empty() {
+                    8
+                } else {
+                    self.filtered.len()
+                }
+            }
             SettingsLevel::ProviderList => 1 + cfg.configured_provider_ids().len(), // new + existing
             SettingsLevel::NewProviderKind => self.new_provider.filtered.len(),
             SettingsLevel::ExistingActions(_) => 2, // edit, delete

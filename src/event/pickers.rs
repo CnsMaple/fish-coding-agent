@@ -1248,6 +1248,25 @@ pub(super) fn handle_settings_key(
             _ => return true,
         }
     }
+    // Search input for TopLevel.
+    if matches!(state.level, crate::function::SettingsLevel::TopLevel) {
+        match k.code {
+            KeyCode::Char(ch) => {
+                state.query.push(ch);
+                state.rebuild_filter();
+                state.cursor = 0;
+                return true;
+            }
+            KeyCode::Backspace => {
+                state.query.pop();
+                state.rebuild_filter();
+                state.cursor = 0;
+                return true;
+            }
+            _ => {}
+        }
+    }
+
     // Navigation keys are level-agnostic.
     match k.code {
         KeyCode::Up => {
@@ -1329,16 +1348,27 @@ pub(super) fn handle_settings_back(app: &mut App, state: &mut crate::function::S
         | SettingsLevel::AutoCompact
         | SettingsLevel::ToolPreviewLines => {
             state.level = SettingsLevel::TopLevel;
+            state.query.clear();
+            state.filtered.clear();
             state.cursor = 0;
             state.clamp_cursor(&app.config);
         }
         SettingsLevel::ProviderList => {
             state.level = SettingsLevel::TopLevel;
+            state.query.clear();
+            state.filtered.clear();
             state.cursor = 0;
         }
         SettingsLevel::TopLevel => {
-            // close the settings tab entirely
-            close_active_function_tab(app);
+            if !state.query.is_empty() {
+                // Clear search instead of closing
+                state.query.clear();
+                state.filtered.clear();
+                state.cursor = 0;
+            } else {
+                // close the settings tab entirely
+                close_active_function_tab(app);
+            }
         }
     }
 }
@@ -1356,10 +1386,16 @@ pub(super) fn handle_settings_enter(app: &mut App, state: &mut crate::function::
     use crate::function::{ConfigField, SettingsLevel};
 
     let cursor = state.cursor;
+    // Map filtered cursor to original index for TopLevel.
+    let orig_cursor = if state.query.is_empty() {
+        cursor
+    } else {
+        state.filtered.get(cursor).copied().unwrap_or(cursor)
+    };
     let level = std::mem::replace(&mut state.level, SettingsLevel::TopLevel);
 
     let new_level = match level {
-        SettingsLevel::TopLevel => match cursor {
+        SettingsLevel::TopLevel => match orig_cursor {
             0 => SettingsLevel::ProviderList,
             1 => SettingsLevel::ThinkingDisplayList,
             2 => SettingsLevel::ToolResultDisplayList,

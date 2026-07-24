@@ -1040,11 +1040,25 @@ impl TabWidget for crate::function::SettingsState {
     fn title(&self) -> &str {
         "settings"
     }
+    fn has_search(&self) -> bool {
+        true
+    }
     fn hint(&self) -> &str {
         " "
     }
     fn content_height(&self, ctx: &TabCtx) -> usize {
         crate::function::settings_body_lines(self, ctx.config).len()
+    }
+    fn render_search(&mut self, area: Rect, buf: &mut Buffer, _ctx: &TabCtx) -> Option<(u16, u16)> {
+        let searching = !self.query.is_empty()
+            || matches!(self.level, crate::function::SettingsLevel::TopLevel);
+        crate::ui::picker_widget::render_search_row(
+            area,
+            buf,
+            &self.query,
+            crate::function::PickerFocus::Search,
+            searching,
+        )
     }
     fn render_body(&mut self, area: Rect, buf: &mut Buffer, ctx: &TabCtx) -> Option<(u16, u16)> {
         use crate::function::SettingsLevel;
@@ -1058,44 +1072,58 @@ impl TabWidget for crate::function::SettingsState {
         let mut body_lines: Vec<Line> = Vec::new();
         match &self.level {
             SettingsLevel::TopLevel => {
-                body_lines.push(list_item(0 == self.cursor, "set provider", None));
-                body_lines.push(list_item(1 == self.cursor, "thinking display", None));
-                body_lines.push(list_item(2 == self.cursor, "tool display", None));
-                body_lines.push(list_item(
-                    3 == self.cursor,
-                    "enter behavior",
-                    Some(cfg.enter_behavior.as_str().to_string()),
-                ));
-                body_lines.push(list_item(
-                    4 == self.cursor,
-                    "border type",
-                    Some(cfg.border_type.as_str().to_string()),
-                ));
-                body_lines.push(list_item(
-                    5 == self.cursor,
-                    "theme",
-                    Some(cfg.theme.as_str().to_string()),
-                ));
-                body_lines.push(list_item(
-                    6 == self.cursor,
-                    "auto compact",
-                    Some(if cfg.auto_compact {
-                        "on".to_string()
-                    } else {
-                        "off".to_string()
-                    }),
-                ));
-                body_lines.push(list_item(
-                    7 == self.cursor,
-                    "tool preview lines",
-                    Some(format!(
-                        "{}",
-                        cfg.tool_preview_lines.clamp(
-                            crate::config::TOOL_PREVIEW_LINES_MIN,
-                            crate::config::TOOL_PREVIEW_LINES_MAX
-                        )
-                    )),
-                ));
+                let indices: Vec<usize> = if self.query.is_empty() {
+                    (0..8).collect()
+                } else {
+                    self.filtered.clone()
+                };
+                let active_name = cfg.active.as_deref().and_then(|id| {
+                    cfg.entry(id).and_then(|e| {
+                        if e.name.trim().is_empty() {
+                            None
+                        } else {
+                            Some(e.name.clone())
+                        }
+                    })
+                });
+                let active_display =
+                    active_name.or_else(|| cfg.active.as_deref().map(crate::config::id_display));
+                for (pos, &i) in indices.iter().enumerate() {
+                    let (label, value): (&str, Option<String>) = match i {
+                        0 => ("set provider", active_display.clone()),
+                        1 => (
+                            "thinking display",
+                            Some(cfg.thinking_display.as_str().to_string()),
+                        ),
+                        2 => ("tool display", Some(cfg.tool_display.as_str().to_string())),
+                        3 => (
+                            "enter behavior",
+                            Some(cfg.enter_behavior.as_str().to_string()),
+                        ),
+                        4 => ("border type", Some(cfg.border_type.as_str().to_string())),
+                        5 => ("theme", Some(cfg.theme.as_str().to_string())),
+                        6 => (
+                            "auto compact",
+                            Some(if cfg.auto_compact {
+                                "on".to_string()
+                            } else {
+                                "off".to_string()
+                            }),
+                        ),
+                        7 => (
+                            "tool preview lines",
+                            Some(format!(
+                                "{}",
+                                cfg.tool_preview_lines.clamp(
+                                    crate::config::TOOL_PREVIEW_LINES_MIN,
+                                    crate::config::TOOL_PREVIEW_LINES_MAX
+                                )
+                            )),
+                        ),
+                        _ => ("", None),
+                    };
+                    body_lines.push(list_item(self.cursor == pos, label, value));
+                }
             }
             SettingsLevel::ProviderList => {
                 body_lines.push(list_item(0 == self.cursor, "+ new provider", None));
