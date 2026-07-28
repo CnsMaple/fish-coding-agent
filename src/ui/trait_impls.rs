@@ -913,7 +913,7 @@ impl TabWidget for crate::function::SettingsState {
         "settings"
     }
     fn has_search(&self) -> bool {
-        true
+        matches!(self.level, crate::function::SettingsLevel::TopLevel)
     }
     fn hint(&self) -> &str {
         " "
