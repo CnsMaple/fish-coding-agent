@@ -45,7 +45,18 @@ impl TabWidget for crate::function::ModelPickerState {
         }
     }
     fn render_search(&mut self, area: Rect, buf: &mut Buffer, _ctx: &TabCtx) -> Option<(u16, u16)> {
-        crate::ui::picker_widget::render_search_row(area, buf, &self.query, self.focus, false)
+        crate::ui::picker_widget::render_search_row(
+            area,
+            buf,
+            &self.query,
+            self.focus,
+            false,
+            if self.focus == crate::function::PickerFocus::Search {
+                Some(self.search_cursor)
+            } else {
+                None
+            },
+        )
     }
     fn render_body(&mut self, area: Rect, buf: &mut Buffer, _ctx: &TabCtx) -> Option<(u16, u16)> {
         if area.height < 1 {
@@ -180,7 +191,18 @@ impl TabWidget for crate::function::ProviderPickerState {
         }
     }
     fn render_search(&mut self, area: Rect, buf: &mut Buffer, _ctx: &TabCtx) -> Option<(u16, u16)> {
-        crate::ui::picker_widget::render_search_row(area, buf, &self.query, self.focus, false)
+        crate::ui::picker_widget::render_search_row(
+            area,
+            buf,
+            &self.query,
+            self.focus,
+            false,
+            if self.focus == crate::function::PickerFocus::Search {
+                Some(self.search_cursor)
+            } else {
+                None
+            },
+        )
     }
     fn render_body(&mut self, area: Rect, buf: &mut Buffer, _ctx: &TabCtx) -> Option<(u16, u16)> {
         if area.height < 1 {
@@ -250,6 +272,7 @@ impl TabWidget for crate::function::ThinkingPickerState {
             &self.query,
             crate::function::PickerFocus::Search,
             false,
+            None,
         )
     }
     fn render_body(&mut self, area: Rect, buf: &mut Buffer, _ctx: &TabCtx) -> Option<(u16, u16)> {
@@ -305,7 +328,18 @@ impl TabWidget for crate::function::TimelinePickerState {
         }
     }
     fn render_search(&mut self, area: Rect, buf: &mut Buffer, _ctx: &TabCtx) -> Option<(u16, u16)> {
-        crate::ui::picker_widget::render_search_row(area, buf, &self.query, self.focus, false)
+        crate::ui::picker_widget::render_search_row(
+            area,
+            buf,
+            &self.query,
+            self.focus,
+            false,
+            if self.focus == crate::function::PickerFocus::Search {
+                Some(self.search_cursor)
+            } else {
+                None
+            },
+        )
     }
     fn render_body(&mut self, area: Rect, buf: &mut Buffer, _ctx: &TabCtx) -> Option<(u16, u16)> {
         if area.height < 1 {
@@ -390,7 +424,18 @@ impl TabWidget for crate::function::SessionPickerState {
         }
     }
     fn render_search(&mut self, area: Rect, buf: &mut Buffer, _ctx: &TabCtx) -> Option<(u16, u16)> {
-        crate::ui::picker_widget::render_search_row(area, buf, &self.query, self.focus, false)
+        crate::ui::picker_widget::render_search_row(
+            area,
+            buf,
+            &self.query,
+            self.focus,
+            false,
+            if self.focus == crate::function::PickerFocus::Search {
+                Some(self.search_cursor)
+            } else {
+                None
+            },
+        )
     }
     fn render_body(&mut self, area: Rect, buf: &mut Buffer, _ctx: &TabCtx) -> Option<(u16, u16)> {
         if area.height < 1 {
@@ -656,6 +701,7 @@ impl TabWidget for crate::function::ToolPickerState {
             &self.query,
             crate::function::PickerFocus::Search,
             false,
+            None,
         )
     }
     fn render_body(&mut self, area: Rect, buf: &mut Buffer, ctx: &TabCtx) -> Option<(u16, u16)> {
@@ -796,6 +842,7 @@ impl TabWidget for crate::function::CommandPaletteState {
             &self.query,
             crate::function::PickerFocus::Search,
             true,
+            None,
         )
     }
     fn render_body(&mut self, area: Rect, buf: &mut Buffer, _ctx: &TabCtx) -> Option<(u16, u16)> {
@@ -930,6 +977,7 @@ impl TabWidget for crate::function::SettingsState {
             &self.query,
             crate::function::PickerFocus::Search,
             searching,
+            None,
         )
     }
     fn render_body(&mut self, area: Rect, buf: &mut Buffer, ctx: &TabCtx) -> Option<(u16, u16)> {

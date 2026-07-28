@@ -137,6 +137,7 @@ fn render_notifications(area: Rect, buf: &mut Buffer, app: &mut App) {
         &app.notifications.query,
         crate::function::PickerFocus::List,
         app.notifications.searching,
+        None,
     );
 
     let filtered = app.notifications.filtered_indices();
@@ -298,7 +299,7 @@ pub fn render_new_provider_picker(
         .constraints([Constraint::Length(1), Constraint::Min(1)])
         .split(area);
     let search_cursor =
-        crate::ui::picker_widget::render_search_row(rows[0], buf, &s.query, s.focus, false);
+        crate::ui::picker_widget::render_search_row(rows[0], buf, &s.query, s.focus, false, None);
     let list_area = rows[1];
     if s.filtered.is_empty() {
         Paragraph::new(Line::from(Span::styled("  [no matches]", Theme::dim())))

@@ -14,12 +14,17 @@ use unicode_width::UnicodeWidthStr;
 ///
 /// The `focus` parameter is used for the standard picker search rows
 /// (notifications always use the `searching` flag to decide).
+///
+/// When `cursor_byte` is `Some(pos)` and the row is focused, the terminal
+/// cursor is placed at that position within the query text instead of
+/// at the end. This is used by the model picker for cursor movement.
 pub fn render_search_row(
     area: Rect,
     buf: &mut Buffer,
     query: &str,
     focus: PickerFocus,
     searching: bool,
+    cursor_byte: Option<usize>,
 ) -> Option<(u16, u16)> {
     let focused = if searching {
         true
@@ -35,25 +40,32 @@ pub fn render_search_row(
     if query.is_empty() {
         if focused {
             // Show a visible empty-input indicator
-            spans.push(Span::styled("\u{200B}", Theme::cursor()));
+            spans.push(Span::styled("\u{258F}", Theme::cursor_visible()));
         } else if searching {
             spans.push(Span::styled("(type to filter)", Theme::dim()));
         } else {
             spans.push(Span::styled("(press Alt+i to search)", Theme::dim()));
         }
     } else {
-        spans.push(Span::raw(query.to_string()));
+        // Insert cursor at the correct position when specified
+        let cursor = cursor_byte.unwrap_or(query.len());
         if focused {
-            // Use a thin zero-width space so the terminal cursor is visible
-            spans.push(Span::styled("\u{200B}", Theme::cursor()));
+            let (before, after) = query.split_at(cursor);
+            spans.push(Span::raw(before.to_string()));
+            spans.push(Span::styled("\u{258F}", Theme::cursor_visible()));
+            spans.push(Span::raw(after.to_string()));
+        } else {
+            spans.push(Span::raw(query.to_string()));
         }
     }
     Paragraph::new(Line::from(spans)).render(area, buf);
 
     if focused {
         let prefix_width = UnicodeWidthStr::width(" search: ") as u16;
-        let query_width = UnicodeWidthStr::width(query) as u16;
-        Some((area.x + prefix_width + query_width, area.y))
+        let cursor = cursor_byte.unwrap_or(query.len());
+        // Count codepoint display width up to cursor position
+        let query_prefix_width = UnicodeWidthStr::width(&query[..cursor]) as u16;
+        Some((area.x + prefix_width + query_prefix_width, area.y))
     } else {
         None
     }

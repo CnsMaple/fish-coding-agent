@@ -14,6 +14,7 @@ pub trait FilterablePicker {
     fn filtered(&self) -> &[usize];
     fn cursor(&mut self) -> &mut usize;
     fn focus(&mut self) -> &mut PickerFocus;
+    fn search_cursor_pos(&mut self) -> &mut usize;
     fn rebuild_filter(&mut self);
 
     /// Handle a key in Search focus mode. Returns `Some(true)` if the
@@ -28,6 +29,7 @@ pub trait FilterablePicker {
                     return Some(false);
                 }
                 self.query().clear();
+                *self.search_cursor_pos() = 0;
                 self.rebuild_filter();
                 Some(true)
             }
@@ -72,13 +74,53 @@ pub trait FilterablePicker {
                 Some(true)
             }
             KeyCode::Char(c) => {
-                self.query().push(c);
+                let sc = *self.search_cursor_pos();
+                self.query().insert(sc, c);
+                *self.search_cursor_pos() = sc + c.len_utf8();
                 *self.focus() = PickerFocus::Search;
                 self.rebuild_filter();
                 Some(true)
             }
             KeyCode::Backspace => {
-                self.query().pop();
+                let sc = *self.search_cursor_pos();
+                if sc > 0 {
+                    let before = sc - 1;
+                    self.query().remove(before);
+                    *self.search_cursor_pos() = before;
+                }
+                *self.focus() = PickerFocus::Search;
+                self.rebuild_filter();
+                Some(true)
+            }
+            KeyCode::Left => {
+                if *self.search_cursor_pos() > 0 {
+                    *self.search_cursor_pos() -= 1;
+                }
+                *self.focus() = PickerFocus::Search;
+                Some(true)
+            }
+            KeyCode::Right => {
+                if *self.search_cursor_pos() < self.query().len() {
+                    *self.search_cursor_pos() += 1;
+                }
+                *self.focus() = PickerFocus::Search;
+                Some(true)
+            }
+            KeyCode::Home => {
+                *self.search_cursor_pos() = 0;
+                *self.focus() = PickerFocus::Search;
+                Some(true)
+            }
+            KeyCode::End => {
+                *self.search_cursor_pos() = self.query().len();
+                *self.focus() = PickerFocus::Search;
+                Some(true)
+            }
+            KeyCode::Delete => {
+                let sc = *self.search_cursor_pos();
+                if sc < self.query().len() {
+                    self.query().remove(sc);
+                }
                 *self.focus() = PickerFocus::Search;
                 self.rebuild_filter();
                 Some(true)
@@ -949,6 +991,7 @@ pub struct SettingsState {
     pub query: String,
     /// Filtered indices into top-level items (empty = show all).
     pub filtered: Vec<usize>,
+    pub search_cursor: usize,
 }
 
 impl SettingsState {
@@ -966,6 +1009,7 @@ impl SettingsState {
             new_provider: NewProviderPickerState::new(),
             query: String::new(),
             filtered: Vec::new(),
+            search_cursor: 0,
         };
         if let Some(cache_path) = model_cache_parent {
             state.new_provider.load_model_dev_providers(cache_path);
@@ -1072,6 +1116,8 @@ pub struct ModelPickerState {
     /// the user to pick a context window. The picker shows options from
     /// models.dev plus a custom input.
     pub context_pick: Option<ContextPickerState>,
+    /// Cursor position within the search query string for inserting/deleting.
+    pub search_cursor: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -1110,6 +1156,71 @@ impl FilterablePicker for ModelPickerState {
     fn rebuild_filter(&mut self) {
         ModelPickerState::rebuild_filter(self)
     }
+    fn search_cursor_pos(&mut self) -> &mut usize {
+        &mut self.search_cursor
+    }
+
+    fn handle_search_key(&mut self, k: crossterm::event::KeyEvent) -> Option<bool> {
+        use crossterm::event::KeyCode;
+        match k.code {
+            KeyCode::Esc => {
+                if self.query.is_empty() {
+                    return Some(false);
+                }
+                self.query.clear();
+                self.search_cursor = 0;
+                self.rebuild_filter();
+                Some(true)
+            }
+            KeyCode::Down => {
+                *self.focus() = PickerFocus::List;
+                Some(true)
+            }
+            KeyCode::Left => {
+                if self.search_cursor > 0 {
+                    self.search_cursor -= 1;
+                }
+                Some(true)
+            }
+            KeyCode::Right => {
+                if self.search_cursor < self.query.len() {
+                    self.search_cursor += 1;
+                }
+                Some(true)
+            }
+            KeyCode::Home => {
+                self.search_cursor = 0;
+                Some(true)
+            }
+            KeyCode::End => {
+                self.search_cursor = self.query.len();
+                Some(true)
+            }
+            KeyCode::Backspace => {
+                if self.search_cursor > 0 {
+                    let before = self.search_cursor - 1;
+                    self.query.remove(before);
+                    self.search_cursor = before;
+                    self.rebuild_filter();
+                }
+                Some(true)
+            }
+            KeyCode::Delete => {
+                if self.search_cursor < self.query.len() {
+                    self.query.remove(self.search_cursor);
+                    self.rebuild_filter();
+                }
+                Some(true)
+            }
+            KeyCode::Char(c) => {
+                self.query.insert(self.search_cursor, c);
+                self.search_cursor += c.len_utf8();
+                self.rebuild_filter();
+                Some(true)
+            }
+            _ => None,
+        }
+    }
 }
 
 impl ModelPickerState {
@@ -1127,6 +1238,7 @@ impl ModelPickerState {
             no_endpoint: false,
             scroll: 0,
             context_pick: None,
+            search_cursor: 0,
         }
     }
 
@@ -1145,14 +1257,23 @@ impl ModelPickerState {
         if self.query.is_empty() {
             self.filtered = (0..self.models.len()).collect();
         } else {
+            // Split the query into whitespace-separated words. A model
+            // is included only when EVERY word matches the id or display
+            // as a fuzzy subsequence. This lets the user type e.g.
+            // "gpt 4o" to find "gpt-4o-turbo".
+            let words: Vec<&str> = self.query.split_whitespace().collect();
             let mut scored: Vec<(u32, usize)> = self
                 .models
                 .iter()
                 .enumerate()
                 .filter_map(|(i, m)| {
-                    crate::fuzzy::score(&self.query, &m.id)
-                        .or_else(|| crate::fuzzy::score(&self.query, &m.display))
-                        .map(|sc| (sc, i))
+                    let mut total: u32 = 0;
+                    for w in &words {
+                        let sc = crate::fuzzy::score(w, &m.id)
+                            .or_else(|| crate::fuzzy::score(w, &m.display))?;
+                        total = total.saturating_add(sc);
+                    }
+                    Some((total, i))
                 })
                 .collect();
             scored.sort_by_key(|&(sc, i)| (sc, i));
@@ -1221,6 +1342,7 @@ pub struct ProviderPickerState {
     pub focus: PickerFocus,
     /// The currently-active entry id, used for the `[active]` marker.
     pub active: Option<ProviderId>,
+    pub search_cursor: usize,
 }
 
 impl FilterablePicker for ProviderPickerState {
@@ -1235,6 +1357,9 @@ impl FilterablePicker for ProviderPickerState {
     }
     fn focus(&mut self) -> &mut PickerFocus {
         &mut self.focus
+    }
+    fn search_cursor_pos(&mut self) -> &mut usize {
+        &mut self.search_cursor
     }
     fn rebuild_filter(&mut self) {
         ProviderPickerState::rebuild_filter(self)
@@ -1265,6 +1390,7 @@ impl ProviderPickerState {
             scroll: 0,
             focus: PickerFocus::List,
             active: cfg.active.clone(),
+            search_cursor: 0,
         };
         s.rebuild_filter();
         s
@@ -1311,6 +1437,8 @@ pub struct ThinkingPickerState {
     /// Vertical scroll offset (top visible row in the list) so the
     /// focused row stays in view.
     pub scroll: usize,
+    /// Cursor position within the search query string for inserting/deleting.
+    pub search_cursor: usize,
 }
 
 impl ThinkingPickerState {
@@ -1320,6 +1448,7 @@ impl ThinkingPickerState {
             query: String::new(),
             filtered: Vec::new(),
             scroll: 0,
+            search_cursor: 0,
         };
         s.rebuild_filter();
         s
@@ -1442,6 +1571,7 @@ pub struct TimelinePickerState {
     pub cursor: usize,
     pub scroll: usize,
     pub focus: PickerFocus,
+    pub search_cursor: usize,
 }
 
 impl FilterablePicker for TimelinePickerState {
@@ -1456,6 +1586,9 @@ impl FilterablePicker for TimelinePickerState {
     }
     fn focus(&mut self) -> &mut PickerFocus {
         &mut self.focus
+    }
+    fn search_cursor_pos(&mut self) -> &mut usize {
+        &mut self.search_cursor
     }
     fn rebuild_filter(&mut self) {
         TimelinePickerState::rebuild_filter(self)
@@ -1472,6 +1605,7 @@ impl TimelinePickerState {
             cursor: 0,
             scroll: 0,
             focus: PickerFocus::Search,
+            search_cursor: 0,
         };
         s.rebuild_filter();
         s
@@ -1683,6 +1817,8 @@ pub struct SessionPickerState {
     /// so that `dispatch_to_active_tab` removes the tab instead of
     /// restoring it (the handler already closed the tab and resumed).
     pub consumed: bool,
+    /// Cursor position within the search query string for inserting/deleting.
+    pub search_cursor: usize,
 }
 
 impl SessionPickerState {
@@ -1697,6 +1833,7 @@ impl SessionPickerState {
             scroll: 0,
             focus: PickerFocus::Search,
             consumed: false,
+            search_cursor: 0,
         };
         s.reload(cwd);
         s
