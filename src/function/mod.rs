@@ -462,7 +462,11 @@ impl App {
         };
         let request_model = self.config.active_model().trim().to_string();
         let display_model = self.config.active_model_display();
-        let Some(cache) = self.model_cache.get(kind) else {
+        // Look up cache by active entry id so we always get the right
+        // endpoint's model list, even when multiple entries share a kind.
+        let entry_id = self.config.active.as_deref();
+        let cache = entry_id.and_then(|id| self.model_cache.get(id));
+        let Some(cache) = cache else {
             if kind == ProviderKind::Cursor {
                 self.status.clear_context_window_tokens();
             }

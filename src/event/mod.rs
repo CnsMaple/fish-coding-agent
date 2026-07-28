@@ -95,6 +95,7 @@ pub enum AppMsg {
     /// Models list fetched successfully.
     ModelsFetched {
         provider: crate::config::ProviderKind,
+        entry_id: String,
         base_url: String,
         api_key: String,
         models: Vec<crate::function::notifications::ModelInfo>,
@@ -813,6 +814,7 @@ fn handle_msg(msg: AppMsg, app: &mut App) {
         }
         AppMsg::ModelsFetched {
             provider,
+            entry_id,
             base_url,
             api_key,
             models,
@@ -831,7 +833,7 @@ fn handle_msg(msg: AppMsg, app: &mut App) {
                 s.rebuild_filter();
             }
             app.model_cache
-                .put(provider, base_url, api_key, models.clone());
+                .put(entry_id, provider, base_url, api_key, models.clone());
             if app.config.active_kind() == Some(provider) {
                 let active_model = app.config.active_model().to_string();
                 let selected_model = models.iter().find(|m| {

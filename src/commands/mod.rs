@@ -598,11 +598,9 @@ pub fn open_model_picker_for_kind(app: &mut App, provider: crate::config::Provid
         app.acknowledge_panel();
         return;
     }
-    let mut state = crate::function::ModelPickerState::new(provider);
-    if let Some(c) = app.model_cache.get(provider) {
-        state.models = c.models.clone();
-        state.rebuild_filter();
-    }
+    let state = crate::function::ModelPickerState::new(provider);
+    // NOTE: cannot use entry_id-based cache without knowing which entry.
+    // The picker starts empty and will fetch on first Ctrl+R.
     app.function.push(SidebarTab::ModelPicker(state));
     app.show_panel();
     app.acknowledge_panel();
@@ -612,10 +610,8 @@ pub fn open_model_picker_for_kind(app: &mut App, provider: crate::config::Provid
 /// id. Prefer this over `open_model_picker_for_kind` whenever the
 /// caller knows the exact entry: multiple entries can share a kind
 /// (e.g. two OpenAI endpoints), so resolving credentials/commits by
-/// kind alone would hit the wrong one. Only uses the per-kind model
-/// cache when it actually matches this entry's base_url/api_key (via
-/// `needs_invalidation`), so opening a different same-kind entry does
-/// not show the other entry's stale model list.
+/// kind alone would hit the wrong one. Uses the per-entry-id model
+/// cache so each endpoint's model list is cached independently.
 pub fn open_model_picker_for_entry(app: &mut App, entry_id: &str) {
     use crate::config::ProviderKind;
     let Some(mut state) = crate::function::ModelPickerState::new_for_entry(entry_id) else {
@@ -635,28 +631,9 @@ pub fn open_model_picker_for_entry(app: &mut App, entry_id: &str) {
     }
     // Cursor never has a model list endpoint; skip cache lookup.
     if provider != ProviderKind::Cursor {
-        let entry_base = app
-            .config
-            .entry(entry_id)
-            .map(|c| c.base_url.clone())
-            .unwrap_or_default();
-        let entry_key = app.config.effective_api_key(entry_id).unwrap_or_default();
-        let use_cache = app
-            .model_cache
-            .get(provider)
-            .map(|c| {
-                // Only reuse the kind cache when it was populated from
-                // this same entry's credentials.
-                !app.model_cache
-                    .needs_invalidation(provider, &entry_base, &entry_key)
-                    || (c.base_url == entry_base && c.api_key == entry_key)
-            })
-            .unwrap_or(false);
-        if use_cache {
-            if let Some(c) = app.model_cache.get(provider) {
-                state.models = c.models.clone();
-                state.rebuild_filter();
-            }
+        if let Some(c) = app.model_cache.get(entry_id) {
+            state.models = c.models.clone();
+            state.rebuild_filter();
         }
     }
     app.function.push(SidebarTab::ModelPicker(state));

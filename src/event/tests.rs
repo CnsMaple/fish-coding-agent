@@ -286,6 +286,7 @@ fn open_model_picker_for_entry_skips_stale_same_kind_cache() {
     // base_url/api_key than alibaba).
     let mut cache = ModelCache::default();
     cache.put(
+        make_id(ProviderKind::Openai, ProviderMode::Key),
         ProviderKind::Openai,
         "https://api.openai.com/v1".to_string(),
         "openai-key".to_string(),

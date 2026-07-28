@@ -1016,8 +1016,10 @@ pub(super) fn trigger_picker_fetch(app: &mut App, state: &mut crate::function::M
             .await
             {
                 Ok(models) => {
+                    let entry_id = target_id.clone();
                     let _ = tx.send(AppMsg::ModelsFetched {
                         provider: p,
+                        entry_id,
                         base_url: base,
                         api_key: key,
                         models,
@@ -1638,6 +1640,7 @@ pub(super) fn settings_save_form(app: &mut App, form: crate::function::ConfigFor
                         Ok(models) => {
                             let _ = tx.send(AppMsg::ModelsFetched {
                                 provider: k,
+                                entry_id: active_id.clone(),
                                 base_url: base,
                                 api_key: key,
                                 models,
@@ -2020,15 +2023,16 @@ pub fn commit_model_with_entry(
         },
     };
 
-    let selected_model =
-        app.model_cache
-            .get(provider)
-            .and_then(|cache| {
-                cache.models.iter().find(|m| {
-                    m.id == model_id || m.request_id.as_deref() == Some(model_id.as_str())
-                })
-            })
-            .cloned();
+    let selected_model = target_id
+        .as_deref()
+        .and_then(|id| app.model_cache.get(id))
+        .and_then(|cache| {
+            cache
+                .models
+                .iter()
+                .find(|m| m.id == model_id || m.request_id.as_deref() == Some(model_id.as_str()))
+        })
+        .cloned();
     let request_model_id = selected_model
         .as_ref()
         .and_then(|m| m.request_id.clone())

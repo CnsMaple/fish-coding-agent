@@ -299,42 +299,44 @@ pub struct CachedModels {
     pub fetched_at: chrono::DateTime<Utc>,
     pub base_url: String,
     pub api_key: String,
+    /// The ProviderKind of the entry that populated this cache.
+    /// Used for backward-compatible kind-based lookup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<ProviderKind>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct ModelCache {
-    pub by_provider: HashMap<ProviderKind, CachedModels>,
+    /// Cache keyed by entry_id (e.g. "openai:key" or "openai:key-2")
+    /// so that different entries with the same ProviderKind do not
+    /// overwrite each other's cached model lists.
+    pub by_entry: HashMap<String, CachedModels>,
 }
 
 impl ModelCache {
-    pub fn get(&self, kind: ProviderKind) -> Option<&CachedModels> {
-        self.by_provider.get(&kind)
+    /// Look up cached models by exact entry_id.
+    pub fn get(&self, entry_id: &str) -> Option<&CachedModels> {
+        self.by_entry.get(entry_id)
     }
 
     pub fn put(
         &mut self,
+        entry_id: String,
         kind: ProviderKind,
         base_url: String,
         api_key: String,
         models: Vec<ModelInfo>,
     ) {
-        self.by_provider.insert(
-            kind,
+        self.by_entry.insert(
+            entry_id,
             CachedModels {
                 models,
                 fetched_at: chrono::Utc::now(),
                 base_url,
                 api_key,
+                kind: Some(kind),
             },
         );
-    }
-
-    /// Returns true if base_url or api_key differ from cache, meaning a refetch is needed.
-    pub fn needs_invalidation(&self, kind: ProviderKind, base_url: &str, api_key: &str) -> bool {
-        match self.by_provider.get(&kind) {
-            None => true,
-            Some(c) => c.base_url != base_url || c.api_key != api_key,
-        }
     }
 
     /// Load from a JSON file. Returns an empty cache if the file does not
@@ -354,6 +356,6 @@ impl ModelCache {
     }
 
     pub fn clear(&mut self) {
-        self.by_provider.clear();
+        self.by_entry.clear();
     }
 }
