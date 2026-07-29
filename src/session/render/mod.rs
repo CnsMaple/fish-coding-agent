@@ -602,7 +602,9 @@ pub(crate) fn count_block_gaps(
     offsets.sort();
     let mut gaps: u32 = 0;
     let mut cursor: usize = 0;
+    let content_len = content.len();
     for &off in &offsets {
+        let off = off.min(content_len);
         if off < cursor {
             continue;
         }

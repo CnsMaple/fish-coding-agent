@@ -242,6 +242,14 @@ pub struct App {
     /// idle frame.
     pub pending_post_compaction_prompt: Option<String>,
 
+    /// Accumulated ChatDelta content since last render draw.
+    /// Flushed to `append_to_last` before each `terminal.draw`.
+    pub pending_chat_content: String,
+
+    /// Accumulated ChatThinkingDelta content since last render draw.
+    /// Flushed to `append_thinking_to_last` before each `terminal.draw`.
+    pub pending_thinking_content: String,
+
     /// Whether the agents.md splash area is visible (new session, no input yet).
     pub agents_visible: bool,
     /// Cursor position in the agents checkbox list.
@@ -392,6 +400,8 @@ impl App {
             force_full_repaint: false,
             compacting: false,
             pending_post_compaction_prompt: None,
+            pending_chat_content: String::new(),
+            pending_thinking_content: String::new(),
             agents_visible: true,
             agents_cursor: 0,
             load_duration,

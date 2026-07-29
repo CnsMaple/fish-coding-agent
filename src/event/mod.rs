@@ -257,8 +257,8 @@ where
     let mut needs_draw = true;
     let mut prev_scroll: Option<u32> = None;
     let mut last_draw = Instant::now();
-    // Minimum interval between draws (~60 fps).
-    const DRAW_INTERVAL: Duration = Duration::from_millis(16);
+    // Minimum interval between draws (~20 fps).
+    const DRAW_INTERVAL: Duration = Duration::from_millis(50);
 
     loop {
         // Throttled draw: cap at ~60 fps via DRAW_INTERVAL. During
@@ -270,6 +270,7 @@ where
         // next 16 ms frame, which is imperceptible. The 100 ms tick
         // keeps the spinner animating even when no deltas arrive.
         if needs_draw && last_draw.elapsed() >= DRAW_INTERVAL {
+            flush_pending_chat(app);
             if let Err(e) = terminal.draw(|f| crate::ui::render(f, app)) {
                 let _ = e;
             }
@@ -423,6 +424,19 @@ fn flush_pending_request(app: &mut App) {
                 p.seq,
             ));
         }
+    }
+}
+
+/// Flush accumulated pending chat/thinking content to the session
+/// before a render draw or before streaming finishes.
+fn flush_pending_chat(app: &mut App) {
+    if !app.pending_chat_content.is_empty() {
+        let s = std::mem::take(&mut app.pending_chat_content);
+        app.session.append_to_last(&s);
+    }
+    if !app.pending_thinking_content.is_empty() {
+        let s = std::mem::take(&mut app.pending_thinking_content);
+        app.session.append_thinking_to_last(&s);
     }
 }
 
@@ -658,17 +672,21 @@ fn handle_msg(msg: AppMsg, app: &mut App) {
     match msg {
         AppMsg::ChatDelta(s) => {
             note_model_output(app, &s);
-            app.session.append_to_last(&s);
+            app.pending_chat_content.push_str(&s);
         }
         AppMsg::ChatThinkingDelta(s) => {
             note_model_output(app, &s);
-            app.session.append_thinking_to_last(&s);
+            app.pending_thinking_content.push_str(&s);
         }
         AppMsg::ChatContentBlockStart(_) => {
             // A new content block has begun in the upstream stream;
             // close off the in-flight thinking segment so the
             // renderer treats it as a complete block and the next
             // thinking delta lands in a fresh one.
+            if !app.pending_thinking_content.is_empty() {
+                let s = std::mem::take(&mut app.pending_thinking_content);
+                app.session.append_thinking_to_last(&s);
+            }
             app.session.begin_thinking_segment();
         }
         AppMsg::ChatDebug(s) => {
@@ -760,6 +778,7 @@ fn handle_msg(msg: AppMsg, app: &mut App) {
             }
             finish_model_output_rate(app);
             app.flush_ask_snapshot();
+            flush_pending_chat(app);
             app.session.finish_streaming();
             app.save_current_session();
             app.inflight = None;
@@ -776,6 +795,7 @@ fn handle_msg(msg: AppMsg, app: &mut App) {
             }
             finish_model_output_rate(app);
             app.flush_ask_snapshot();
+            flush_pending_chat(app);
             app.session.finish_streaming();
             app.save_current_session();
             app.inflight = None;
