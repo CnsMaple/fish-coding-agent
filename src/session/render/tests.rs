@@ -2522,3 +2522,120 @@ mod border_fix_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod multi_message_viewport_diagnostic {
+    use super::*;
+    use crate::session::{Message, Role, Session, ToolResultBlock};
+
+    #[test]
+    fn total_matches_rendered_for_50_message_pairs() {
+        let mut s = Session::default();
+        for i in 0..50 {
+            s.push(Message::new(
+                Role::User,
+                format!("user message {i} with some content"),
+            ));
+            let asst = format!(
+                "## Summary {i}\n\nHere is the analysis:\n\n```\nresult: ok\n```\n\nThe end."
+            );
+            s.push(Message::new(Role::Assistant, asst));
+        }
+
+        let width: u16 = 80;
+        let total = s.count_all_lines_with_width(width as usize);
+        let total_from_offsets = s.line_offsets.last().copied().unwrap_or(0);
+        assert_eq!(
+            total, total_from_offsets,
+            "cached_total_lines={total} != line_offsets.last()={total_from_offsets}"
+        );
+
+        let rendered = build_lines_viewport(&s, width as usize, 0, total);
+        assert_eq!(
+            rendered.len() as u32,
+            total,
+            "viewport render produced {} lines but total={total}",
+            rendered.len()
+        );
+
+        for (msg_idx, m) in s.messages.iter().enumerate() {
+            let msg_start = s.line_offsets[msg_idx];
+            let msg_end = s.line_offsets[msg_idx + 1];
+            let expected_content = (msg_end - msg_start - 1) as usize;
+            let rendered_len = build_message_lines(&s, msg_idx, width as usize).len();
+            assert_eq!(
+                rendered_len, expected_content,
+                "msg[{msg_idx}]: expected {expected_content} lines (start={msg_start} end={msg_end}) \
+                 but build_message_lines produced {rendered_len} lines, role={:?}, content_len={}",
+                m.role,
+                m.content.len()
+            );
+        }
+
+        // Also check with tool blocks (more realistic for long sessions).
+        let mut s2 = Session::default();
+        s2.push(Message::new(Role::User, "do work"));
+        let mut asst = Message::new(Role::Assistant, "Running tasks...\n\nHere are the results.");
+        asst.display_cursor = usize::MAX;
+        asst.tool_results.push(ToolResultBlock {
+            name: "shell_command".to_string(),
+            title: "$ node build.js".to_string(),
+            content: serde_json::json!({
+                "ok": true,
+                "result": "exit_code: 0\nwall_secs: 1.2\ntimeout_secs: 300\nstdout:\nBuild succeeded!\n\nstderr:\n"
+            }).to_string(),
+            metadata: String::new(),
+            content_offset: 0,
+            visible: true,
+            running: false,
+            failed: false,
+            call_id: String::new(),
+            pruned: false,
+            streaming_input: String::new(),
+            cached_line_count_visible: None,
+            cached_line_count_collapsed: None,
+            started_at: None,
+        });
+        s2.push(asst);
+
+        let width: u16 = 80;
+        let total = s2.count_all_lines_with_width(width as usize);
+        let rendered = build_lines_viewport(&s2, width as usize, 0, total);
+        assert_eq!(
+            rendered.len() as u32,
+            total,
+            "with tool blocks: viewport render produced {} lines but total={total}",
+            rendered.len()
+        );
+
+        // Verify per-message consistency
+        for (msg_idx, _m) in s2.messages.iter().enumerate() {
+            let msg_start = s2.line_offsets[msg_idx];
+            let msg_end = s2.line_offsets[msg_idx + 1];
+            let expected_content = (msg_end - msg_start - 1) as usize;
+            let rendered_len = build_message_lines(&s2, msg_idx, width as usize).len();
+            assert_eq!(
+                rendered_len, expected_content,
+                "with tool: msg[{msg_idx}]: expected {expected_content} lines (start={msg_start} end={msg_end}) \
+                 but build_message_lines produced {rendered_len} lines",
+            );
+        }
+
+        let inner_h: u32 = 20;
+        let max_scroll = total.saturating_sub(inner_h);
+        for scroll in [0u32, max_scroll / 2, max_scroll] {
+            let scroll = scroll.min(max_scroll);
+            let offset_from_top = max_scroll.saturating_sub(scroll);
+            let start = offset_from_top;
+            let end = (offset_from_top + inner_h).min(total);
+            let visible = build_lines_viewport(&s, width as usize, start, end);
+            let expected_len = (end - start) as usize;
+            assert_eq!(
+                visible.len(),
+                expected_len,
+                "scroll={scroll}: build_lines_viewport({start},{end}) produced {} lines, expected {expected_len}",
+                visible.len()
+            );
+        }
+    }
+}

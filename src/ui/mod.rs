@@ -55,9 +55,11 @@ pub fn render(f: &mut Frame, app: &mut App) {
         .constraints(constraints)
         .split(area);
 
-    app.session.display = app.config.thinking_display;
-    app.session.tool_display = app.config.tool_display;
-    app.session.tool_preview_lines = app.config.tool_preview_lines;
+    app.session.sync_display_mode(
+        app.config.thinking_display,
+        app.config.tool_display,
+        app.config.tool_preview_lines,
+    );
 
     let agents_idx = 0;
     let session_idx = if app.agents_visible { 1 } else { 0 };

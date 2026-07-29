@@ -37,6 +37,10 @@ pub struct CachedLineCount {
     /// Byte length of `Message::content` when this count was computed.
     /// Used for fast incremental line-count estimation during streaming.
     pub content_len: usize,
+    /// `Message::content_version` when this count was computed. Guards
+    /// against stale counts when thinking/tool segments change but
+    /// content length stays the same.
+    pub content_version: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -449,6 +453,12 @@ pub struct Session {
     /// compute on next read".
     #[serde(skip)]
     pub cached_total_lines: Option<(u16, u32)>,
+    /// Bumped every time `display`, `tool_display`, or
+    /// `tool_preview_lines` change. Included in the cached total key
+    /// so switching display modes invalidates the cache even when
+    /// the viewport width stays the same.
+    #[serde(skip)]
+    pub display_version: u64,
     /// Last `(width, total)` observed by the UI render. Used to
     /// pin the viewport start when the user is scrolled up: when
     /// `scroll > 0`, new content height is absorbed into `scroll` so
@@ -497,6 +507,7 @@ impl Default for Session {
             line_cache: std::sync::Mutex::new(Vec::new()),
             message_lines_cache: std::sync::Mutex::new(crate::session::lru::BoundedCache::default()),
             cached_total_lines: None,
+            display_version: 0,
             last_rendered_total: None,
             expand_new_tool_results: false,
             line_offsets: Vec::new(),
@@ -1156,6 +1167,25 @@ impl Session {
         n
     }
 
+    /// Invalidate layout cache when display-related settings change.
+    /// Called from `ui::render` before the first count for this frame.
+    pub fn sync_display_mode(
+        &mut self,
+        display: crate::config::ThinkingDisplay,
+        tool_display: crate::config::ToolResultDisplay,
+        tool_preview_lines: usize,
+    ) {
+        if self.display != display
+            || self.tool_display != tool_display
+            || self.tool_preview_lines != tool_preview_lines
+        {
+            self.display = display;
+            self.tool_display = tool_display;
+            self.tool_preview_lines = tool_preview_lines;
+            self.invalidate_layout_cache();
+        }
+    }
+
     /// Internal: walks the session, populates per-block line caches, and
     /// returns the total. Called by `count_all_lines_with_width` only
     /// when the cached value is stale.
@@ -1631,7 +1661,10 @@ impl Session {
 /// across frames.
 fn render_cached_content_lines(m: &mut Message, width: u16) -> u32 {
     if let Some(c) = m.cached_content_line_count {
-        if c.width == width && m.content.len() == c.content_len {
+        if c.width == width
+            && m.content.len() == c.content_len
+            && c.content_version == m.content_version
+        {
             return c.count;
         }
     }
@@ -1650,6 +1683,7 @@ fn render_cached_content_lines(m: &mut Message, width: u16) -> u32 {
         width,
         count: n,
         content_len: m.content.len(),
+        content_version: m.content_version,
     });
     n
 }
@@ -1660,7 +1694,7 @@ fn render_cached_content_lines(m: &mut Message, width: u16) -> u32 {
 /// `&mut` pass will populate the cache.
 fn read_cached_content_lines(m: &Message, width: u16) -> u32 {
     if let Some(c) = m.cached_content_line_count {
-        if c.width == width {
+        if c.width == width && c.content_version == m.content_version {
             return c.count;
         }
     }
