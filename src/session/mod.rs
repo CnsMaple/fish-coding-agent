@@ -1312,9 +1312,16 @@ impl Session {
                 }
             }
 
-            // Gaps before thinking/tool blocks.
+            // Gaps before thinking/tool blocks.  Pass content and width
+            // so `count_block_gaps` can verify each segment actually
+            // renders non-zero lines before counting a gap.
             let segments = crate::session::render::get_thinking_segments(m);
-            let gap_count = crate::session::render::count_block_gaps(&segments, &m.tool_results);
+            let gap_count = crate::session::render::count_block_gaps(
+                &m.content,
+                width as usize,
+                &segments,
+                &m.tool_results,
+            );
             n += gap_count;
 
             // User messages: background padding + skill block.
