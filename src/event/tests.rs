@@ -48,6 +48,8 @@ fn make_app() -> App {
         status: crate::input::status::StatusBar::new(),
         function_visible: false,
         pending_events: 0,
+        pending_chat_content: String::new(),
+        pending_thinking_content: String::new(),
         notifications: Notifications::default(),
         model_cache: crate::function::notifications::ModelCache::default(),
         hit_rate: crate::function::notifications::HitRate::new(50),
@@ -1691,7 +1693,7 @@ fn status_set_cwd_shows_full_path_with_tilde_abbrev() {
         // Cross-platform: the abbrev uses `~` for the home prefix
         // and whatever path separator the host OS uses for the rest.
         assert!(
-            s.cwd.starts_with("~/"),
+            s.cwd.starts_with("~/") || s.cwd.starts_with("~\\"),
             "cwd should start with ~/, got {:?}",
             s.cwd
         );

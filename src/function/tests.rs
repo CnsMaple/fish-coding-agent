@@ -35,6 +35,8 @@ fn make_test_app() -> App {
         status: crate::input::status::StatusBar::new(),
         function_visible: false,
         pending_events: 0,
+        pending_chat_content: String::new(),
+        pending_thinking_content: String::new(),
         notifications: Notifications::default(),
         model_cache: crate::function::notifications::ModelCache::default(),
         hit_rate: crate::function::notifications::HitRate::new(50),

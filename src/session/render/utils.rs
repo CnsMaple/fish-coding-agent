@@ -22,6 +22,39 @@ pub fn clamp_char_boundary(s: &str, mut idx: usize) -> usize {
     idx
 }
 
+/// Advance `idx` to the next word boundary (whitespace or end of string)
+/// so that a tool/thinking block does not split a word across the
+/// text-before / text-after boundary.  Only advances when `idx` is
+/// truly mid-word (both preceding and following chars are non-whitespace).
+/// If `idx` is at a word boundary, start of string, or end of `s`,
+/// returns `idx` unchanged.
+pub fn advance_to_word_boundary(s: &str, idx: usize) -> usize {
+    if idx >= s.len() {
+        return s.len();
+    }
+    // Already at whitespace = word boundary.
+    if s[idx..].chars().next().is_some_and(|c| c.is_whitespace()) {
+        return idx;
+    }
+    // Only advance if preceded by a non-whitespace char (mid-word).
+    // Start-of-string (idx == 0) is not mid-word.
+    let preceded_by_word = idx > 0
+        && s[..idx]
+            .chars()
+            .next_back()
+            .is_some_and(|c| !c.is_whitespace());
+    if !preceded_by_word {
+        return idx;
+    }
+    // Mid-word: advance to the next whitespace.
+    for (i, c) in s[idx..].char_indices() {
+        if c.is_whitespace() {
+            return idx + i;
+        }
+    }
+    s.len()
+}
+
 /// Render a text segment (content between tool markers) through Markdown.
 pub(super) fn render_content_segment(text: &str, width: usize, out: &mut Vec<Line<'static>>) {
     if text.is_empty() {
@@ -212,6 +245,7 @@ pub fn content_line_count_segmented(
     let mut items: Vec<Item> = Vec::new();
     for seg in thinking_segments {
         let offset = clamp_char_boundary(raw, seg.offset.min(raw.len()));
+        let offset = advance_to_word_boundary(raw, offset);
         items.push(Item {
             offset,
             kind: ItemKind::Thinking,
@@ -219,6 +253,7 @@ pub fn content_line_count_segmented(
     }
     for tool in tool_results.iter() {
         let offset = clamp_char_boundary(raw, tool.content_offset.min(raw.len()));
+        let offset = advance_to_word_boundary(raw, offset);
         items.push(Item {
             offset,
             kind: ItemKind::Tool,

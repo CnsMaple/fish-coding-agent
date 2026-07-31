@@ -13,9 +13,9 @@ use blocks::{
 };
 use utils::render_content_segment;
 pub use utils::{
-    clamp_char_boundary, content_line_count, content_line_count_segmented, count_md_segment,
-    strip_legacy_markers, thinking_block_line_count, tool_block_line_count,
-    total_thinking_line_count, visible_width,
+    advance_to_word_boundary, clamp_char_boundary, content_line_count,
+    content_line_count_segmented, count_md_segment, strip_legacy_markers,
+    thinking_block_line_count, tool_block_line_count, total_thinking_line_count, visible_width,
 };
 
 #[cfg(test)]
@@ -334,6 +334,7 @@ pub fn build_message_lines(
         if has_thinking_content && !matches!(session.display, ThinkingDisplay::Hide) {
             for seg in &segments {
                 let offset = clamp_char_boundary(raw, seg.offset.min(raw.len()));
+                let offset = advance_to_word_boundary(raw, offset);
                 let duration = match (seg.started_at, seg.ended_at) {
                     (Some(start), Some(end)) => {
                         let d = end.signed_duration_since(start);
@@ -389,6 +390,9 @@ pub fn build_message_lines(
         // right visual order and does not create a bogus gap for
         // content that no longer exists.
         let offset = offset.min(raw.len());
+        // Advance to next word boundary so tool block doesn't split
+        // a word across the text-before / text-after boundary.
+        let offset = advance_to_word_boundary(raw, offset);
         items.push(RenderItem {
             offset,
             kind: RenderItemKind::Tool(ti),
