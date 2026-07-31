@@ -849,13 +849,21 @@ pub(super) async fn run_sub_agent(
             return json!({"ok": false, "error": "sub-agent cancelled"}).to_string();
         }
 
-        if step > 0 && step % 5 == 0 {
-            let _ = tx.send(crate::event::AppMsg::ToolDelta {
-                call_id: String::new(),
-                content: format!(
+        if step > 15 && step % 5 == 0 {
+            let content = if step >= 20 {
+                format!(
+                    "[sub_agent:{}] step {step} — still working… please speed up, you're taking too many steps.\n",
+                    sub.as_str()
+                )
+            } else {
+                format!(
                     "[sub_agent:{}] step {step} — still working…\n",
                     sub.as_str()
-                ),
+                )
+            };
+            let _ = tx.send(crate::event::AppMsg::ToolDelta {
+                call_id: String::new(),
+                content,
             });
         }
 
