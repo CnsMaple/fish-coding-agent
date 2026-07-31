@@ -19,6 +19,7 @@ use regex::Regex;
 use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::mpsc::UnboundedSender;
+use tracing::warn;
 
 use crate::event::AppMsg;
 use crate::mcp::McpRegistry;
@@ -242,13 +243,19 @@ pub(super) fn select_lines(
     // pass only one of the two instead of always needing both.
     let start = start_line.unwrap_or(1);
     let end = end_line.unwrap_or(total);
-    if start == 0 || end == 0 || start > end {
+    if start == 0 || end == 0 {
         return Err(anyhow!(
             "invalid line range: start_line must be <= end_line (got {}:{})",
             start,
             end
         ));
     }
+    let (start, end) = if start > end {
+        warn!("start_line ({}) > end_line ({}), swapping them", start, end);
+        (end, start)
+    } else {
+        (start, end)
+    };
     Ok(text
         .lines()
         .enumerate()
@@ -302,13 +309,19 @@ pub(super) fn replace_string(
         let total = lines.len();
         let start = start_line.unwrap_or(1);
         let end = end_line.unwrap_or(total);
-        if start == 0 || end == 0 || start > end {
+        if start == 0 || end == 0 {
             return Err(anyhow!(
                 "invalid line range: start_line must be <= end_line (got {}:{})",
                 start,
                 end
             ));
         }
+        let (start, end) = if start > end {
+            warn!("start_line ({}) > end_line ({}), swapping them", start, end);
+            (end, start)
+        } else {
+            (start, end)
+        };
         if end > total {
             return Err(anyhow!(
                 "line range [{}, {}] exceeds file length ({})",
