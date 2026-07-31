@@ -1447,6 +1447,13 @@ async fn handle_key(k: crossterm::event::KeyEvent, app: &mut App) {
                 return;
             }
 
+            // Don't send or insert newline while inflight (streaming).
+            // Plain Enter and any modified Enter (Shift+Enter for send
+            // under EnterNewline mode) are both suppressed.
+            if app.inflight.is_some() {
+                return;
+            }
+
             // Treat any modifier (Shift, Ctrl, Alt, Meta) as the "modified
             // variant". This matters because some Windows consoles drop
             // the SHIFT bit for Enter specifically — without this fallback
