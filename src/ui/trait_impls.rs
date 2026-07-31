@@ -794,7 +794,7 @@ impl TabWidget for crate::function::PastePreviewState {
             )));
         } else if let Some(ref text) = self.text {
             for &line_str in text.lines().take(5).collect::<Vec<&str>>().iter() {
-                lines.push(Line::from(Span::raw(line_str)));
+                lines.push(Line::from(Span::raw(line_str.replace('\t', "    "))));
             }
         } else {
             lines.push(Line::from(Span::styled(
