@@ -284,6 +284,15 @@ pub(super) fn build_tool_block_rows(
                 return rows;
             }
         }
+        // For shell_command, render a preview from the title even
+        // when streaming_input is empty (e.g. direct `!` / `!!`).
+        if matches!(tool.name.as_str(), "shell_command" | "command") {
+            let cmd = tool.title.strip_prefix("$ ").unwrap_or(&tool.title);
+            let rows = build_streaming_shell_rows(cmd, width, bg, tool.started_at);
+            if !rows.is_empty() {
+                return rows;
+            }
+        }
         // No usable streaming input yet — render nothing so the
         // block occupies no vertical space until content arrives.
         return vec![];
