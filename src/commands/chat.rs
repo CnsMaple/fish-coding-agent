@@ -12,6 +12,7 @@ use super::utils::{
 };
 use super::{
     build_agents_content, compact_now, open_settings, system_prompt, system_prompt_dynamic,
+    system_prompt_dynamic_with_title,
 };
 use super::{MSG_PROVIDER_INVALID, MSG_REQUEST_IN_FLIGHT};
 pub fn send_chat(app: &mut App, user_text: String, image_parts: Vec<crate::session::ContentPart>) {
@@ -319,7 +320,11 @@ pub fn send_message(app: &mut App, user_msg: Message) {
     let sp = if app.config.prefix_cache {
         core_sp
     } else {
-        format!("{}\n\n{}", core_sp, system_prompt_dynamic())
+        format!(
+            "{}\n\n{}",
+            core_sp,
+            system_prompt_dynamic_with_title(&app.session_title)
+        )
     };
     let req = ChatRequest {
         model,

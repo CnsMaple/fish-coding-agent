@@ -370,6 +370,18 @@ pub(super) fn tool_defs() -> Vec<ToolDef> {
             }),
         },
         ToolDef {
+            name: "update_title",
+            description: "Update the session title to better reflect the conversation topic. Call this when the conversation has evolved into a different task or when the current title no longer represents the session content. The title is shown in the UI status bar and session list. If you cannot generate a meaningful title, do not call this tool — the system will fall back to the first prompt text.".to_string(),
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "title": { "type": "string", "description": "The new session title, concise and descriptive (max 40 chars recommended)." }
+                },
+                "required": ["title"],
+                "additionalProperties": false
+            }),
+        },
+        ToolDef {
             name: "sub_agent",
             description: "Launch a new agent to handle complex, multistep tasks autonomously.\n\nWhen using the sub_agent tool, you must specify a subagent_type parameter to select which agent type to use.\n\nWhen NOT to use the sub_agent tool:\n- If you want to read a specific file path, use the Read or Glob tool instead\n- If you are searching for a specific class definition, use the Grep tool instead\n- If you are searching for code within a specific file or set of 2-3 files, use the Read tool instead\n- If no available agent is a good fit for the task, use other tools directly\n\nUsage notes:\n1. Launch multiple agents concurrently whenever possible\n2. Once you have delegated work to an agent, do not duplicate that work yourself\n3. When the agent is done, it will return a single message back to you\n4. Each agent invocation starts with a fresh context\n5. The agent's outputs should generally be trusted\n6. Clearly tell the agent whether you expect it to write code or just to do research\n7. If the agent description mentions it should be used proactively, use your best judgement\n\nAvailable agent types:\n- general: General-purpose agent for complex questions and multi-step tasks. Has full tool access.\n- explore: Fast agent specialized for exploring codebases. Use this when you need to quickly find files by patterns, search code for keywords, or answer questions about the codebase. When calling this agent, specify the desired thoroughness level: \"quick\" for basic searches, \"medium\" for moderate exploration, or \"very thorough\" for comprehensive analysis.".to_string(),
             schema: json!({

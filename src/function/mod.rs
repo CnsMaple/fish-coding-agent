@@ -335,6 +335,7 @@ impl App {
         let model_cache = ModelCache::load(&cache_file);
         let session_id = crate::session::store::new_session_id();
         let session_title = crate::session::store::default_title(&cwd);
+        status.session_title = session_title.clone();
         let mut app = Self {
             config,
             config_path,
@@ -656,6 +657,7 @@ impl App {
         self.session.clear();
         self.session_id = crate::session::store::new_session_id();
         self.session_title = crate::session::store::default_title(&self.cwd);
+        self.status.session_title = self.session_title.clone();
         self.paste_blocks.clear();
         self.image_blocks.clear();
         self.block_undo_stack.clear();
@@ -813,6 +815,7 @@ impl App {
             }
             None => {
                 self.session_title = title.clone();
+                self.status.session_title = self.session_title.clone();
                 self.save_current_session();
                 self.notify(
                     crate::function::notifications::ToastLevel::Ok,
@@ -830,6 +833,7 @@ impl App {
             Ok(stored) => {
                 self.session_id = stored.id;
                 self.session_title = stored.title;
+                self.status.session_title = self.session_title.clone();
                 self.session = Session {
                     messages: stored.messages,
                     todo_items: stored.todo_items.clone(),

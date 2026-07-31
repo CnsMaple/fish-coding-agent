@@ -763,6 +763,10 @@ pub(super) fn build_agents_content(app: &App) -> String {
 /// so keeping them separate from the static core avoids invalidating
 /// the prefix cache on every request.
 pub(super) fn system_prompt_dynamic() -> String {
+    system_prompt_dynamic_with_title("")
+}
+
+pub(super) fn system_prompt_dynamic_with_title(session_title: &str) -> String {
     let now = chrono::Local::now();
     let date = now.format("%Y-%m-%d %A").to_string();
     let cwd = std::env::current_dir()
@@ -770,12 +774,17 @@ pub(super) fn system_prompt_dynamic() -> String {
         .unwrap_or_else(|_| ".".to_string());
     let os = crate::tools::os_name();
     let shell = crate::tools::shell_description();
+    let title_line = if session_title.is_empty() {
+        String::new()
+    } else {
+        format!("\nCurrent session title: {session_title}\n")
+    };
     format!(
         "\
 Current date: {date}
 OS: {os}
 Shell: {shell} ({shell_details})
-Workspace: {workspace}
+Workspace: {workspace}{title_line}
 
 All file paths are relative to the workspace unless noted otherwise. \
 Use `list`, `grep`, and `glob` to discover files — never invent or guess paths.",
@@ -784,6 +793,7 @@ Use `list`, `grep`, and `glob` to discover files — never invent or guess paths
         shell = shell,
         shell_details = crate::tools::shell_guidance(),
         workspace = cwd,
+        title_line = title_line,
     )
 }
 
@@ -932,6 +942,22 @@ training data, or when the task references technologies or APIs you're unsure ab
 Delegate a complex, multi-step subtask to a sub-agent. The sub-agent runs independently \
 and returns a single result. Use `\"general\"` for broad tasks and `\"explore\"` for \
 codebase search/analysis. The sub-agent cannot spawn further sub-agents.
+
+### update_title(title)
+
+Update the session title when the conversation topic has evolved. The title is displayed \
+in the UI status bar and session list. Do NOT call this on every turn — only call it when \
+the current topic has meaningfully diverged from the existing title. If you cannot generate \
+a meaningful and concise title, skip this tool — the system falls back to the initial \
+prompt text as the title.
+
+## Session title management
+
+The session title (shown in the status bar) is initially derived from the first user prompt. \
+You can use `update_title` to give the session a more descriptive name when the \
+conversation shifts to a new topic. The current title is provided in the dynamic context \
+at the start of each request. Only update the title when the current title no longer \
+represents the session's primary focus.
 
 ## Workflow
 

@@ -399,6 +399,27 @@ pub(super) async fn todowrite(args: &str) -> Result<String> {
     .to_string())
 }
 
+pub(super) async fn update_title(args: &str) -> Result<String> {
+    #[derive(serde::Deserialize)]
+    struct UpdateTitleArgs {
+        title: String,
+    }
+    let args: UpdateTitleArgs = serde_json::from_str(args)?;
+    let title = args.title.trim().to_string();
+    if title.is_empty() {
+        return Err(anyhow!("update_title: title is empty"));
+    }
+    if title.chars().count() > 80 {
+        return Err(anyhow!("update_title: title too long (max 80 chars)"));
+    }
+    Ok(json!({
+        "kind": "update_title",
+        "title": title,
+        "status": "ok",
+    })
+    .to_string())
+}
+
 pub(super) async fn glob_search(args: &str, cwd: &Path) -> Result<String> {
     let args: GlobArgs = serde_json::from_str(args)?;
     if args.pattern.trim().is_empty() {

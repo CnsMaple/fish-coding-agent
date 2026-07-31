@@ -553,6 +553,7 @@ pub fn is_valid_tool(name: &str) -> bool {
             | "webfetch"
             | "websearch"
             | "sub_agent"
+            | "update_title"
     )
 }
 

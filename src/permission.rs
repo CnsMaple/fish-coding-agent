@@ -27,6 +27,7 @@ pub mod tool {
     pub const WEB_FETCH: &str = "webfetch";
     pub const WEB_SEARCH: &str = "websearch";
     pub const SUB_AGENT: &str = "sub_agent";
+    pub const UPDATE_TITLE: &str = "update_title";
 }
 
 /// Sub-agent types that can be spawned by the `sub_agent` tool.
@@ -82,6 +83,7 @@ fn yolo_rules() -> &'static [(&'static str, Action)] {
         (tool::WEB_FETCH, Action::Allow),
         (tool::WEB_SEARCH, Action::Allow),
         (tool::SUB_AGENT, Action::Allow),
+        (tool::UPDATE_TITLE, Action::Allow),
     ]
 }
 
@@ -148,6 +150,7 @@ fn explore_sub_agent_rules() -> &'static [(&'static str, Action)] {
         (tool::WEB_FETCH, Action::Allow),
         (tool::WEB_SEARCH, Action::Allow),
         (tool::SUB_AGENT, Action::Deny),
+        (tool::UPDATE_TITLE, Action::Allow),
     ]
 }
 
@@ -240,6 +243,7 @@ mod tests {
             tool::WEB_FETCH,
             tool::WEB_SEARCH,
             tool::SUB_AGENT,
+            tool::UPDATE_TITLE,
         ] {
             assert_eq!(check(Agent::Build, t), Action::Allow, "{t} should allow");
         }

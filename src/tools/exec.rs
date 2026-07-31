@@ -42,6 +42,7 @@ pub async fn execute_tool_with_agent(
         t::SKILL => skill_load(args).await,
         t::WEB_FETCH => webfetch(args).await,
         t::WEB_SEARCH => websearch(args).await,
+        t::UPDATE_TITLE => update_title(args).await,
         t::SUB_AGENT => Err(anyhow!(
             "sub_agent must be executed from within the chat stream loop"
         )),

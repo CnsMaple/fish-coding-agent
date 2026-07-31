@@ -682,6 +682,24 @@ fn handle_todowrite_result(app: &mut App, content: &str) {
     }
 }
 
+fn handle_update_title_result(app: &mut App, content: &str) {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(content) else {
+        return;
+    };
+    let kind = value.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+    if kind != "update_title" {
+        return;
+    }
+    let Some(title) = value.get("title").and_then(|v| v.as_str()) else {
+        return;
+    };
+    let title = title.trim().to_string();
+    if title.is_empty() {
+        return;
+    }
+    app.rename_session(None, title);
+}
+
 fn handle_msg(msg: AppMsg, app: &mut App) {
     match msg {
         AppMsg::ChatDelta(s) => {
@@ -722,6 +740,9 @@ fn handle_msg(msg: AppMsg, app: &mut App) {
         } => {
             if name == "todowrite" {
                 handle_todowrite_result(app, &content);
+            }
+            if name == "update_title" {
+                handle_update_title_result(app, &content);
             }
             open_tool_function_panel(app, &name, &content);
             app.session

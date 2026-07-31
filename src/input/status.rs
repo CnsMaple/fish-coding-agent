@@ -48,6 +48,8 @@ pub struct StatusBar {
     /// Compact MCP server status summary, e.g. `"2✓ 1✗"`.
     /// `None` means no MCP servers are configured or enabled.
     pub mcp_summary: Option<String>,
+    /// Current session title, shown in the status bar after ctx.
+    pub session_title: String,
 }
 
 impl StatusBar {
@@ -75,6 +77,7 @@ impl StatusBar {
             compact_pct: None,
             compact_triggered: false,
             mcp_summary: None,
+            session_title: String::new(),
         }
     }
 
@@ -302,6 +305,10 @@ impl StatusBar {
                     Theme::base(),
                 ));
             }
+        }
+        if !self.session_title.is_empty() {
+            spans.push(Span::raw(" | "));
+            spans.push(Span::styled(self.session_title.clone(), Theme::bold()));
         }
         Line::from(spans)
     }
