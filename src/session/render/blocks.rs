@@ -318,7 +318,7 @@ pub(super) fn build_tool_block_rows(
         }
     } else if tool.name == "ask" {
         vec![]
-    } else if tool.name == "plan" || tool.name == "sub_agent" {
+    } else if tool.name == "plan" {
         let (output, footer) = tool_display_content(tool);
         build_markdown_block_rows(
             &tool.title,
