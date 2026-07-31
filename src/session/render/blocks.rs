@@ -1523,6 +1523,11 @@ fn tool_display_content(tool: &ToolResultBlock) -> (String, String) {
             return (body, footer);
         }
     }
+    if tool.name == "update_title" {
+        if let Some(title) = update_title_display(&tool.content) {
+            return (title, String::new());
+        }
+    }
     (tool.content.trim_end().to_string(), String::new())
 }
 
@@ -1563,6 +1568,19 @@ fn plan_tool_display(content: &str) -> Option<(String, String)> {
         _ => "↳ approve / reject in the plan tab".to_string(),
     };
     Some((rendered, footer))
+}
+
+fn update_title_display(content: &str) -> Option<String> {
+    let inner = crate::session::unwrap_tool_result_content(content);
+    let value: serde_json::Value = serde_json::from_str(&inner).ok()?;
+    if value.get("kind").and_then(|v| v.as_str()) != Some("update_title") {
+        return None;
+    }
+    value
+        .get("title")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 #[derive(Debug, Clone)]
