@@ -644,7 +644,7 @@ impl TabWidget for crate::function::TodoTabState {
                 };
                 let status_label = match item.status.as_str() {
                     "pending" => "\u{25CB}",
-                    "in_progress" => "\u{25CC}",
+                    "in_progress" => "\u{25CF}",
                     "completed" => "\u{2713}",
                     _ => "?",
                 };
