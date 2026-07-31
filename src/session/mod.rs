@@ -765,6 +765,9 @@ impl Session {
                     call_id,
                     String::new(),
                 ));
+                if let Some(tool) = m.tool_results.last_mut() {
+                    tool.started_at = Some(chrono::Utc::now());
+                }
                 m.invalidate_render_caches();
                 self.invalidate_layout_cache();
             }
