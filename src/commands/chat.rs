@@ -815,12 +815,7 @@ pub(super) async fn run_sub_agent(
         content: format!("[sub_agent:{}] starting…\n", sub.as_str()),
     });
 
-    let max_steps = args
-        .get("max_steps")
-        .and_then(|v| v.as_u64())
-        .map(|v| v.clamp(1, 100) as usize)
-        .unwrap_or(15);
-    let system_prompt = sub_agent_system_prompt(sub, max_steps);
+    let system_prompt = sub_agent_system_prompt(sub);
     let tools = match provider {
         ProviderKind::Anthropic => crate::tools::anthropic_tool_specs_for_sub_agent(sub),
         _ => crate::tools::openai_tool_specs_for_sub_agent(sub),
@@ -843,9 +838,19 @@ pub(super) async fn run_sub_agent(
     };
 
     let retry_delays: [u64; 3] = [10, 30, 60];
-    for step in 0..max_steps {
+    for step in 0.. {
         if *cancel_rx.borrow() {
             return json!({"ok": false, "error": "sub-agent cancelled"}).to_string();
+        }
+
+        if step > 0 && step % 5 == 0 {
+            let _ = tx.send(crate::event::AppMsg::ToolDelta {
+                call_id: String::new(),
+                content: format!(
+                    "[sub_agent:{}] step {step} — still working…\n",
+                    sub.as_str()
+                ),
+            });
         }
 
         let mut text = String::new();
@@ -1053,13 +1058,10 @@ pub(super) async fn run_sub_agent(
         }
     }
 
-    json!({"ok": false, "error": format!("sub-agent exceeded max steps ({max_steps})")}).to_string()
+    "".to_string()
 }
 
-pub(super) fn sub_agent_system_prompt(
-    sub: crate::permission::SubAgent,
-    max_steps: usize,
-) -> String {
+pub(super) fn sub_agent_system_prompt(sub: crate::permission::SubAgent) -> String {
     let now = chrono::Local::now();
     let date = now.format("%Y-%m-%d %A").to_string();
     let cwd = std::env::current_dir()
@@ -1085,7 +1087,7 @@ You are a sub-agent handling a delegated task. Work autonomously and return a si
 concise result. Do not ask questions or present plans — just complete the task and \
 report back.
 
-Maximum steps allowed: {max_steps}. Conserve steps and return as soon as the task is complete.
+
 
 {base_ctx}
 
@@ -1098,14 +1100,13 @@ Maximum steps allowed: {max_steps}. Conserve steps and return as soon as the tas
 - Do not call the sub_agent tool — you cannot spawn further sub-agents.
 - If a tool call fails, try an alternative approach before giving up.",
             base_ctx = base_ctx,
-            max_steps = max_steps,
         ),
         crate::permission::SubAgent::Explore => format!(
             "\
 You are a fast codebase exploration sub-agent. Your job is to search, read, and \
 analyze code. Use grep, glob, read, list, webfetch, and websearch to find information.
 
-Maximum steps allowed: {max_steps}. Conserve steps and return as soon as you have enough information. Do not burn steps on exhaustive reads when a grep result already answers the question.
+
 
 {base_ctx}
 
@@ -1120,7 +1121,6 @@ Maximum steps allowed: {max_steps}. Conserve steps and return as soon as you hav
 - If a search returns no results, try alternative patterns before giving up.
 - If you cannot find the answer after reasonable searching, stop and report what you found instead of using all steps.",
             base_ctx = base_ctx,
-            max_steps = max_steps,
         ),
     }
 }
