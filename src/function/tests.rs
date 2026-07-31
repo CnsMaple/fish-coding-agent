@@ -38,6 +38,7 @@ fn make_test_app() -> App {
         pending_chat_content: String::new(),
         pending_thinking_content: String::new(),
         notifications: Notifications::default(),
+        last_thinking_flush: std::time::Instant::now(),
         model_cache: crate::function::notifications::ModelCache::default(),
         hit_rate: crate::function::notifications::HitRate::new(50),
         token_rate: crate::function::notifications::TokenRate::new(50),

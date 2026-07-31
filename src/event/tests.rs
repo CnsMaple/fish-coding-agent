@@ -53,6 +53,7 @@ fn make_app() -> App {
         notifications: Notifications::default(),
         model_cache: crate::function::notifications::ModelCache::default(),
         hit_rate: crate::function::notifications::HitRate::new(50),
+        last_thinking_flush: std::time::Instant::now(),
         token_rate: crate::function::notifications::TokenRate::new(50),
         response_started_at: None,
         response_accumulated: std::time::Duration::ZERO,
@@ -127,7 +128,7 @@ fn make_app_with_provider() -> App {
 fn expand_paste_blocks_replaces_marker_with_block() {
     let mut blocks = VecDeque::from(["a\nb\nc".to_string()]);
     let out = expand_paste_blocks("before [paste 3 lines] after".to_string(), &mut blocks);
-    assert_eq!(out, "before ```paste\na\nb\nc\n``` after");
+    assert_eq!(out, "before \n```paste\na\nb\nc\n```\n after");
     assert!(blocks.is_empty());
 }
 

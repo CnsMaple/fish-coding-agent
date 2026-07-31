@@ -1539,7 +1539,7 @@ mod tests {
             .map(|_| line.as_str())
             .collect::<Vec<_>>()
             .join("\n");
-        for i in 0..count {
+        for _i in 0..count {
             s.push(Message {
                 role: Role::Assistant,
                 content: content.clone(),
