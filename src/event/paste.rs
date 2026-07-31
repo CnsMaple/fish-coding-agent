@@ -533,8 +533,16 @@ pub(super) fn expand_paste_blocks(mut raw: String, paste_blocks: &mut VecDeque<S
         let line_count = paste_line_count(&text);
         let marker = format!("[paste {line_count} lines]");
         let text = text.strip_suffix('\n').unwrap_or(&text);
-        let block = format!("```paste\n{text}\n```");
-        if raw.contains(&marker) {
+        let mut block = format!("```paste\n{text}\n```");
+        // Ensure block is surrounded by newlines so it's not merged with adjacent text
+        if let Some(pos) = raw.find(&marker) {
+            if pos > 0 && raw.as_bytes()[pos - 1] != b'\n' {
+                block.insert(0, '\n');
+            }
+            let end_pos = pos + marker.len();
+            if end_pos < raw.len() && raw.as_bytes()[end_pos] != b'\n' {
+                block.push('\n');
+            }
             raw = raw.replacen(&marker, &block, 1);
         }
     }
@@ -577,7 +585,15 @@ pub(super) fn expand_skill_blocks(mut raw: String) -> String {
             .unwrap_or(0);
         let fence_depth = (body_backticks + 1).clamp(3, 10);
         let fence = "`".repeat(fence_depth);
-        let block = format!("{fence}skill:{name}\n{body}\n{fence}");
+        let mut block = format!("{fence}skill:{name}\n{body}\n{fence}");
+        // Ensure block is surrounded by newlines so it's not merged with adjacent text
+        if start > 0 && raw.as_bytes()[start - 1] != b'\n' {
+            block.insert(0, '\n');
+        }
+        let end_pos = start + marker_len;
+        if end_pos < raw.len() && raw.as_bytes()[end_pos] != b'\n' {
+            block.push('\n');
+        }
         raw.replace_range(start..start + marker_len, &block);
     }
     raw
