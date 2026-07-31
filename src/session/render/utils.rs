@@ -288,7 +288,9 @@ pub(super) fn wrap_line(line: &str, max_width: usize) -> Vec<String> {
     // (ratatui's crate, counts them as 1). Without this, a stray
     // \r would make wrap_line think the line is narrower than it
     // actually renders, causing the right border to shift.
+    // Tab is converted to 4 spaces before filtering.
     let line: String = line
+        .replace('\t', "    ")
         .chars()
         .map(|c| if c == '\n' { ' ' } else { c })
         .filter(|c| !c.is_control())
@@ -333,13 +335,15 @@ pub fn visible_width(s: &str) -> usize {
     UnicodeWidthStr::width(s)
 }
 
-/// Strip control characters (except newline) that cause width
+/// Strip control characters (except newline, tab) that cause width
 /// mismatches between `unicode-width` v0.1 (used by our code,
 /// counts them as width 0) and v0.2 (used by ratatui, counts
 /// them as width 1). Without this, a stray `\r` in the content
 /// would push the right border `|` past the visible area.
+/// Tab is converted to 4 spaces instead of being stripped.
 pub(super) fn strip_control_chars(s: &str) -> String {
-    s.chars()
+    s.replace('\t', "    ")
+        .chars()
         .map(|c| if c == '\n' { ' ' } else { c })
         .filter(|c| !c.is_control())
         .collect()

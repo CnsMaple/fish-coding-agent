@@ -70,12 +70,13 @@ pub fn render(text: &str) -> Vec<Line<'static>> {
 }
 
 pub fn render_with_width(text: &str, width: usize) -> Vec<Line<'static>> {
-    // Fast path: if the text has no \r, no zero-width/invisible chars,
-    // and no table-like lines, skip the cleaning + preprocess pass
+    // Fast path: if the text has no \r, no tabs, no zero-width/invisible
+    // chars, and no table-like lines, skip the cleaning + preprocess pass
     // entirely and parse the original string directly. This avoids
     // a full String allocation + char-by-char filter on every call,
     // which matters during streaming (60 fps re-renders).
     let has_cr = text.contains('\r');
+    let has_tab = text.contains('\t');
     let has_invisible = text.contains(|c: char| {
         matches!(
             c,
@@ -92,6 +93,7 @@ pub fn render_with_width(text: &str, width: usize) -> Vec<Line<'static>> {
         )
     });
     if !has_cr
+        && !has_tab
         && !has_invisible
         && !text.lines().any(|l| {
             let t = l.trim();
@@ -106,7 +108,10 @@ pub fn render_with_width(text: &str, width: usize) -> Vec<Line<'static>> {
     if cleaned.contains('\r') {
         cleaned = cleaned.replace("\r\n", "\n").replace('\r', "\n");
     }
-    // 2. Strip zero-width / invisible chars that can break table detection.
+    // 2. Replace tabs with spaces so width calculations are correct
+    //    (unicode-width treats tab as width 0, breaking code block borders).
+    cleaned = cleaned.replace('\t', "    ");
+    // 3. Strip zero-width / invisible chars that can break table detection.
     cleaned = cleaned
         .chars()
         .filter(|&c| {
@@ -118,7 +123,7 @@ pub fn render_with_width(text: &str, width: usize) -> Vec<Line<'static>> {
             )
         })
         .collect();
-    // 3. Pre-process table-like blocks so even concatenated single-line
+    // 4. Pre-process table-like blocks so even concatenated single-line
     //    tables or oddly-formatted LLM output gets proper line breaks.
     cleaned = preprocess_tables(&cleaned);
     MdRenderer::new(width).render(&cleaned)

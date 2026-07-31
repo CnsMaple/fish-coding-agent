@@ -513,6 +513,8 @@ async fn try_consume_burst(
                         keys.push(k);
                     }
                     KeyCode::Tab if k.modifiers.is_empty() => {
+                        // Push Tab through — handle_key's Tab handler will
+                        // insert 4 spaces when focus is Input.
                         text.push('\t');
                         keys.push(k);
                     }
@@ -1415,8 +1417,16 @@ async fn handle_key(k: crossterm::event::KeyEvent, app: &mut App) {
             }
         }
         KeyCode::Tab => {
-            // Tab jumps to the Plan tab (or creates one).
-            app.jump_to_plan();
+            if app.focus_target == crate::function::FocusTarget::Input {
+                // Tab in input inserts 4 spaces instead of jumping to Plan,
+                // so pasted text with tabs works correctly.
+                app.push_input_undo();
+                app.input.insert_str("    ");
+                app.sync_completion();
+            } else {
+                // Tab jumps to the Plan tab (or creates one).
+                app.jump_to_plan();
+            }
         }
         KeyCode::BackTab => {
             // Shift+Tab cycles forward through tabs (wrap last→first).

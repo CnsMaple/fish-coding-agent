@@ -13,6 +13,25 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+/// Tab width in display columns.
+const TAB_WIDTH: usize = 4;
+
+/// Display width of a single character. Tab is treated as `TAB_WIDTH`
+/// columns instead of `unicode-width`'s 0, so cursor positioning and
+/// line wrapping work correctly for pasted text containing tabs.
+fn char_width(c: char) -> usize {
+    if c == '\t' {
+        TAB_WIDTH
+    } else {
+        UnicodeWidthChar::width(c).unwrap_or(0)
+    }
+}
+
+/// Display width of a string, treating tab as `TAB_WIDTH` columns.
+fn str_width(s: &str) -> usize {
+    s.chars().map(char_width).sum()
+}
+
 /// Maximum number of undo snapshots retained in `InputState::undo_stack`.
 /// Each snapshot clones the full buffer, so the cap bounds memory usage.
 const UNDO_LIMIT: usize = 100;
@@ -304,7 +323,7 @@ impl InputState {
             .rfind('\n')
             .map(|i| i + 1)
             .unwrap_or(0);
-        let col = UnicodeWidthStr::width(&self.buffer[line_start..cursor]);
+        let col = str_width(&self.buffer[line_start..cursor]);
         (line_start, col)
     }
 
@@ -410,7 +429,7 @@ impl InputState {
                 self.selection = None;
                 return;
             }
-            let w = UnicodeWidthChar::width(c).unwrap_or(0);
+            let w = char_width(c);
             acc += w;
             if acc >= offset {
                 self.cursor = i + c.len_utf8();
@@ -481,7 +500,7 @@ fn col_to_byte(s: &str, col: u16) -> usize {
 fn byte_at_display_col(s: &str, col: usize) -> usize {
     let mut acc = 0usize;
     for (i, c) in s.char_indices() {
-        let w = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+        let w = char_width(c);
         if acc + w > col {
             return i;
         }
@@ -601,7 +620,7 @@ pub fn render(area: Rect, buf: &mut Buffer, app: &mut crate::app::App) {
     let seg_vis: Vec<usize> = all_lines
         .iter()
         .map(|text| {
-            let text_width = UnicodeWidthStr::width(*text);
+            let text_width = str_width(text);
             let seg_total_w = prompt_width + text_width;
             if seg_total_w <= inner_w {
                 1
@@ -690,7 +709,7 @@ pub fn render(area: Rect, buf: &mut Buffer, app: &mut crate::app::App) {
             let mut chunk_w = 0usize;
             let mut split_at = 0usize;
             for (bi, ch) in remaining.char_indices() {
-                let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
+                let cw = char_width(ch);
                 if chunk_w + cw > max_text_w {
                     break;
                 }
@@ -712,6 +731,11 @@ pub fn render(area: Rect, buf: &mut Buffer, app: &mut crate::app::App) {
             let chunk_abs_end = line_start + text_byte_offset;
             let chunk_len = chunk.len();
 
+            // Replace tabs with spaces for display only (terminal renders \t
+            // at its own tab stop, breaking width alignment). The chunk is
+            // still indexed by original buffer byte offsets for cursor/selection.
+            let render = |s: &str| s.replace('\t', "    ");
+
             // Selection handling
             if let Some((s, e)) = app.input.selection {
                 let (s, e) = if s <= e { (s, e) } else { (e, s) };
@@ -720,29 +744,29 @@ pub fn render(area: Rect, buf: &mut Buffer, app: &mut crate::app::App) {
                 let local_start = sel_start - chunk_abs_start;
                 let local_end = sel_end - chunk_abs_start;
                 if local_start > 0 {
-                    spans.push(Span::raw(chunk[..local_start].to_string()));
+                    spans.push(Span::raw(render(&chunk[..local_start])));
                 }
                 if local_start < local_end {
                     spans.push(Span::styled(
-                        chunk[local_start..local_end].to_string(),
+                        render(&chunk[local_start..local_end]),
                         Theme::reversed(),
                     ));
                 }
                 if local_end < chunk_len {
-                    spans.push(Span::raw(chunk[local_end..].to_string()));
+                    spans.push(Span::raw(render(&chunk[local_end..])));
                 }
             } else if cursor >= chunk_abs_start && cursor <= chunk_abs_end {
                 let local = cursor - chunk_abs_start;
                 if local > 0 {
-                    spans.push(Span::raw(chunk[..local].to_string()));
+                    spans.push(Span::raw(render(&chunk[..local])));
                 }
                 // Hardware cursor (shown via \x1B[?25h) handles the
                 // visual cursor; no block character needed.
                 if local < chunk_len {
-                    spans.push(Span::raw(chunk[local..].to_string()));
+                    spans.push(Span::raw(render(&chunk[local..])));
                 }
             } else {
-                spans.push(Span::raw(chunk.to_string()));
+                spans.push(Span::raw(render(chunk)));
             }
             visual_lines.push(Line::from(spans));
         }
@@ -780,7 +804,7 @@ pub fn render(area: Rect, buf: &mut Buffer, app: &mut crate::app::App) {
             cursor_col = prompt_width as u16;
             let mut line_w = prompt_width;
             for (_, ch) in text_before.char_indices() {
-                let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
+                let cw = char_width(ch);
                 if line_w + cw > inner_w {
                     vi += 1;
                     line_w = prompt_width;

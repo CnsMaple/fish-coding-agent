@@ -238,6 +238,9 @@ pub(super) fn try_insert_image_from_path(text: &str, app: &mut App) -> bool {
 
 pub(super) fn insert_paste_block(text: String, app: &mut App, quota: bool) {
     let mut text = normalize_paste_text(&text);
+    // Replace tabs with 4 spaces so the paste block renders correctly
+    // (terminal renders \t at its own tab stop, breaking width alignment).
+    text = text.replace('\t', "    ");
     // Strip trailing newline so the paste doesn't inadvertently send
     // the prompt when Enter is pressed afterwards.
     if text.ends_with('\n') {
