@@ -2373,6 +2373,11 @@ pub(crate) fn handle_ctrl_n(app: &mut App) {
             // Point active at the newly-pushed Notifications tab.
             app.function.active = app.function.tabs.len().saturating_sub(1);
         }
+        // Reset query/search state so stale filters don't cause blank display.
+        app.notifications.query.clear();
+        app.notifications.cursor = 0;
+        app.notifications.scroll = 0;
+        app.notifications.searching = false;
         app.show_panel();
         app.acknowledge_panel();
     } else if notif_active {

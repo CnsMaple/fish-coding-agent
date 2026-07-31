@@ -509,37 +509,18 @@ impl App {
         // default) inside `StatusBar::recompute_compact_pct`.
     }
 
-    /// Push a toast; force-show the panel only for `Fail`-level
-    /// notifications. All other levels increment the unread count
-    /// without popping open the panel so the user sees the badge
-    /// in the status line instead.
-    /// The Notifications tab is created on-demand — when no other tab
-    /// is already open, it also becomes the active tab.
+    /// Push a toast and increment the unread badge count.
+    /// Does NOT create the Notifications tab or show the panel —
+    /// the user opens it explicitly via Ctrl+N.
+    /// Only `Fail`-level adds to `pending_events` so the badge
+    /// reflects actionable notifications.
     pub fn notify(
         &mut self,
         level: crate::function::notifications::ToastLevel,
         text: impl Into<String>,
     ) {
         let text = text.into();
-        let notif_exists = self
-            .function
-            .tabs
-            .iter()
-            .any(|t| matches!(t, SidebarTab::Notifications));
-        if !notif_exists {
-            let saved_active = self.function.active;
-            self.function.push(SidebarTab::Notifications);
-            // Restore the previous active tab — push() always sets
-            // active to the new tab, but we don't want to steal focus
-            // from an existing tab (e.g. Settings, Ask).
-            if saved_active < self.function.tabs.len() - 1 {
-                self.function.active = saved_active;
-            }
-        }
-        if !self.function_visible {
-            if level == crate::function::notifications::ToastLevel::Fail {
-                self.function_visible = true;
-            }
+        if !self.function_visible && level == crate::function::notifications::ToastLevel::Fail {
             self.pending_events = self.pending_events.saturating_add(1);
         }
         self.notifications.push(level, text);
@@ -1167,12 +1148,7 @@ impl App {
     /// when the panel actually disappears; if other tabs remain visible
     /// the focus stays where it is (the user can switch with Alt+L).
     pub fn maybe_hide_panel(&mut self) {
-        let has_non_trivial = self
-            .function
-            .tabs
-            .iter()
-            .any(|t| !matches!(t, SidebarTab::Notifications));
-        if !has_non_trivial {
+        if self.function.tabs.is_empty() {
             self.focus_target = FocusTarget::Input;
             self.function_panel_cursor = None;
             self.function_visible = false;

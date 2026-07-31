@@ -695,6 +695,7 @@ fn commit_model_with_empty_function_panel_does_not_panic() {
     // commit, the function panel should only have the Notifications tab
     // (created by save_config's notify). Verify no panic.
     let mut app = make_app();
+    app.function.push(SidebarTab::Notifications);
     app.function.tabs.clear();
     app.function.active = 0;
     app.config.active = Some(make_id(ProviderKind::Openai, ProviderMode::Key));
@@ -705,10 +706,8 @@ fn commit_model_with_empty_function_panel_does_not_panic() {
 
     commit_model(&mut app, ProviderKind::Openai, "gpt-4o".to_string(), false);
 
-    // After commit, the Notifications tab is created by save_config.
-    assert_eq!(app.function.tabs.len(), 1);
-    assert!(matches!(app.function.tabs[0], SidebarTab::Notifications));
-    assert_eq!(app.function.active, 0);
+    // After commit, no Notifications tab is auto-created by notify() anymore.
+    assert_eq!(app.function.tabs.len(), 0);
 }
 
 #[test]
@@ -873,6 +872,9 @@ fn check_config_does_not_auto_open_settings() {
         "check_config must return false when there are errors"
     );
     // Tabs must still be only Notifications. No Settings tab.
+    // Notifications tab is not auto-created by notify() anymore,
+    // so push it explicitly for this test.
+    app.function.push(SidebarTab::Notifications);
     assert_eq!(app.function.tabs.len(), 1);
     assert!(matches!(app.function.tabs[0], SidebarTab::Notifications));
     // Toasts were pushed (Fail auto-shows the panel; that's allowed).
@@ -952,6 +954,7 @@ fn ctrl_n_clears_notifications_when_hiding() {
     use crate::function::notifications::ToastLevel;
 
     let mut app = make_app();
+    app.function.push(SidebarTab::Notifications);
     app.function_visible = true;
     app.function.active = 0; // Notifications
     app.notify(ToastLevel::Fail, "boom");
@@ -975,12 +978,12 @@ fn ctrl_n_does_not_clear_when_switching_tabs() {
     use crate::function::notifications::ToastLevel;
 
     let mut app = make_app();
+    app.function.push(SidebarTab::Notifications);
     app.function_visible = true;
     app.function.push(SidebarTab::Settings(Box::new(
         crate::function::SettingsState::new(&app.config),
     )));
     app.function.active = app.function.tabs.len() - 1;
-    // Use Info level so notify() does not auto-switch the active tab.
     app.notify(ToastLevel::Info, "heads up");
     let before = app.notifications.items.len();
     assert!(before > 0);
@@ -1372,15 +1375,10 @@ fn esc_after_open_model_picker_with_no_provider_does_not_panic() {
     assert!(closed);
     app.maybe_hide_panel();
 
-    // No panic. The Notifications tab was created by `notify(Warn, ...)`
-    // inside `open_model_picker`, so after closing Settings the
-    // Notifications tab remains and the panel stays visible. The user
-    // can Ctrl+N to hide.
-    assert!(app
-        .function
-        .tabs
-        .iter()
-        .any(|t| matches!(t, SidebarTab::Notifications)));
+    // No panic. notify() no longer auto-creates the Notifications tab,
+    // so after closing Settings the panel should be hidden.
+    assert!(!app.function_visible);
+    assert!(app.function.tabs.is_empty());
 }
 
 #[test]
