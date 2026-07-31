@@ -953,11 +953,12 @@ prompt text as the title.
 
 ## Session title management
 
-The session title (shown in the status bar) is initially derived from the first user prompt. \
-You can use `update_title` to give the session a more descriptive name when the \
-conversation shifts to a new topic. The current title is provided in the dynamic context \
-at the start of each request. Only update the title when the current title no longer \
-represents the session's primary focus.
+The session title (shown in the status bar) is initially the directory name. \
+**On your first turn, call `update_title` to generate a meaningful title** based on the \
+user's first prompt (max 40 chars, concise). After that, only update the title when the \
+conversation topic has meaningfully diverged from the current title. The current title \
+is provided in the dynamic context at the start of each request. If you cannot generate \
+a meaningful and concise title, skip this tool — the system falls back to the first prompt text.
 
 ## Workflow
 

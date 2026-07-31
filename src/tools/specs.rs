@@ -371,7 +371,7 @@ pub(super) fn tool_defs() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "update_title",
-            description: "Update the session title to better reflect the conversation topic. Call this when the conversation has evolved into a different task or when the current title no longer represents the session content. The title is shown in the UI status bar and session list. If you cannot generate a meaningful title, do not call this tool — the system will fall back to the first prompt text.".to_string(),
+            description: "Update the session title to better reflect the conversation topic. Call this on your first turn to set a meaningful title from the user's prompt. The title is shown in the UI status bar and session list. If you cannot generate a meaningful title, do not call this tool — the system will fall back to the first prompt text.".to_string(),
             schema: json!({
                 "type": "object",
                 "properties": {
