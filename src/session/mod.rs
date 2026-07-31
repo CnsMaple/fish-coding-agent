@@ -295,6 +295,13 @@ pub struct Message {
     /// cached render output for the others.
     #[serde(default)]
     pub content_version: u64,
+    /// Per-message thinking version counter. Bumped only when thinking
+    /// content changes (via `append_thinking_to_last`). Separated from
+    /// `content_version` so that thinking streaming does not invalidate
+    /// the main content LRU cache entry, keeping the cached markdown
+    /// render of the content portion reusable across frames.
+    #[serde(default)]
+    pub thinking_version: u64,
     /// When true, this message is part of the stable cache prefix.
     /// Prefix messages are sent first in every API request and are
     /// never compacted away. The session prefix grows append-only:
@@ -325,6 +332,7 @@ impl Message {
             line_count,
             cached_content_line_count: None,
             content_version: 0,
+            thinking_version: 0,
             prefix: false,
         }
     }
@@ -402,6 +410,17 @@ impl Message {
         for t in &mut self.tool_results {
             t.cached_line_count_visible = None;
             t.cached_line_count_collapsed = None;
+        }
+    }
+
+    /// Invalidate only thinking-related caches: bumps `thinking_version`
+    /// (not `content_version`) so the main content LRU cache entry is
+    /// preserved. Called on every thinking delta append.
+    pub fn invalidate_thinking_caches(&mut self) {
+        self.thinking_version = self.thinking_version.wrapping_add(1);
+        for seg in &mut self.thinking_segments {
+            seg.cached_line_count_expanded = None;
+            seg.cached_line_count_collapsed = None;
         }
     }
 }
@@ -858,6 +877,7 @@ impl Session {
             line_count: 0,
             cached_content_line_count: None,
             content_version: 0,
+            thinking_version: 0,
             prefix: false,
         };
         self.push(msg);
@@ -906,7 +926,6 @@ impl Session {
     pub fn append_thinking_to_last(&mut self, chunk: &str) {
         if let Some(id) = self.streaming_id {
             if let Some(m) = self.messages.get_mut(id) {
-                m.thinking.push_str(chunk);
                 // If the most recent thinking segment is still open
                 // (no non-thinking content block has begun since),
                 // append into it. Otherwise open a fresh segment.
@@ -952,7 +971,7 @@ impl Session {
                         visible: false,
                     });
                 }
-                m.invalidate_render_caches();
+                m.invalidate_thinking_caches();
                 self.invalidate_layout_cache();
             }
         }

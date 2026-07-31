@@ -295,6 +295,7 @@ pub(super) fn submit_direct_tool_input(app: &mut App, raw: &str) -> bool {
         streaming: true,
         skill_ref: None,
         content_version: 0,
+        thinking_version: 0,
     };
     let id = app.session.push(assistant);
     app.session.streaming_id = Some(id);

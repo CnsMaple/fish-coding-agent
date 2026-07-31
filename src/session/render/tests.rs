@@ -1109,6 +1109,7 @@ mod tests {
             line_count: 0,
             cached_content_line_count: None,
             content_version: 0,
+            thinking_version: 0,
             prefix: false,
         });
         s
@@ -1555,11 +1556,9 @@ mod tests {
                 line_count: lines_per_msg as u32,
                 cached_content_line_count: None,
                 content_version: 0,
+                thinking_version: 0,
                 prefix: false,
             });
-            if i % 2 == 0 {
-                s.push(Message::new(Role::User, format!("prompt {}", i / 2)));
-            }
         }
         s
     }

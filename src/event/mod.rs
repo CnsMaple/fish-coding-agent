@@ -270,7 +270,7 @@ where
         // next 16 ms frame, which is imperceptible. The 100 ms tick
         // keeps the spinner animating even when no deltas arrive.
         if needs_draw && last_draw.elapsed() >= DRAW_INTERVAL {
-            flush_pending_chat(app);
+            flush_pending_chat(app, false);
             if let Err(e) = terminal.draw(|f| crate::ui::render(f, app)) {
                 let _ = e;
             }
@@ -429,14 +429,26 @@ fn flush_pending_request(app: &mut App) {
 
 /// Flush accumulated pending chat/thinking content to the session
 /// before a render draw or before streaming finishes.
-fn flush_pending_chat(app: &mut App) {
+/// Flush accumulated pending chat/thinking content to the session
+/// before a render draw or before streaming finishes.
+///
+/// Chat content is always flushed. Thinking content is throttled to
+/// ~200ms to avoid per-frame re-render churn during fast thinking
+/// streaming. Pass `force_thinking = true` to flush thinking
+/// immediately (used on ChatDone/ChatError).
+fn flush_pending_chat(app: &mut App, force_thinking: bool) {
     if !app.pending_chat_content.is_empty() {
         let s = std::mem::take(&mut app.pending_chat_content);
         app.session.append_to_last(&s);
     }
     if !app.pending_thinking_content.is_empty() {
-        let s = std::mem::take(&mut app.pending_thinking_content);
-        app.session.append_thinking_to_last(&s);
+        let should_flush =
+            force_thinking || app.last_thinking_flush.elapsed() >= Duration::from_millis(200);
+        if should_flush {
+            let s = std::mem::take(&mut app.pending_thinking_content);
+            app.session.append_thinking_to_last(&s);
+            app.last_thinking_flush = std::time::Instant::now();
+        }
     }
 }
 
@@ -780,7 +792,7 @@ fn handle_msg(msg: AppMsg, app: &mut App) {
             }
             finish_model_output_rate(app);
             app.flush_ask_snapshot();
-            flush_pending_chat(app);
+            flush_pending_chat(app, true);
             app.session.finish_streaming();
             app.save_current_session();
             app.inflight = None;
@@ -797,15 +809,12 @@ fn handle_msg(msg: AppMsg, app: &mut App) {
             }
             finish_model_output_rate(app);
             app.flush_ask_snapshot();
-            flush_pending_chat(app);
+            flush_pending_chat(app, true);
             app.session.finish_streaming();
             app.save_current_session();
             app.inflight = None;
             app.cancel_state = CancelState::Idle;
             use crate::function::notifications::ToastLevel;
-            app.notify(ToastLevel::Fail, error.clone());
-            // If this is a context-overflow error, try to compact
-            // and recover. Remove the error message and the
             // streaming assistant placeholder, then trigger
             // compaction. The auto-continue mechanism will resume
             // the conversation after compaction succeeds.

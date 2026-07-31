@@ -108,6 +108,7 @@ pub fn send_message(app: &mut App, user_msg: Message) {
         streaming: true,
         skill_ref: None,
         content_version: 0,
+        thinking_version: 0,
         prefix: false,
     };
     let id = app.session.push(assistant);

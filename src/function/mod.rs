@@ -250,6 +250,12 @@ pub struct App {
     /// Flushed to `append_thinking_to_last` before each `terminal.draw`.
     pub pending_thinking_content: String,
 
+    /// Tracks the last time pending thinking content was flushed to the
+    /// session. Thinking is flushed at a lower rate (~200ms) than chat
+    /// content to reduce per-frame re-render cost during fast thinking
+    /// streaming, while still providing smooth enough visual updates.
+    pub last_thinking_flush: std::time::Instant,
+
     /// Whether the agents.md splash area is visible (new session, no input yet).
     pub agents_visible: bool,
     /// Cursor position in the agents checkbox list.
@@ -402,6 +408,7 @@ impl App {
             pending_post_compaction_prompt: None,
             pending_chat_content: String::new(),
             pending_thinking_content: String::new(),
+            last_thinking_flush: std::time::Instant::now(),
             agents_visible: true,
             agents_cursor: 0,
             load_duration,

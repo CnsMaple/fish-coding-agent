@@ -44,6 +44,7 @@ use unicode_width::UnicodeWidthStr;
 #[derive(Debug)]
 pub struct CachedMessageLines {
     pub content_version: u64,
+    pub thinking_version: u64,
     pub width: u16,
     pub display_cursor: usize,
     /// Byte length of `Message::content` when this entry was cached.
@@ -236,6 +237,7 @@ pub fn build_message_lines(
         let lru = session.message_lines_cache.lock().unwrap();
         if let Some(cached) = lru.get(&msg_idx) {
             if cached.content_version == m.content_version
+                && cached.thinking_version == m.thinking_version
                 && cached.width == width as u16
                 && cached.display_cursor == m.display_cursor
                 && cached.content_len == m.content.len()
@@ -262,6 +264,7 @@ pub fn build_message_lines(
             msg_idx,
             CachedMessageLines {
                 content_version: m.content_version,
+                thinking_version: m.thinking_version,
                 width: width as u16,
                 display_cursor: m.display_cursor,
                 content_len: m.content.len(),
@@ -569,6 +572,7 @@ pub fn build_message_lines(
             msg_idx,
             CachedMessageLines {
                 content_version: m.content_version,
+                thinking_version: m.thinking_version,
                 width: width as u16,
                 display_cursor: m.display_cursor,
                 content_len: m.content.len(),
