@@ -2381,6 +2381,13 @@ pub(crate) fn handle_ctrl_p(app: &mut App) {
         .position(|t| matches!(t, crate::function::SidebarTab::CommandPalette(_)))
     {
         app.function.active = idx;
+        // Reset search query when re-opening.
+        if let Some(crate::function::SidebarTab::CommandPalette(state)) =
+            app.function.tabs.get_mut(idx)
+        {
+            state.query.clear();
+            state.rebuild_filter();
+        }
     } else {
         app.function
             .push(crate::function::SidebarTab::CommandPalette(

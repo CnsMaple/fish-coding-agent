@@ -279,14 +279,14 @@ impl StatusBar {
         if self.context_window_known {
             spans.push(Span::styled(fmt_pct(self.token_pct), Theme::base()));
             spans.push(Span::raw(" "));
-            spans.push(Span::styled(fmt_total(self.token_total), Theme::dim()));
+            spans.push(Span::styled(fmt_total(self.token_total), Theme::base()));
             spans.push(Span::raw("/"));
             spans.push(Span::styled(
                 fmt_tokens_k(self.context_window_tokens),
-                Theme::dim(),
+                Theme::base(),
             ));
         } else {
-            spans.push(Span::styled(fmt_total(self.token_total), Theme::dim()));
+            spans.push(Span::styled(fmt_total(self.token_total), Theme::base()));
         }
         if self.auto_compact {
             if self.compact_triggered {
@@ -325,13 +325,13 @@ impl StatusBar {
         } else {
             None
         };
-        spans.push(Span::raw("tok["));
-        spans.push(Span::styled(fmt_num(self.tok_cur), Theme::base()));
-        spans.push(Span::raw("|"));
+        spans.push(Span::styled("tok[", Theme::dim()));
+        spans.push(Span::styled(fmt_num(self.tok_cur), Theme::dim()));
+        spans.push(Span::styled("|", Theme::dim()));
         spans.push(Span::styled(fmt_num(self.tok_avg), Theme::dim()));
-        spans.push(Span::raw("|"));
-        spans.push(Span::styled(fmt_num(total_tok), Theme::base()));
-        spans.push(Span::raw("]"));
+        spans.push(Span::styled("|", Theme::dim()));
+        spans.push(Span::styled(fmt_num(total_tok), Theme::dim()));
+        spans.push(Span::styled("]", Theme::dim()));
 
         // hit[current|average|total]
         let total_hit = if self.total_input_tokens > 0 {
@@ -339,18 +339,18 @@ impl StatusBar {
         } else {
             None
         };
-        spans.push(Span::raw(" hit["));
-        spans.push(Span::styled(fmt_pct_int(self.hit_cur), Theme::base()));
-        spans.push(Span::raw("|"));
+        spans.push(Span::styled(" hit[", Theme::dim()));
+        spans.push(Span::styled(fmt_pct_int(self.hit_cur), Theme::dim()));
+        spans.push(Span::styled("|", Theme::dim()));
         spans.push(Span::styled(fmt_pct_int(self.hit_avg), Theme::dim()));
-        spans.push(Span::raw("|"));
-        spans.push(Span::styled(fmt_pct_int(total_hit), Theme::base()));
-        spans.push(Span::raw("]"));
+        spans.push(Span::styled("|", Theme::dim()));
+        spans.push(Span::styled(fmt_pct_int(total_hit), Theme::dim()));
+        spans.push(Span::styled("]", Theme::dim()));
 
         if let Some(ref mcp) = self.mcp_summary {
             spans.push(Span::raw(" "));
             spans.push(Span::styled("mcp:", Theme::dim()));
-            spans.push(Span::styled(mcp.clone(), Theme::base()));
+            spans.push(Span::styled(mcp.clone(), Theme::dim()));
         }
         Line::from(spans)
     }
