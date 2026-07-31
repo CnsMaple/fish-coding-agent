@@ -669,7 +669,7 @@ pub(super) fn build_shell_command_rows(
 ) -> Vec<Line<'static>> {
     let width = width.max(4);
     let mut rows = Vec::new();
-    rows.push(border_line(width, bg));
+    rows.push(border_with_label_line(width, " shell ", bg));
 
     // Highlight the shell command with multi-line wrapping
     if let Some(cmd) = title.strip_prefix("$ ") {
