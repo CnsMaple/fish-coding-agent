@@ -104,7 +104,7 @@ fn write_diff_result(path: &str, old: &str, new: &str, ai_output: &str) -> Strin
 /// AI only sees the short success message while the diff is preserved
 /// as UI-only metadata. For every other tool, returns `(value, "")`.
 pub(super) fn split_edit_diff(name: &str, value: &str) -> (String, String) {
-    if name != "edit" {
+    if name != "edit" && name != "write" {
         return (value.to_string(), String::new());
     }
     let Ok(v) = serde_json::from_str::<serde_json::Value>(value) else {

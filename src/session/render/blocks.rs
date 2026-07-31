@@ -289,7 +289,7 @@ pub(super) fn build_tool_block_rows(
         return vec![];
     }
 
-    let mut rows: Vec<Line<'static>> = if tool.name == "edit" {
+    let mut rows: Vec<Line<'static>> = if tool.name == "edit" || tool.name == "write" {
         if let Some(r) = build_edit_diff_rows(tool, visible, preview_lines, width, bg) {
             r
         } else {
