@@ -1722,33 +1722,101 @@ fn status_set_cwd_shows_full_path_with_tilde_abbrev() {
 }
 
 #[test]
-fn extract_selection_text_skips_trailing_padding() {
-    // compact_render_spacing preserves trailing spaces; the trim_end
-    // in extract_selection_text handles the actual trimming.
-    use crate::ui::compact_render_spacing;
-    let input = "hello               ";
-    assert_eq!(compact_render_spacing(input), "hello               ");
-}
+fn extract_selection_text_does_not_truncate_cjk_rows() {
+    // Bug: intermediate / first rows of a multi-line selection used
+    // `full.chars().count()` as the full-width end column. A CJK char
+    // occupies 2 terminal cells but counts as 1 char, so the end
+    // column landed short of the real width and the right edge of any
+    // row containing wide characters was cut off. The correct end
+    // column is the row's *visual* width.
+    use crate::function::Selection;
+    use crate::session::{Message, Role, Session};
+    use crate::ui::extract_selection_text;
 
-#[test]
-fn extract_selection_text_compacts_cjk_render_spacing() {
-    use crate::ui::compact_render_spacing;
+    let mut s = Session::default();
+    s.push(Message::new(
+        Role::Assistant,
+        "aaa\n   使用shell\nbbb".to_string(),
+    ));
+    let width = 80usize;
+    s.count_all_lines_with_width(width); // populate line_offsets
 
-    let rendered = "使 用 command分 别 执 行 3 次 ls， 需 要 整 个 tree";
-    assert_eq!(
-        compact_render_spacing(rendered),
-        "使用 command分别执行 3次 ls，需要整个 tree"
+    let sel = Selection {
+        doc_start: 0,
+        doc_end: 2,
+        col_start: None,
+        col_end: None,
+        active: false,
+    };
+    let text = extract_selection_text(&sel, &s, width);
+    assert!(
+        text.contains("   使用shell"),
+        "CJK row truncated: got {text:?}"
     );
+    assert!(text.contains("aaa"), "first row missing: {text:?}");
+    assert!(text.contains("bbb"), "last row missing: {text:?}");
 }
 
 #[test]
-fn extract_selection_text_compacts_short_ascii_before_cjk() {
-    use crate::ui::compact_render_spacing;
+fn extract_selection_text_strips_tool_block_decoration() {
+    // Copying a tool block should yield clean content without the
+    // box-drawing borders (`+---[shell]---+`), the `| … |` row pipes,
+    // or the `[click to expand]` hints the TUI draws on screen.
+    use crate::function::Selection;
+    use crate::session::{Message, Role, Session, ToolResultBlock};
+    use crate::ui::extract_selection_text;
 
-    let rendered = "给 我 一 个 md的 代 码 块 示 例 和 表 格 示 例";
-    assert_eq!(
-        compact_render_spacing(rendered),
-        "给我一个md的代码块示例和表格示例"
+    let mut s = Session::default();
+    s.push(Message::new(Role::User, "do it".to_string()));
+    let mut asst = Message::new(Role::Assistant, String::new());
+    asst.tool_results.push(ToolResultBlock {
+        name: "shell_command".to_string(),
+        title: "$ echo hi".to_string(),
+        content: serde_json::json!({
+            "ok": true,
+            "result": "exit_code: 0\nwall_secs: 0.01\ntimeout_secs: 300\nstdout:\nhi\n\nstderr:\n"
+        })
+        .to_string(),
+        metadata: String::new(),
+        content_offset: 0,
+        visible: true,
+        running: false,
+        failed: false,
+        call_id: String::new(),
+        pruned: false,
+        streaming_input: String::new(),
+        cached_line_count_visible: None,
+        cached_line_count_collapsed: None,
+        started_at: None,
+    });
+    s.push(asst);
+
+    let width = 80usize;
+    let total = s.count_all_lines_with_width(width) as usize;
+    let sel = Selection {
+        doc_start: 0,
+        doc_end: total.saturating_sub(1),
+        col_start: None,
+        col_end: None,
+        active: false,
+    };
+    let text = extract_selection_text(&sel, &s, width);
+    // WYSIWYG: the copied text must match what is on screen, including
+    // the box borders (`+---[shell]---+`), the `| … |` row pipes, and
+    // the `$ echo hi` command inside the block.
+    assert!(text.contains("$ echo hi"), "command missing: {text:?}");
+    assert!(text.contains("hi"), "output missing: {text:?}");
+    assert!(
+        text.contains("shell"),
+        "block label missing from copied text: {text:?}"
+    );
+    assert!(
+        text.contains('|'),
+        "box row pipes missing from copied text: {text:?}"
+    );
+    assert!(
+        text.contains("+---"),
+        "box top border missing from copied text: {text:?}"
     );
 }
 

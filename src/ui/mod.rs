@@ -776,15 +776,20 @@ pub fn extract_selection_text(sel: &Selection, session: &Session, width: usize) 
                 continue;
             }
             let full: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-            // Determine column slice for this row.
+            // Determine column slice for this row. The full-width end
+            // column must be the row's *visual* width (terminal cells),
+            // NOT its Unicode char count. A CJK char occupies 2 cells,
+            // so counting chars undercuts the end column and truncates
+            // the right edge of any row containing wide characters.
+            let full_width = UnicodeWidthStr::width(full.as_str());
             let (cs, ce) = if y_start == y_end {
                 (col_lo, col_hi)
             } else if i == local_start {
-                (col_lo, full.chars().count())
+                (col_lo, full_width)
             } else if i == local_end {
                 (0, col_hi)
             } else {
-                (0, full.chars().count())
+                (0, full_width)
             };
             let sliced = slice_by_visual_width(&full, cs, ce);
             lines.push(sliced.trim_end().to_string());
@@ -794,7 +799,7 @@ pub fn extract_selection_text(sel: &Selection, session: &Session, width: usize) 
     while lines.len() > 1 && lines.last().unwrap().is_empty() {
         lines.pop();
     }
-    compact_render_spacing(&lines.join("\n"))
+    lines.join("\n")
 }
 
 /// Slice a string by visual (terminal cell) column range [start, end),
@@ -818,83 +823,6 @@ fn slice_by_visual_width(s: &str, start_col: usize, end_col: usize) -> String {
         col += w;
     }
     out
-}
-
-pub(crate) fn compact_render_spacing(text: &str) -> String {
-    let chars: Vec<char> = text.chars().collect();
-    let mut out = String::with_capacity(text.len());
-    let mut idx = 0;
-    while idx < chars.len() {
-        if chars[idx] != ' ' {
-            out.push(chars[idx]);
-            idx += 1;
-            continue;
-        }
-
-        let run_start = idx;
-        while idx < chars.len() && chars[idx] == ' ' {
-            idx += 1;
-        }
-        let run_len = idx - run_start;
-        let prev = out.chars().last();
-        let next = chars.get(idx).copied();
-        if run_len == 1 && should_drop_render_space(prev, next, &chars, idx) {
-            continue;
-        }
-        out.push_str(&" ".repeat(run_len));
-    }
-    out
-}
-
-fn should_drop_render_space(
-    prev: Option<char>,
-    next: Option<char>,
-    chars: &[char],
-    next_idx: usize,
-) -> bool {
-    let (Some(prev), Some(next)) = (prev, next) else {
-        return false;
-    };
-    if prev == '\n' || next == '\n' {
-        return false;
-    }
-
-    (is_cjk(prev) && is_cjk(next))
-        || (is_cjk(prev) && is_cjk_punctuation(next))
-        || (is_cjk_punctuation(prev) && is_cjk(next))
-        || (prev.is_ascii_digit() && is_cjk(next))
-        || (is_cjk(prev) && ascii_token_runs_into_cjk(chars, next_idx))
-}
-
-fn ascii_token_runs_into_cjk(chars: &[char], start: usize) -> bool {
-    let mut idx = start;
-    let mut len = 0usize;
-    while let Some(ch) = chars.get(idx) {
-        if !ch.is_ascii_alphanumeric() && *ch != '_' && *ch != '-' {
-            break;
-        }
-        len += 1;
-        idx += 1;
-    }
-
-    (1..=4).contains(&len) && chars.get(idx).copied().is_some_and(is_cjk)
-}
-
-fn is_cjk(c: char) -> bool {
-    matches!(
-        c,
-        '\u{3400}'..='\u{4DBF}'
-            | '\u{4E00}'..='\u{9FFF}'
-            | '\u{F900}'..='\u{FAFF}'
-            | '\u{20000}'..='\u{2A6DF}'
-            | '\u{2A700}'..='\u{2B73F}'
-            | '\u{2B740}'..='\u{2B81F}'
-            | '\u{2B820}'..='\u{2CEAF}'
-    )
-}
-
-fn is_cjk_punctuation(c: char) -> bool {
-    matches!(c, '\u{3000}'..='\u{303F}' | '\u{FF00}'..='\u{FFEF}')
 }
 
 /// Render the agents.md splash area at the top of a new session.
