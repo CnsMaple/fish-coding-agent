@@ -1295,8 +1295,10 @@ impl Session {
                     // content. These are stale duplicates left over
                     // from parallel tool-call streaming before
                     // call-id routing; they must not consume a blank
-                    // line in the total.
-                    if t.content.is_empty() && t.streaming_input.is_empty() {
+                    // line in the total. A running direct tool with a
+                    // title but no content/streaming input is NOT
+                    // skipped (it renders its command as a preview).
+                    if t.content.is_empty() && t.streaming_input.is_empty() && t.title.is_empty() {
                         continue;
                     }
                     let t_vis = t.name == "plan"
@@ -1461,7 +1463,10 @@ impl Session {
         let Some(target_tool) = m.tool_results.get(tool_idx) else {
             return 0;
         };
-        if target_tool.content.is_empty() && target_tool.streaming_input.is_empty() {
+        if target_tool.content.is_empty()
+            && target_tool.streaming_input.is_empty()
+            && target_tool.title.is_empty()
+        {
             return 0;
         }
 
@@ -1480,7 +1485,7 @@ impl Session {
             items.push((offset, Item::Thinking(si)));
         }
         for (ti, t) in m.tool_results.iter().enumerate() {
-            if t.content.is_empty() && t.streaming_input.is_empty() {
+            if t.content.is_empty() && t.streaming_input.is_empty() && t.title.is_empty() {
                 continue;
             }
             let offset = clamp_char_boundary(raw, t.content_offset.min(raw.len()));

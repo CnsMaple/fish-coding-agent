@@ -380,11 +380,14 @@ pub fn build_message_lines(
     // Add tool results
     for (ti, tool) in m.tool_results.iter().enumerate() {
         // Defensive: skip placeholder blocks that never received any
-        // content or streaming input (e.g. duplicate blocks created by
-        // stale provider deltas before call-id routing). Rendering an
-        // empty box here is what produced the cascade of blank bordered
-        // blocks during parallel tool calls.
-        if tool.content.is_empty() && tool.streaming_input.is_empty() {
+        // content, streaming input, or a title (e.g. duplicate blocks
+        // created by stale provider deltas before call-id routing).
+        // Rendering an empty box here is what produced the cascade of
+        // blank bordered blocks during parallel tool calls. A running
+        // tool with a title (e.g. a direct `!`/`!!` shell command that
+        // has no output yet) is NOT skipped — its title is rendered as
+        // a streaming preview while it runs.
+        if tool.content.is_empty() && tool.streaming_input.is_empty() && tool.title.is_empty() {
             continue;
         }
         let offset = clamp_char_boundary(raw, tool.content_offset.min(raw.len()));
@@ -632,7 +635,13 @@ pub(crate) fn count_block_gaps(
 }
 
 fn has_renderable_content(tool: &super::ToolResultBlock) -> bool {
-    !tool.content.is_empty() || !tool.streaming_input.is_empty()
+    // Mirrors the skip condition in `build_message_lines`: a tool is
+    // renderable if it has content, streaming input, or a title (a
+    // running direct `!`/`!!` shell command with no output yet has a
+    // title but nothing else, and renders its command as a streaming
+    // preview). Empty placeholder blocks with none of these are the
+    // stale duplicates we must skip.
+    !tool.content.is_empty() || !tool.streaming_input.is_empty() || !tool.title.is_empty()
 }
 
 /// Build only the lines that intersect the visible viewport.

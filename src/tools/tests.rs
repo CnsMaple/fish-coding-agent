@@ -310,8 +310,16 @@ fn replace_string_with_line_range_replace_all() {
 
 #[test]
 fn replace_string_invalid_line_range() {
-    assert!(replace_string("a\nb\n", "a", "X", false, Some(2), Some(1)).is_err());
+    // Reversed range is auto-swapped (start>end), mirroring
+    // `select_lines`; only a zero line is rejected.
     assert!(replace_string("a\nb\n", "a", "X", false, Some(0), Some(1)).is_err());
+    assert!(replace_string("a\nb\n", "a", "X", false, Some(1), Some(0)).is_err());
+}
+
+#[test]
+fn replace_string_reversed_line_range_swaps() {
+    let result = replace_string("a\nb\nc\n", "b", "X", false, Some(3), Some(2)).unwrap();
+    assert_eq!(result, "a\nX\nc\n");
 }
 
 #[test]

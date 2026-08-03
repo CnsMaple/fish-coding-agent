@@ -1255,6 +1255,66 @@ mod tests {
         );
     }
 
+    /// Direct `!`/`!!` shell command: the block is created via
+    /// `start_tool_in_last` with empty `streaming_input` and empty
+    /// `content`, so during execution it must still render from the
+    /// title. Regression: `build_message_lines` skipped any tool with
+    /// both fields empty, so the command text vanished while running.
+    #[test]
+    fn direct_shell_block_keeps_command_text_while_running() {
+        let mut s = Session::default();
+        s.push(Message::new(Role::User, "!run"));
+        s.push(Message::new(Role::Assistant, ""));
+        s.streaming_id = Some(1);
+        // Direct-tool path: ToolStarted with empty call_id, no
+        // streaming_input, no content yet — the exact window while
+        // the command is starting up before the first output line.
+        s.start_tool_in_last(
+            String::new(),
+            "shell_command".into(),
+            "$ cargo fmt --check".into(),
+        );
+
+        let (lines, _t) = build_lines(&s, 100);
+        let text = lines_to_text(&lines);
+        assert!(
+            text.contains("cargo fmt --check"),
+            "command text missing:\n{text}"
+        );
+    }
+
+    /// Reproduction: two parallel shell tools running in one assistant
+    /// message. During execution the command text must stay visible in
+    /// each block.
+    #[test]
+    fn streaming_parallel_shell_blocks_keep_command_text() {
+        let mut s = Session::default();
+        s.push(Message::new(Role::User, "run commands"));
+        s.push(Message::new(Role::Assistant, ""));
+        s.streaming_id = Some(1);
+
+        // LLM streams two parallel shell commands.
+        s.update_tool_input_delta(0, "callA", "shell_command", r#"{"command":"cargo fmt"}"#);
+        s.update_tool_input_delta(1, "callB", "shell_command", r#"{"command":"cargo clippy"}"#);
+
+        // Both tools start executing.
+        s.start_tool_in_last("callA".into(), "shell_command".into(), "$ cargo fmt".into());
+        s.start_tool_in_last(
+            "callB".into(),
+            "shell_command".into(),
+            "$ cargo clippy".into(),
+        );
+
+        // Output streams for both.
+        s.append_tool_delta_to_last("callA", "Checking fish-coding-agent v0.1.0\n");
+        s.append_tool_delta_to_last("callB", "Checking fish-coding-agent v0.1.0\n");
+
+        let (lines, _t) = build_lines(&s, 100);
+        let text = lines_to_text(&lines);
+        assert!(text.contains("cargo fmt"), "command A missing:\n{text}");
+        assert!(text.contains("cargo clippy"), "command B missing:\n{text}");
+    }
+
     #[test]
     fn build_lines_renders_table() {
         let session = session_with_table_table();
