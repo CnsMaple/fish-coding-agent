@@ -607,6 +607,15 @@ impl App {
         paths.push(local.to_string_lossy().to_string());
 
         let mut changed = false;
+        // Drop entries that no longer match a known discovery path (e.g.
+        // the previous run was in a different directory), so the checkbox
+        // list always reflects the *current* cwd's agents.md.
+        let known: std::collections::HashSet<&String> = paths.iter().collect();
+        let before = self.config.agents.entries.len();
+        self.config.agents.entries.retain(|p, _| known.contains(p));
+        if self.config.agents.entries.len() != before {
+            changed = true;
+        }
         for p in &paths {
             if std::path::Path::new(p).exists() {
                 if !self.config.agents.entries.contains_key(p) {
