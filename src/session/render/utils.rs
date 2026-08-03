@@ -22,35 +22,34 @@ pub fn clamp_char_boundary(s: &str, mut idx: usize) -> usize {
     idx
 }
 
-/// Advance `idx` to the next word boundary (whitespace or end of string)
-/// so that a tool/thinking block does not split a word across the
-/// text-before / text-after boundary.  Only advances when `idx` is
-/// truly mid-word (both preceding and following chars are non-whitespace).
-/// If `idx` is at a word boundary, start of string, or end of `s`,
-/// returns `idx` unchanged.
+/// Advance `idx` to the next line boundary (start of the next line or
+/// end of string) so that a tool/thinking block never splits a line in
+/// half.  Blocks are inserted between content lines, so anchoring their
+/// offset mid-line would carve a sentence across the block's top border.
+///
+/// Only advances when `idx` is strictly mid-line (not at the start of
+/// content, not right after a newline, and not pointing at a newline).
+/// If `idx` is already at a line boundary, start of string, or end of
+/// `s`, returns `idx` unchanged.
 pub fn advance_to_word_boundary(s: &str, idx: usize) -> usize {
     if idx >= s.len() {
         return s.len();
     }
-    // Already at whitespace = word boundary.
-    if s[idx..].chars().next().is_some_and(|c| c.is_whitespace()) {
+    // Already at a line boundary: start of content, immediately after a
+    // newline (start of a line), or pointing at a newline (end of a line).
+    if idx == 0 {
+        return 0;
+    }
+    if s[..idx].ends_with('\n') {
         return idx;
     }
-    // Only advance if preceded by a non-whitespace char (mid-word).
-    // Start-of-string (idx == 0) is not mid-word.
-    let preceded_by_word = idx > 0
-        && s[..idx]
-            .chars()
-            .next_back()
-            .is_some_and(|c| !c.is_whitespace());
-    if !preceded_by_word {
+    if s[idx..].starts_with('\n') {
         return idx;
     }
-    // Mid-word: advance to the next whitespace.
-    for (i, c) in s[idx..].char_indices() {
-        if c.is_whitespace() {
-            return idx + i;
-        }
+    // Mid-line: advance to the start of the next line so the block is
+    // inserted between complete lines, never through a line.
+    if let Some(rel) = s[idx..].find('\n') {
+        return idx + rel + 1;
     }
     s.len()
 }

@@ -1315,6 +1315,65 @@ mod tests {
         assert!(text.contains("cargo clippy"), "command B missing:\n{text}");
     }
 
+    /// Regression: a tool block anchored mid-line (offset lands in the
+    /// middle of a sentence, not at a word boundary or line break) must
+    /// be pushed to the next line boundary so the block does not carve
+    /// a sentence in half. `advance_to_word_boundary` only skips to the
+    /// next space, which still leaves the block mid-line.
+    #[test]
+    fn tool_block_offset_mid_line_is_pushed_to_line_boundary() {
+        use crate::session::ToolResultBlock;
+        let mut s = Session::default();
+        s.push(Message::new(Role::User, "run it"));
+        // Content where the tool offset lands mid-word.
+        let mut asst = Message::new(Role::Assistant, "foo bar baz\nsecond line");
+        asst.tool_results.push(ToolResultBlock {
+            name: "shell_command".into(),
+            title: "$ echo hi".into(),
+            content: "hi".into(),
+            metadata: String::new(),
+            content_offset: 4, // mid-word "bar"
+            visible: true,
+            running: false,
+            failed: false,
+            call_id: String::new(),
+            pruned: false,
+            streaming_input: String::new(),
+            cached_line_count_visible: None,
+            cached_line_count_collapsed: None,
+            started_at: None,
+        });
+        s.push(asst);
+
+        let (lines, _t) = build_lines(&s, 100);
+        let text = lines_to_text(&lines);
+        // The first content line must render intact as one line
+        // ("foo bar baz"), never split into "foo" / "bar baz" across
+        // the tool block border.
+        let lines_vec: Vec<&str> = text.lines().collect();
+        assert!(
+            lines_vec.iter().any(|l| l.trim() == "foo bar baz"),
+            "first content line was split across the tool block:\n{text}"
+        );
+        // The full first line must appear before the tool block, and
+        // the tail "bar baz" must not appear after it (i.e. the line
+        // was not split).
+        let tool_idx = lines_vec
+            .iter()
+            .position(|l| l.contains("$ echo hi"))
+            .expect("tool block present");
+        assert!(
+            lines_vec[..tool_idx]
+                .iter()
+                .any(|l| l.trim() == "foo bar baz"),
+            "first content line should appear before the tool block:\n{text}"
+        );
+        assert!(
+            !lines_vec[tool_idx..].iter().any(|l| l.contains("bar baz")),
+            "first content line tail leaked after the tool block:\n{text}"
+        );
+    }
+
     #[test]
     fn build_lines_renders_table() {
         let session = session_with_table_table();
