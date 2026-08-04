@@ -737,6 +737,7 @@ impl App {
                 }
                 self.session_id = stored.id;
                 self.session_title = stored.title;
+                self.status.session_title = self.session_title.clone();
                 if let Some(ref p) = stored.provider {
                     self.status.set_provider_name(p);
                 }
