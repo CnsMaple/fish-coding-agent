@@ -1440,14 +1440,8 @@ async fn handle_key(k: crossterm::event::KeyEvent, app: &mut App) {
                 app.input.clear_selection();
                 return;
             }
-            // close current sidebar tab, or clear input
-            if !app.function.close_active() {
-                if !app.input.buffer.is_empty() {
-                    app.input.buffer.clear();
-                    app.input.cursor = 0;
-                    app.paste_blocks.clear();
-                }
-            } else {
+            // close current sidebar tab (if any). Esc no longer clears input.
+            if app.function.close_active() {
                 // A function tab was closed. If it was the last non-
                 // Notification tab, hide the panel so we return to the
                 // default state.
