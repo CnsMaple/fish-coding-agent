@@ -1315,6 +1315,85 @@ mod tests {
         assert!(text.contains("cargo clippy"), "command B missing:\n{text}");
     }
 
+    /// Regression: parallel shell tools whose streaming_input is empty
+    /// (the ToolStarted path, without the LLM streaming arg deltas —
+    /// e.g. a direct tool invocation or a provider that only reports
+    /// the final title). Before the fix, a running shell block with an
+    /// empty `streaming_input` fell through to the `return vec![]`
+    /// branch, so the whole block (including its ` shell ` label) was
+    /// invisible until the command finished.
+    #[test]
+    fn parallel_shell_blocks_with_empty_streaming_input_render_title() {
+        let mut s = Session::default();
+        s.push(Message::new(Role::User, "run both"));
+        s.push(Message::new(Role::Assistant, ""));
+        s.streaming_id = Some(1);
+
+        // No streaming_input deltas at all; only ToolStarted arrives.
+        s.start_tool_in_last(
+            "callA".into(),
+            "shell_command".into(),
+            "$ cargo check".into(),
+        );
+        s.start_tool_in_last("callB".into(), "shell_command".into(), "$ cargo fmt".into());
+
+        let (lines, _t) = build_lines(&s, 100);
+        let text = lines_to_text(&lines);
+        assert!(text.contains("cargo check"), "command A missing:\n{text}");
+        assert!(text.contains("cargo fmt"), "command B missing:\n{text}");
+        // The streaming box must carry the ` shell ` label just like
+        // the completed box, so the block is recognizable while running.
+        assert_eq!(
+            text.matches(" shell ").count(),
+            2,
+            "shell labels missing:\n{text}"
+        );
+    }
+
+    /// The running-tool footer must use the same duration format as the
+    /// completed-tool footer: `[elapsed|timeout]` with zero components
+    /// omitted (e.g. `5m` not `5m0s`), and it must reflect the AI's
+    /// custom `timeout_secs` argument rather than always falling back
+    /// to the default `300s`.
+    #[test]
+    fn running_shell_footer_uses_custom_timeout_and_duration_format() {
+        let mut s = Session::default();
+        s.push(Message::new(Role::User, "run"));
+        s.push(Message::new(Role::Assistant, ""));
+        s.streaming_id = Some(1);
+
+        // Custom timeout_secs=120 and a custom command.
+        s.update_tool_input_delta(
+            0,
+            "callA",
+            "shell_command",
+            r#"{"command":"cargo fmt","timeout_secs":120}"#,
+        );
+        s.start_tool_in_last("callA".into(), "shell_command".into(), "$ cargo fmt".into());
+
+        let (lines, _t) = build_lines(&s, 100);
+        let text = lines_to_text(&lines);
+        // The footer must show the custom timeout (120s → 2m), not the
+        // default 300s, and must not grow a `0s` suffix.
+        assert!(
+            text.contains("[0s|2m]"),
+            "custom timeout footer missing (got 0s elapsed, 120s timeout), text:\n{text}"
+        );
+        assert!(
+            !text.contains("300s"),
+            "default timeout leaked into running footer:\n{text}"
+        );
+
+        // The completed-footer path (format_duration) must also omit
+        // zero components: 5 minutes → `5m`, not `5m0s`.
+        let finished =
+            crate::session::render::blocks::format_duration(std::time::Duration::from_secs(300));
+        assert_eq!(finished, "5m", "expected 5m, got {finished}");
+        let finished_secs =
+            crate::session::render::blocks::format_duration(std::time::Duration::from_secs(7));
+        assert_eq!(finished_secs, "7s", "expected 7s, got {finished_secs}");
+    }
+
     /// Regression: a tool block anchored mid-line (offset lands in the
     /// middle of a sentence, not at a word boundary or line break) must
     /// be pushed to the next line boundary so the block does not carve

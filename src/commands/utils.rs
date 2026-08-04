@@ -83,6 +83,42 @@ pub fn extract_partial_json_field(args: &str, key: &str) -> Option<String> {
     None
 }
 
+/// Extract a `u64` field from potentially-partial JSON (e.g. the
+/// `timeout_secs` argument of a shell command). Tries complete JSON
+/// first, then scans for `"key": <digits>` in the partial stream.
+pub fn extract_partial_json_u64(args: &str, key: &str) -> Option<u64> {
+    if let Ok(val) = serde_json::from_str::<serde_json::Value>(args) {
+        return val.get(key).and_then(|v| v.as_u64());
+    }
+    let needle = format!("\"{key}\"");
+    let mut search_from = 0;
+    while let Some(pos) = args[search_from..].find(&needle) {
+        let abs_pos = search_from + pos;
+        let after_key = abs_pos + needle.len();
+        let rest = &args[after_key..];
+        let trimmed = rest.trim_start();
+        let colon_offset = rest.len() - trimmed.len();
+        if !trimmed.starts_with(':') {
+            search_from = abs_pos + 1;
+            continue;
+        }
+        let after_colon = &rest[colon_offset + 1..];
+        let trimmed2 = after_colon.trim_start();
+        let ws2 = after_colon.len() - trimmed2.len();
+        let num_abs = after_key + colon_offset + 1 + ws2;
+        let digits: String = args[num_abs..]
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        if digits.is_empty() {
+            search_from = abs_pos + 1;
+            continue;
+        }
+        return digits.parse().ok();
+    }
+    None
+}
+
 /// Unescape a partial JSON string value (the text after the opening
 /// `"`). Handles `\"`, `\\`, `\n`, `\t`, `\r`, `\/`, `\uXXXX`. Stops
 /// at the first unescaped `"` (which would be the closing quote).

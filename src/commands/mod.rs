@@ -8,7 +8,7 @@ use crate::function::notifications::ToastLevel;
 use crate::function::SidebarTab;
 use crate::session::{Message, Role};
 pub use chat::{run_chat_stream, run_compaction_stream, send_chat, send_message};
-pub use utils::extract_partial_json_field;
+pub use utils::{extract_partial_json_field, extract_partial_json_u64};
 
 pub(crate) const MSG_REQUEST_IN_FLIGHT: &str = "request in flight, please wait";
 pub(crate) const MSG_MCP_NOT_INIT: &str = "mcp service not initialised";

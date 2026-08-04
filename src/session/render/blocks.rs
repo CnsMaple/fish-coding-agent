@@ -278,17 +278,31 @@ pub(super) fn build_tool_block_rows(
     // Still generating: no final content yet. Show a streaming
     // preview or nothing so the block doesn't render empty rows.
     if tool.running && tool.content.is_empty() {
-        if !tool.streaming_input.is_empty() {
-            let rows = build_streaming_tool_rows(tool, width, bg);
+        if matches!(tool.name.as_str(), "shell_command" | "command") {
+            // Prefer the full command from the title (set by
+            // `ToolStarted` via `tool_result_title`); fall back to the
+            // partial streaming JSON while the LLM is still assembling
+            // the arguments. Using the title guarantees the command
+            // text stays visible once the tool starts running, even
+            // when parallel streaming deltas are interleaved.
+            let cmd = if !tool.title.is_empty() {
+                tool.title
+                    .strip_prefix("$ ")
+                    .unwrap_or(&tool.title)
+                    .to_string()
+            } else {
+                crate::commands::extract_partial_json_field(&tool.streaming_input, "command")
+                    .unwrap_or_default()
+            };
+            let timeout =
+                crate::commands::extract_partial_json_u64(&tool.streaming_input, "timeout_secs")
+                    .unwrap_or(300);
+            let rows = build_streaming_shell_rows(&cmd, width, bg, tool.started_at, timeout);
             if !rows.is_empty() {
                 return rows;
             }
-        }
-        // For shell_command, render a preview from the title even
-        // when streaming_input is empty (e.g. direct `!` / `!!`).
-        if matches!(tool.name.as_str(), "shell_command" | "command") {
-            let cmd = tool.title.strip_prefix("$ ").unwrap_or(&tool.title);
-            let rows = build_streaming_shell_rows(cmd, width, bg, tool.started_at);
+        } else if !tool.streaming_input.is_empty() {
+            let rows = build_streaming_tool_rows(tool, width, bg);
             if !rows.is_empty() {
                 return rows;
             }
@@ -339,7 +353,14 @@ pub(super) fn build_tool_block_rows(
                 .started_at
                 .map(|t| (chrono::Utc::now() - t).num_seconds().max(0))
                 .unwrap_or(0);
-            format!("[{elapsed}s|300s]")
+            let timeout =
+                crate::commands::extract_partial_json_u64(&tool.streaming_input, "timeout_secs")
+                    .unwrap_or(300);
+            format!(
+                "[{}|{}]",
+                format_duration(std::time::Duration::from_secs(elapsed as u64)),
+                format_duration(std::time::Duration::from_secs(timeout))
+            )
         } else {
             footer
         };
@@ -391,7 +412,9 @@ fn build_streaming_tool_rows(
         "shell_command" | "command" => {
             let cmd =
                 crate::commands::extract_partial_json_field(args, "command").unwrap_or_default();
-            build_streaming_shell_rows(&cmd, width, bg, tool.started_at)
+            let timeout =
+                crate::commands::extract_partial_json_u64(args, "timeout_secs").unwrap_or(300);
+            build_streaming_shell_rows(&cmd, width, bg, tool.started_at, timeout)
         }
         "python_command" => {
             let code =
@@ -428,10 +451,11 @@ fn build_streaming_shell_rows(
     width: usize,
     bg: Color,
     started_at: Option<chrono::DateTime<chrono::Utc>>,
+    timeout_secs: u64,
 ) -> Vec<Line<'static>> {
     let width = width.max(4);
     let mut rows = Vec::new();
-    rows.push(border_line(width, bg));
+    rows.push(border_with_label_line(width, " shell ", bg));
 
     let max_cmd_width = width.saturating_sub(6); // | $  |
     let cmd_lines = wrap_line(cmd, max_cmd_width);
@@ -485,7 +509,11 @@ fn build_streaming_shell_rows(
     rows.extend(box_row_lines("…", width, bg));
     if let Some(start) = started_at {
         let elapsed = (chrono::Utc::now() - start).num_seconds().max(0);
-        let label = format!("[{elapsed}s|300s]");
+        let label = format!(
+            "[{}|{}]",
+            format_duration(std::time::Duration::from_secs(elapsed as u64)),
+            format_duration(std::time::Duration::from_secs(timeout_secs))
+        );
         rows.push(border_line_with_right_label(width, &label, bg));
     } else {
         rows.push(border_line(width, bg));
@@ -1354,22 +1382,27 @@ fn border_with_label_str(width: usize, label: &str) -> String {
     )
 }
 
-/// Format a `Duration` as an incrementing timer string:
+/// Format a `Duration` as an incrementing timer string, omitting
+/// zero leading components:
 /// - < 60s → `12s`
-/// - < 1h  → `2m12s`
+/// - < 1h  → `2m12s` (or `2m` for exactly 2 minutes)
 /// - ≥ 1h  → `1h2m3s`
-fn format_duration(d: std::time::Duration) -> String {
+pub(super) fn format_duration(d: std::time::Duration) -> String {
     let total_secs = d.as_secs();
     let h = total_secs / 3600;
     let m = (total_secs % 3600) / 60;
     let s = total_secs % 60;
+    let mut parts: Vec<String> = Vec::new();
     if h > 0 {
-        format!("{h}h{m}m{s}s")
-    } else if m > 0 {
-        format!("{m}m{s}s")
-    } else {
-        format!("{s}s")
+        parts.push(format!("{h}h"));
     }
+    if h > 0 || m > 0 {
+        parts.push(format!("{m}m"));
+    }
+    if h == 0 && m == 0 {
+        parts.push(format!("{s}s"));
+    }
+    parts.join("")
 }
 
 /// Bottom border line with a right-aligned label, mirroring the
