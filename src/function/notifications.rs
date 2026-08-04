@@ -216,58 +216,98 @@ impl HitRate {
     }
 }
 
-/// Token rate tracker with a sliding window.
-/// Stores the rate (tokens/second) of each completed response.
-/// Exposes both the latest rate and the average across recent responses.
+/// Token rate tracker.
+///
+/// Tracks the token rate (tokens/second) of the current in-flight
+/// response as a live value, plus the cumulative average of every
+/// completed response (no sliding window — the average spans all
+/// recorded samples). The live rate is also folded into the average
+/// and the total while streaming so all three numbers update together.
 #[derive(Debug)]
 pub struct TokenRate {
-    window: VecDeque<f64>,
-    cap: usize,
+    /// Latest rate: the live in-flight rate while streaming, or the
+    /// final rate of the last completed response.
     current: Option<f64>,
+    /// Sum of the rates of all completed responses.
+    sum: f64,
+    /// Number of completed responses.
+    count: u64,
+    /// `true` while a live (uncommitted) rate is being displayed.
+    live: bool,
+    /// Live token count of the in-flight response (for the total).
+    live_tokens: u64,
+    /// Live effective elapsed seconds of the in-flight response (for the total).
+    live_elapsed: f64,
 }
 
 impl Default for TokenRate {
     fn default() -> Self {
         Self {
-            window: VecDeque::new(),
-            cap: 50,
             current: None,
+            sum: 0.0,
+            count: 0,
+            live: false,
+            live_tokens: 0,
+            live_elapsed: 0.0,
         }
     }
 }
 
 impl TokenRate {
-    pub fn new(cap: usize) -> Self {
-        Self {
-            window: VecDeque::with_capacity(cap),
-            cap,
-            current: None,
+    pub fn new(_cap: usize) -> Self {
+        Self::default()
+    }
+
+    /// Update the live in-flight rate without committing it to the
+    /// cumulative average. Called periodically while streaming.
+    pub fn update_live(&mut self, tokens: u64, elapsed: f64) {
+        self.live_tokens = tokens;
+        self.live_elapsed = elapsed;
+        self.live = true;
+        if elapsed > 0.0 {
+            self.current = Some(tokens as f64 / elapsed);
         }
     }
 
+    /// Commit a completed response's rate into the cumulative average.
     pub fn record(&mut self, val: f64) {
+        self.sum += val;
+        self.count += 1;
         self.current = Some(val);
-        if self.window.len() == self.cap {
-            self.window.pop_front();
-        }
-        self.window.push_back(val);
+        self.live = false;
+        self.live_tokens = 0;
+        self.live_elapsed = 0.0;
     }
 
     pub fn current(&self) -> Option<f64> {
         self.current
     }
 
+    /// Average of all recorded rates, including the live in-flight
+    /// rate as one additional sample while streaming.
     pub fn average(&self) -> Option<f64> {
-        if self.window.is_empty() {
-            return None;
+        if let Some(c) = self.current {
+            if self.live {
+                return Some((self.sum + c) / (self.count as f64 + 1.0));
+            }
         }
-        let sum: f64 = self.window.iter().sum();
-        Some(sum / self.window.len() as f64)
+        if self.count > 0 {
+            Some(self.sum / self.count as f64)
+        } else {
+            self.current
+        }
+    }
+
+    pub fn live_tokens(&self) -> u64 {
+        self.live_tokens
+    }
+
+    pub fn live_elapsed(&self) -> f64 {
+        self.live_elapsed
     }
 
     pub fn clear(&mut self) {
-        self.window.clear();
-        self.current = None;
+        *self = Self::default();
     }
 }
 

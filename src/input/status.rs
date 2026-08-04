@@ -22,6 +22,10 @@ pub struct StatusBar {
     pub total_output_tokens: u64,
     /// Cumulative elapsed time (secs) across all responses (for total rate).
     pub total_elapsed_secs: f64,
+    /// Live output tokens of the in-flight response (for total rate).
+    pub live_output_tokens: u64,
+    /// Live effective elapsed secs of the in-flight response (for total rate).
+    pub live_elapsed_secs: f64,
     /// Cumulative input tokens across all requests (for total hit rate).
     pub total_input_tokens: u64,
     /// Cumulative cache-read tokens across all requests (for total hit rate).
@@ -66,6 +70,8 @@ impl StatusBar {
             tok_avg: None,
             total_output_tokens: 0,
             total_elapsed_secs: 0.0,
+            live_output_tokens: 0,
+            live_elapsed_secs: 0.0,
             total_input_tokens: 0,
             total_cache_read: 0,
             token_total: None,
@@ -209,6 +215,8 @@ impl StatusBar {
         self.tok_avg = None;
         self.total_output_tokens = 0;
         self.total_elapsed_secs = 0.0;
+        self.live_output_tokens = 0;
+        self.live_elapsed_secs = 0.0;
         self.total_input_tokens = 0;
         self.total_cache_read = 0;
         self.compact_triggered = false;
@@ -222,6 +230,8 @@ impl StatusBar {
     pub fn update_token_rate(&mut self, t: &TokenRate) {
         self.tok_cur = t.current();
         self.tok_avg = t.average();
+        self.live_output_tokens = t.live_tokens();
+        self.live_elapsed_secs = t.live_elapsed();
     }
 
     pub fn set_mcp_summary(&mut self, summary: Option<String>) {
@@ -327,8 +337,9 @@ impl StatusBar {
         let mut spans: Vec<Span<'static>> = Vec::new();
 
         // tok[current|average|total]
-        let total_tok = if self.total_elapsed_secs > 0.0 {
-            Some(self.total_output_tokens as f64 / self.total_elapsed_secs)
+        let total_elapsed = self.total_elapsed_secs + self.live_elapsed_secs;
+        let total_tok = if total_elapsed > 0.0 {
+            Some((self.total_output_tokens + self.live_output_tokens) as f64 / total_elapsed)
         } else {
             None
         };

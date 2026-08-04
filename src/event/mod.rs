@@ -360,6 +360,7 @@ where
                         // spinner animation above.
                         if last_status_refresh.elapsed() >= Duration::from_millis(500) {
                             app.status.update_hit(&app.hit_rate);
+                            update_live_token_rate(app);
                             last_status_refresh = std::time::Instant::now();
                             needs_draw = true;
                         }
@@ -551,6 +552,20 @@ fn note_model_output(app: &mut App, chunk: &str) {
         app.response_output_chars = 0;
     }
     app.response_output_chars += chunk.chars().count();
+    update_live_token_rate(app);
+}
+
+/// Recompute the live token rate from the current in-flight response
+/// and push it to the status bar. Paused periods (tool execution) are
+/// excluded because `response_started_at` is `None` while paused.
+fn update_live_token_rate(app: &mut App) {
+    let Some(started_at) = app.response_started_at.as_ref() else {
+        return;
+    };
+    let elapsed = app.response_accumulated.as_secs_f64() + started_at.elapsed().as_secs_f64();
+    let tokens = estimate_output_tokens(app.response_output_chars);
+    app.token_rate.update_live(tokens, elapsed);
+    app.status.update_token_rate(&app.token_rate);
 }
 
 fn finish_model_output_rate(app: &mut App) {
