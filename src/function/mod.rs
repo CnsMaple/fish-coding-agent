@@ -896,8 +896,8 @@ impl App {
     /// restore `previous_mode` and hide the panel.
     pub fn jump_to_plan(&mut self) {
         if self.mode == AppMode::Plan {
-            // Already in Plan mode: Tab toggles back to the previous mode
-            // and closes the Plan tab.
+            // Already in Plan mode: Alt+P toggles back to the previous
+            // mode and closes the Plan tab.
             self.set_mode(self.previous_mode);
             self.function
                 .tabs

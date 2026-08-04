@@ -322,7 +322,8 @@ supports incremental updates via a `previous_summary`.
 | Ctrl+U             | Clear the entire input buffer                                            |
 | Ctrl+K             | Truncate from cursor to end of line                                      |
 | Alt+L              | Cycle focus: Input → FunctionPanel → AgentsCheckbox → Input             |
-| Tab                | Complete the focused candidate; else jump to/switch to the Plan tab     |
+| Alt+P              | Toggle plan mode (read-only)                                             |
+| Tab                | Complete the focused candidate; else cycle sidebar tabs                 |
 | Shift+Tab          | Cycle sidebar tabs (wraps last→first)                                    |
 | Enter              | Submit; or insert newline (see `enter_behavior`)                         |
 | Shift/Ctrl/Alt+Enter | Modifier-Enter — reliable send in EnterNewline mode (Windows consoles drop Shift for Enter) |

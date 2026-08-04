@@ -1315,6 +1315,14 @@ async fn handle_key(k: crossterm::event::KeyEvent, app: &mut App) {
         return;
     }
 
+    // Alt+P: toggle plan mode (read-only).
+    if k.modifiers.contains(KeyModifiers::ALT)
+        && matches!(k.code, KeyCode::Char('p') | KeyCode::Char('P'))
+    {
+        app.jump_to_plan();
+        return;
+    }
+
     // Alt+L: cycle focus between Input -> FunctionPanel -> AgentsCheckbox -> Input.
     if k.modifiers.contains(KeyModifiers::ALT)
         && matches!(k.code, KeyCode::Char('l') | KeyCode::Char('L'))
@@ -1448,14 +1456,14 @@ async fn handle_key(k: crossterm::event::KeyEvent, app: &mut App) {
         }
         KeyCode::Tab => {
             if app.focus_target == crate::function::FocusTarget::Input {
-                // Tab in input inserts 4 spaces instead of jumping to Plan,
+                // Tab in input inserts 4 spaces instead of cycling tabs,
                 // so pasted text with tabs works correctly.
                 app.push_input_undo();
                 app.input.insert_str("    ");
                 app.sync_completion();
             } else {
-                // Tab jumps to the Plan tab (or creates one).
-                app.jump_to_plan();
+                // Tab cycles to the next sidebar tab.
+                cycle_sidebar_forward(app);
             }
         }
         KeyCode::BackTab => {

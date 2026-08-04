@@ -915,11 +915,12 @@ impl TabWidget for HotkeyTab {
         "hotkey"
     }
     fn content_height(&self, _ctx: &TabCtx) -> usize {
-        19
+        20
     }
     fn render_body(&mut self, area: Rect, buf: &mut Buffer, _ctx: &TabCtx) -> Option<(u16, u16)> {
         let rows: Vec<(&str, &str)> = vec![
             ("Alt+L", "Toggle focus: input \u{2194} panel"),
+            ("Alt+P", "Toggle plan mode (read-only)"),
             ("Tab", "Cycle sidebar tabs"),
             ("Shift+Tab", "Cycle sidebar tabs backwards"),
             ("Enter", "Send / confirm"),
