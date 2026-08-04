@@ -1453,6 +1453,54 @@ mod tests {
         );
     }
 
+    /// Regression: two tool offsets that land mid-line on the same
+    /// content line both advance to the same line boundary (commit
+    /// `90526ae` made `advance_to_word_boundary` jump to the next line
+    /// break). `count_block_gaps` must apply the same advance so it
+    /// does not count two gaps where the render path inserts one.
+    /// Otherwise the counted total exceeds the rendered output and
+    /// blank lines accumulate at the bottom of the session.
+    #[test]
+    fn gap_count_uses_advanced_offsets_for_collapsed_mid_line_blocks() {
+        use crate::session::ToolResultBlock;
+        let mut s = Session::default();
+        s.push(Message::new(Role::User, "run it"));
+        // Content: "foo bar baz\nsecond line". Both tool offsets land
+        // mid "bar" / mid-line, so both advance to the same line
+        // boundary (start of "second line").
+        let mut asst = Message::new(Role::Assistant, "foo bar baz\nsecond line");
+        for off in [4usize, 8] {
+            asst.tool_results.push(ToolResultBlock {
+                name: "shell_command".into(),
+                title: "$ echo hi".into(),
+                content: "hi".into(),
+                metadata: String::new(),
+                content_offset: off,
+                visible: true,
+                running: false,
+                failed: false,
+                call_id: String::new(),
+                pruned: false,
+                streaming_input: String::new(),
+                cached_line_count_visible: None,
+                cached_line_count_collapsed: None,
+                started_at: None,
+            });
+        }
+        s.push(asst);
+
+        let width = 100usize;
+        let total = s.count_all_lines_with_width(width) as usize;
+        let user_lines = build_message_lines(&s, 0, width).len();
+        let asst_lines = build_message_lines(&s, 1, width).len();
+        let expected = user_lines + asst_lines + s.messages.len();
+        assert_eq!(
+            total, expected,
+            "counted total {total} must equal rendered output {expected} (over-counted gaps \\
+             add phantom blank lines at the bottom)"
+        );
+    }
+
     #[test]
     fn build_lines_renders_table() {
         let session = session_with_table_table();

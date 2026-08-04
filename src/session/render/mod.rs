@@ -602,12 +602,18 @@ pub(crate) fn count_block_gaps(
 ) -> u32 {
     let mut offsets: Vec<usize> = thinking_segments
         .iter()
-        .map(|s| s.offset)
+        .map(|s| {
+            let off = clamp_char_boundary(content, s.offset.min(content.len()));
+            advance_to_word_boundary(content, off)
+        })
         .chain(
             tool_results
                 .iter()
                 .filter(|t| has_renderable_content(t))
-                .map(|t| t.content_offset),
+                .map(|t| {
+                    let off = clamp_char_boundary(content, t.content_offset.min(content.len()));
+                    advance_to_word_boundary(content, off)
+                }),
         )
         .collect();
     offsets.sort();
