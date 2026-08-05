@@ -1010,7 +1010,11 @@ fn handle_msg(msg: AppMsg, app: &mut App) {
             }
         }
         AppMsg::ChatTimerResume => {
-            app.response_started_at = Some(std::time::Instant::now());
+            // Do NOT start the stream clock here. Timing should only
+            // begin once the first token of the continuation actually
+            // arrives (`note_model_output` initialises `response_started_at`
+            // lazily), otherwise the wait for the next response after a
+            // tool call would be counted as generation time.
         }
         AppMsg::ToolStarted {
             call_id,
