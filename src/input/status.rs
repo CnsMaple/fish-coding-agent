@@ -337,18 +337,23 @@ impl StatusBar {
         let mut spans: Vec<Span<'static>> = Vec::new();
 
         // tok[current|average|total]
-        let total_elapsed = self.total_elapsed_secs + self.live_elapsed_secs;
-        let total_tok = if total_elapsed > 0.0 {
-            Some((self.total_output_tokens + self.live_output_tokens) as f64 / total_elapsed)
+        // current = this response's cumulative rate while streaming,
+        // average = mean of completed responses only, total = overall
+        // cumulative rate of completed responses. Before any response
+        // has finished, average/total have no history and fall back to
+        // the current live value so the display is not empty.
+        let total_tok = if self.total_elapsed_secs > 0.0 {
+            Some(self.total_output_tokens as f64 / self.total_elapsed_secs)
         } else {
             None
         };
+        let cur = self.tok_cur;
         spans.push(Span::styled("tok[", Theme::dim()));
-        spans.push(Span::styled(fmt_num(self.tok_cur), Theme::dim()));
+        spans.push(Span::styled(fmt_num(cur), Theme::dim()));
         spans.push(Span::styled("|", Theme::dim()));
-        spans.push(Span::styled(fmt_num(self.tok_avg), Theme::dim()));
+        spans.push(Span::styled(fmt_num(self.tok_avg.or(cur)), Theme::dim()));
         spans.push(Span::styled("|", Theme::dim()));
-        spans.push(Span::styled(fmt_num(total_tok), Theme::dim()));
+        spans.push(Span::styled(fmt_num(total_tok.or(cur)), Theme::dim()));
         spans.push(Span::styled("]", Theme::dim()));
 
         // hit[current|average|total]

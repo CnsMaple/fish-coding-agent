@@ -274,7 +274,6 @@ impl TokenRate {
         self.sum += val;
         self.count += 1;
         self.current = Some(val);
-        self.live = false;
         self.live_tokens = 0;
         self.live_elapsed = 0.0;
     }
