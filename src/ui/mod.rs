@@ -222,6 +222,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
             for (si, seg) in segments.iter().enumerate() {
                 let offset =
                     crate::session::render::clamp_char_boundary(raw, seg.offset.min(raw.len()));
+                let offset = crate::session::render::advance_to_word_boundary(raw, offset);
                 items.push((offset, WalkItem::Thinking(si)));
             }
         }
@@ -235,6 +236,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
                     t.content_offset.min(raw.len()),
                 );
                 let offset = offset.min(raw.len());
+                let offset = crate::session::render::advance_to_word_boundary(raw, offset);
                 items.push((offset, WalkItem::Tool(ti)));
             }
         }
@@ -264,7 +266,6 @@ pub fn render(f: &mut Frame, app: &mut App) {
         let mut cursor = 0usize;
         let mut prev_line_was_blank = false; // tracks ensure_gap_before_block
         let mut has_any_line = false; // tracks whether msg_lines was non-empty
-        let _ = prev_line_was_blank;
 
         for (offset, item) in &items {
             let offset = *offset;
@@ -272,19 +273,31 @@ pub fn render(f: &mut Frame, app: &mut App) {
                 continue;
             }
 
-            // Render content before this item.
+            // Render content before this item, exactly like
+            // build_message_lines, so the line count and the
+            // blank-ness of the last line match the real render.
             if offset > cursor {
                 let seg_text = crate::session::render::strip_legacy_markers(&raw[cursor..offset]);
-                let seg_lines =
-                    crate::session::render::count_md_segment(&seg_text, width_u16 as usize);
-                line_idx += seg_lines as usize;
+                let mut seg_buf: Vec<ratatui::text::Line<'static>> = Vec::new();
+                crate::session::render::render_content_segment(
+                    &seg_text,
+                    width_u16 as usize,
+                    &mut seg_buf,
+                );
+                let seg_lines = seg_buf.len();
+                line_idx += seg_lines;
                 cursor = offset;
-                has_any_line = true;
-                prev_line_was_blank = false;
+                if seg_lines > 0 {
+                    has_any_line = true;
+                    // Mirror ensure_gap_before_block: if the last
+                    // rendered content line is blank, the next block
+                    // needs no extra gap.
+                    prev_line_was_blank = seg_buf.last().map(|l| l.width() == 0).unwrap_or(false);
+                }
             }
 
             // ensure_gap_before_block: add a blank line if there are
-            // existing lines and the last line is non-empty.
+            // existing lines and the last line is non-blank.
             if has_any_line && !prev_line_was_blank {
                 line_idx += 1;
             }

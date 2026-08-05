@@ -55,7 +55,7 @@ pub fn advance_to_word_boundary(s: &str, idx: usize) -> usize {
 }
 
 /// Render a text segment (content between tool markers) through Markdown.
-pub(super) fn render_content_segment(text: &str, width: usize, out: &mut Vec<Line<'static>>) {
+pub fn render_content_segment(text: &str, width: usize, out: &mut Vec<Line<'static>>) {
     if text.is_empty() {
         return;
     }

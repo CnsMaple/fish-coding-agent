@@ -11,10 +11,9 @@ use blocks::{
     build_attachment_block_rows, build_skill_block_rows, build_thinking_block_rows,
     build_tool_block_rows, ensure_gap_before_block, push_block_rows, render_ask_snapshot_message,
 };
-use utils::render_content_segment;
 pub use utils::{
     advance_to_word_boundary, clamp_char_boundary, content_line_count,
-    content_line_count_segmented, count_md_segment, strip_legacy_markers,
+    content_line_count_segmented, count_md_segment, render_content_segment, strip_legacy_markers,
     thinking_block_line_count, tool_block_line_count, total_thinking_line_count, visible_width,
 };
 
