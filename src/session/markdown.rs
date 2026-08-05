@@ -522,7 +522,7 @@ fn highlight_code_lines(lines: &[&str], lang: Option<&str>) -> Vec<TableCell> {
     let Some(syntax) = find_syntax_cached(lang) else {
         return plain_code_lines(lines);
     };
-    let Some(theme) = theme_set().themes.get("InspiredGitHub") else {
+    let Some(theme) = theme_set().themes.get(syntect_theme_name()) else {
         return plain_code_lines(lines);
     };
     let mut highlighter = HighlightLines::new(syntax, theme);
@@ -592,7 +592,13 @@ fn plain_code_span(text: &str) -> Span<'static> {
 
 fn syntax_set() -> &'static SyntaxSet {
     static SYNTAX_SET: std::sync::OnceLock<SyntaxSet> = std::sync::OnceLock::new();
-    SYNTAX_SET.get_or_init(SyntaxSet::load_defaults_newlines)
+    // Use `load_defaults_nonewlines` (not `load_defaults_newlines`):
+    // the `newlines` variant of syntect's bundled Python grammar leaks
+    // the comment context across physical lines, so a `#` comment on an
+    // early line turns every subsequent line comment-gray. The
+    // `nonewlines` variant fixes that while still carrying multi-line
+    // string state across line boundaries.
+    SYNTAX_SET.get_or_init(SyntaxSet::load_defaults_nonewlines)
 }
 
 fn theme_set() -> &'static ThemeSet {
@@ -762,7 +768,7 @@ fn table_row_lines(
         .collect()
 }
 
-fn wrap_cell(cell: &[Span<'static>], width: usize) -> Vec<TableCell> {
+pub(crate) fn wrap_cell(cell: &[Span<'static>], width: usize) -> Vec<TableCell> {
     let width = width.max(1);
     let mut lines = Vec::new();
     let mut current = Vec::new();
@@ -816,6 +822,26 @@ fn trim_cell(cell: TableCell) -> TableCell {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression: a `#` comment on an early line must NOT turn every
+    /// subsequent line comment-gray. syntect's `load_defaults_newlines`
+    /// Python grammar leaks comment context across lines; we use
+    /// `load_defaults_nonewlines` to avoid it.
+    #[test]
+    fn python_comment_does_not_leak_to_following_lines() {
+        let src = "import math  # intro\n\ndef foo():\n    return 1\n";
+        let lines: Vec<&str> = src.lines().collect();
+        let spans = highlight_lines(&lines, "python");
+        let gray = Color::Rgb(0x96, 0x98, 0x96);
+        for (i, line) in spans.iter().enumerate().skip(2) {
+            let all_gray = !line.is_empty() && line.iter().all(|s| s.style.fg == Some(gray));
+            assert!(
+                !all_gray,
+                "line {i} is entirely comment-gray after an earlier comment: {:?}",
+                line.iter().map(|s| s.content.as_ref()).collect::<String>()
+            );
+        }
+    }
 
     fn join_lines(lines: &[Line]) -> String {
         lines

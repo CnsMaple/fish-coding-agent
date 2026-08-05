@@ -462,47 +462,14 @@ fn build_streaming_shell_rows(
     let cmd_refs: Vec<&str> = cmd_lines.iter().map(|s| s.as_str()).collect();
     let all_hl = crate::session::markdown::highlight_lines(&cmd_refs, "sh");
 
-    for (i, line) in cmd_lines.iter().enumerate() {
+    for (i, _line) in cmd_lines.iter().enumerate() {
         let prefix = if i == 0 { "$ " } else { "  " };
-        let content = format!("{prefix}{line}");
-        let base = box_row_line(&content, width, bg);
-        let base_str: String = base.spans.iter().map(|s| s.content.as_ref()).collect();
-        let content_start = 2;
-        let cmd_start = content_start + prefix.len();
-        let cmd_end = cmd_start + line.len();
-
         let hl_raw = &all_hl[i];
         let hl_spans = spans_with_bg(hl_raw, bg);
-        let hl_total: usize = hl_spans.iter().map(|s| s.content.len()).sum();
-        let hl_spans = if hl_total != line.len() {
-            vec![Span::styled(line.to_string(), bg_style(bg))]
-        } else {
-            hl_spans
-        };
-
-        let mut parts: Vec<Span<'static>> = Vec::new();
-        parts.push(Span::styled(
-            base_str[..content_start].to_string(),
-            dim_bg_style(bg),
-        ));
-        parts.push(Span::styled(
-            base_str[content_start..cmd_start].to_string(),
-            bg_style(bg),
-        ));
-        for span in &hl_spans {
-            parts.push(span.clone());
-        }
-        let tail = &base_str[cmd_end..];
-        if tail.len() >= 2 {
-            let (pad_part, border_part) = tail.split_at(tail.len() - 2);
-            if !pad_part.is_empty() {
-                parts.push(Span::styled(pad_part.to_string(), bg_style(bg)));
-            }
-            parts.push(Span::styled(border_part.to_string(), dim_bg_style(bg)));
-        } else {
-            parts.push(Span::styled(tail.to_string(), dim_bg_style(bg)));
-        }
-        rows.push(Line::from(parts));
+        let mut content_spans: Vec<Span<'static>> = Vec::with_capacity(hl_spans.len() + 1);
+        content_spans.push(Span::styled(prefix.to_string(), bg_style(bg)));
+        content_spans.extend(hl_spans);
+        rows.push(box_row_line_spans(content_spans, width, bg));
     }
 
     rows.push(border_with_label_line(width, " Output ", bg));
@@ -532,37 +499,9 @@ fn build_streaming_python_rows(code: &str, width: usize, bg: Color) -> Vec<Line<
         let wrapped = wrap_line(&cleaned, inner_w);
         let refs: Vec<&str> = wrapped.iter().map(|s| s.as_str()).collect();
         let all_hl = crate::session::markdown::highlight_lines(&refs, "python");
-        for (i, w) in wrapped.iter().enumerate() {
+        for (i, _w) in wrapped.iter().enumerate() {
             let hl = spans_with_bg(&all_hl[i], bg);
-            let hl_total: usize = hl.iter().map(|s| s.content.len()).sum();
-            let hl = if hl_total != w.len() {
-                vec![Span::styled(w.clone(), bg_style(bg))]
-            } else {
-                hl
-            };
-            let base = box_row_line(w, width, bg);
-            let base_str: String = base.spans.iter().map(|s| s.content.as_ref()).collect();
-            let content_start = 2;
-            let content_end = content_start + w.len();
-            let mut parts: Vec<Span<'static>> = Vec::new();
-            parts.push(Span::styled(
-                base_str[..content_start].to_string(),
-                dim_bg_style(bg),
-            ));
-            for span in &hl {
-                parts.push(span.clone());
-            }
-            let tail = &base_str[content_end..];
-            if tail.len() >= 2 {
-                let (pad_part, border_part) = tail.split_at(tail.len() - 2);
-                if !pad_part.is_empty() {
-                    parts.push(Span::styled(pad_part.to_string(), bg_style(bg)));
-                }
-                parts.push(Span::styled(border_part.to_string(), dim_bg_style(bg)));
-            } else {
-                parts.push(Span::styled(tail.to_string(), dim_bg_style(bg)));
-            }
-            rows.push(Line::from(parts));
+            rows.push(box_row_line_spans(hl, width, bg));
         }
     }
 
@@ -606,35 +545,12 @@ fn build_streaming_edit_rows(
         let wrapped = wrap_line(&content, inner_w.saturating_sub(2));
         for w in &wrapped {
             let prefix_str = format!("{} ", sign);
-            let base = box_row_line(&format!("{prefix_str}{w}"), width, bg);
-            let base_str: String = base.spans.iter().map(|s| s.content.as_ref()).collect();
-            let content_start = 2;
-            let sign_end = content_start + prefix_str.len();
-            let w_end = sign_end + w.len();
-            let mut parts: Vec<Span<'static>> = Vec::new();
-            parts.push(Span::styled(
-                base_str[..content_start].to_string(),
-                dim_bg_style(bg),
-            ));
-            parts.push(Span::styled(
-                base_str[content_start..sign_end].to_string(),
-                Style::default().fg(sign_color).bg(bg),
-            ));
-            parts.push(Span::styled(
-                base_str[sign_end..w_end].to_string(),
-                bg_style(line_bg),
-            ));
-            let tail = &base_str[w_end..];
-            if tail.len() >= 2 {
-                let (pad_part, border_part) = tail.split_at(tail.len() - 2);
-                if !pad_part.is_empty() {
-                    parts.push(Span::styled(pad_part.to_string(), bg_style(line_bg)));
-                }
-                parts.push(Span::styled(border_part.to_string(), dim_bg_style(bg)));
-            } else {
-                parts.push(Span::styled(tail.to_string(), dim_bg_style(bg)));
-            }
-            rows.push(Line::from(parts));
+            let content = w.strip_prefix(&prefix_str).unwrap_or(w);
+            let spans = vec![
+                Span::styled(prefix_str.clone(), Style::default().fg(sign_color).bg(bg)),
+                Span::styled(content.to_string(), bg_style(line_bg)),
+            ];
+            rows.push(box_row_line_spans(spans, width, bg));
         }
     }
 
@@ -650,35 +566,12 @@ fn build_streaming_edit_rows(
         let wrapped = wrap_line(&content, inner_w.saturating_sub(2));
         for w in &wrapped {
             let prefix_str = format!("{} ", sign);
-            let base = box_row_line(&format!("{prefix_str}{w}"), width, bg);
-            let base_str: String = base.spans.iter().map(|s| s.content.as_ref()).collect();
-            let content_start = 2;
-            let sign_end = content_start + prefix_str.len();
-            let w_end = sign_end + w.len();
-            let mut parts: Vec<Span<'static>> = Vec::new();
-            parts.push(Span::styled(
-                base_str[..content_start].to_string(),
-                dim_bg_style(bg),
-            ));
-            parts.push(Span::styled(
-                base_str[content_start..sign_end].to_string(),
-                Style::default().fg(sign_color).bg(bg),
-            ));
-            parts.push(Span::styled(
-                base_str[sign_end..w_end].to_string(),
-                bg_style(line_bg),
-            ));
-            let tail = &base_str[w_end..];
-            if tail.len() >= 2 {
-                let (pad_part, border_part) = tail.split_at(tail.len() - 2);
-                if !pad_part.is_empty() {
-                    parts.push(Span::styled(pad_part.to_string(), bg_style(line_bg)));
-                }
-                parts.push(Span::styled(border_part.to_string(), dim_bg_style(bg)));
-            } else {
-                parts.push(Span::styled(tail.to_string(), dim_bg_style(bg)));
-            }
-            rows.push(Line::from(parts));
+            let content = w.strip_prefix(&prefix_str).unwrap_or(w);
+            let spans = vec![
+                Span::styled(prefix_str.clone(), Style::default().fg(sign_color).bg(bg)),
+                Span::styled(content.to_string(), bg_style(line_bg)),
+            ];
+            rows.push(box_row_line_spans(spans, width, bg));
         }
     }
 
@@ -708,50 +601,14 @@ pub(super) fn build_shell_command_rows(
         // syntax state (e.g. open string literals) carries across.
         let cmd_refs: Vec<&str> = cmd_lines.iter().map(|s| s.as_str()).collect();
         let all_hl = crate::session::markdown::highlight_lines(&cmd_refs, "sh");
-        for (i, line) in cmd_lines.iter().enumerate() {
+        for (i, _line) in cmd_lines.iter().enumerate() {
             let prefix = if i == 0 { "$ " } else { "  " };
-            let content = format!("{prefix}{line}");
-            // Use box_row_line to get correct borders/padding string,
-            // then overlay syntax highlighting by splitting at content
-            // boundaries.
-            let base = box_row_line(&content, width, bg);
-            let base_str: String = base.spans.iter().map(|s| s.content.as_ref()).collect();
-            let content_start = 2; // after "| "
-            let cmd_start = content_start + prefix.len();
-            let cmd_end = cmd_start + line.len();
-            // Get highlighted spans for this line (from the multi-line pass)
             let hl_raw = &all_hl[i];
             let hl_spans = spans_with_bg(hl_raw, bg);
-            // Verify hl_spans cover exactly the command text
-            let hl_total: usize = hl_spans.iter().map(|s| s.content.len()).sum();
-            let hl_spans = if hl_total != line.len() {
-                vec![Span::styled(line.to_string(), bg_style(bg))]
-            } else {
-                hl_spans
-            };
-            let mut parts: Vec<Span<'static>> = Vec::new();
-            parts.push(Span::styled(
-                base_str[..content_start].to_string(),
-                dim_bg_style(bg),
-            ));
-            parts.push(Span::styled(
-                base_str[content_start..cmd_start].to_string(),
-                bg_style(bg),
-            ));
-            for span in &hl_spans {
-                parts.push(span.clone());
-            }
-            let tail = &base_str[cmd_end..];
-            if tail.len() >= 2 {
-                let (pad_part, border_part) = tail.split_at(tail.len() - 2);
-                if !pad_part.is_empty() {
-                    parts.push(Span::styled(pad_part.to_string(), bg_style(bg)));
-                }
-                parts.push(Span::styled(border_part.to_string(), dim_bg_style(bg)));
-            } else {
-                parts.push(Span::styled(tail.to_string(), dim_bg_style(bg)));
-            }
-            rows.push(Line::from(parts));
+            let mut content_spans: Vec<Span<'static>> = Vec::with_capacity(hl_spans.len() + 1);
+            content_spans.push(Span::styled(prefix.to_string(), bg_style(bg)));
+            content_spans.extend(hl_spans);
+            rows.push(box_row_line_spans(content_spans, width, bg));
         }
     } else {
         rows.extend(box_row_lines(title, width, bg));
@@ -819,17 +676,12 @@ fn build_read_rows(
         let all_hl = crate::session::markdown::highlight_lines(&visible_refs, lang);
         for (i, line) in visible_refs.iter().enumerate() {
             let hl = spans_with_bg(&all_hl[i], bg);
-            let hl_total: usize = hl.iter().map(|s| s.content.len()).sum();
-            if hl_total == line.len() {
-                for wrapped in wrap_line(line, inner_w) {
-                    if wrapped == *line {
-                        rows.push(box_row_line_spans(hl.clone(), width, bg));
-                    } else {
-                        rows.extend(box_row_lines(&wrapped, width, bg));
-                    }
-                }
-            } else {
+            if hl.is_empty() {
                 rows.extend(box_row_lines(line, width, bg));
+                continue;
+            }
+            for wrapped in crate::session::markdown::wrap_cell(&hl, inner_w.max(1)) {
+                rows.push(box_row_line_spans(wrapped, width, bg));
             }
         }
     } else {
@@ -1440,14 +1292,11 @@ fn build_python_command_rows(
     rows.push(border_with_label_line(width, " python ", bg));
     // Highlight Python code lines
     for line in code.lines() {
-        let spans = crate::session::markdown::highlight_line(line, "python");
+        let cleaned = strip_control_chars(line);
+        let spans = crate::session::markdown::highlight_line(&cleaned, "python");
         let spans = spans_with_bg(&spans, bg);
-        for wrapped in wrap_line(line, width.saturating_sub(4)) {
-            if wrapped == line {
-                rows.push(box_row_line_spans(spans.clone(), width, bg));
-            } else {
-                rows.extend(box_row_lines(&wrapped, width, bg));
-            }
+        for wrapped in crate::session::markdown::wrap_cell(&spans, width.saturating_sub(4).max(1)) {
+            rows.push(box_row_line_spans(wrapped, width, bg));
         }
     }
     rows.push(border_with_label_line(width, " Output ", bg));
