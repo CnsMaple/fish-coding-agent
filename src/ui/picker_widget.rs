@@ -31,6 +31,7 @@ pub fn render_search_row(
     } else {
         focus == PickerFocus::Search
     };
+    let cursor = query.floor_char_boundary(cursor_byte.unwrap_or(query.len()));
     let prefix = if focused {
         Span::styled(" search: ", Theme::bold())
     } else {
@@ -48,7 +49,6 @@ pub fn render_search_row(
         }
     } else {
         // Insert cursor at the correct position when specified
-        let cursor = cursor_byte.unwrap_or(query.len());
         if focused {
             let (before, after) = query.split_at(cursor);
             spans.push(Span::raw(before.to_string()));
@@ -62,7 +62,6 @@ pub fn render_search_row(
 
     if focused {
         let prefix_width = UnicodeWidthStr::width(" search: ") as u16;
-        let cursor = cursor_byte.unwrap_or(query.len());
         // Count codepoint display width up to cursor position
         let query_prefix_width = UnicodeWidthStr::width(&query[..cursor]) as u16;
         Some((area.x + prefix_width + query_prefix_width, area.y))
