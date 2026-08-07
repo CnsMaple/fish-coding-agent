@@ -884,6 +884,7 @@ fn handle_msg(msg: AppMsg, app: &mut App) {
             app.flush_ask_snapshot();
             flush_pending_chat(app, true);
             app.session.finish_streaming();
+            app.finalize_initial_title();
             app.save_current_session();
             app.inflight = None;
             app.cancel_state = CancelState::Idle;

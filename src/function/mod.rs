@@ -48,6 +48,12 @@ pub struct App {
     pub session: Session,
     pub session_id: String,
     pub session_title: String,
+    /// Set on the first real turn of a fresh session (via
+    /// `maybe_title_from_first_prompt`) and cleared once the AI has
+    /// set a title (via `update_title`) or the fallback in `ChatDone`
+    /// has run. While pending, `ChatDone` may improve the title from
+    /// the first assistant reply if the AI never called `update_title`.
+    pub initial_title_pending: bool,
     pub mode: AppMode,
     /// Mode to restore when the function panel is hidden or the
     /// Plan tab is closed. Updated when tab switching enters Plan mode.
@@ -349,6 +355,7 @@ impl App {
             session: Session::default(),
             session_id,
             session_title,
+            initial_title_pending: false,
             mode: AppMode::Yolo,
             previous_mode: AppMode::Yolo,
             function: FunctionPanel::new(),
@@ -699,6 +706,32 @@ impl App {
             && self.session_title == crate::session::store::default_title(&self.cwd)
         {
             self.session_title = crate::session::store::title_from_prompt(prompt);
+            self.initial_title_pending = true;
+        }
+    }
+
+    /// Called from `ChatDone`. If the AI never called `update_title`
+    /// during the first turn of a fresh session, derive a title from
+    /// the first assistant reply so the session never keeps the raw
+    /// directory-name default.
+    pub fn finalize_initial_title(&mut self) {
+        if !self.initial_title_pending {
+            return;
+        }
+        self.initial_title_pending = false;
+        if self.session_title != crate::session::store::default_title(&self.cwd) {
+            return;
+        }
+        if let Some(reply) = self
+            .session
+            .messages
+            .iter()
+            .find(|m| matches!(m.role, Role::Assistant))
+            .map(|m| m.content.as_str())
+        {
+            let t = crate::session::store::title_from_reply(reply);
+            self.session_title = t.clone();
+            self.status.session_title = t;
         }
     }
 
@@ -824,6 +857,7 @@ impl App {
             None => {
                 self.session_title = title.clone();
                 self.status.session_title = self.session_title.clone();
+                self.initial_title_pending = false;
                 self.save_current_session();
                 self.notify(
                     crate::function::notifications::ToastLevel::Ok,

@@ -43,6 +43,7 @@ fn make_app() -> App {
         session: crate::session::Session::default(),
         session_id: crate::session::store::new_session_id(),
         session_title: "test".to_string(),
+        initial_title_pending: false,
         mode: crate::function::AppMode::Yolo,
         previous_mode: crate::function::AppMode::Yolo,
         active_agent: crate::permission::Agent::Build,

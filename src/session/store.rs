@@ -91,6 +91,37 @@ pub fn title_from_prompt(prompt: &str) -> String {
     title
 }
 
+/// Derive a session title from the first assistant reply. Used as a
+/// fallback when the AI never called `update_title` on the first turn.
+/// Tries a leading `# <title>` heading (some models emit one), then a
+/// `标题：`-style line, then falls back to the first non-empty line.
+pub fn title_from_reply(reply: &str) -> String {
+    const MAX_CHARS: usize = 24;
+    for line in reply.lines().map(str::trim) {
+        if line.is_empty() {
+            continue;
+        }
+        let candidate = if let Some(rest) = line.strip_prefix('#') {
+            rest.trim().trim_start_matches('#').trim()
+        } else if let Some(rest) = line.strip_prefix("标题：") {
+            rest.trim()
+        } else if let Some(idx) = line.find("标题：") {
+            line[idx + "标题：".len()..].trim()
+        } else {
+            line
+        };
+        if candidate.is_empty() {
+            continue;
+        }
+        let mut title: String = candidate.chars().take(MAX_CHARS).collect();
+        if candidate.chars().count() > MAX_CHARS {
+            title.push_str("...");
+        }
+        return title;
+    }
+    "session".to_string()
+}
+
 #[derive(Debug, Clone)]
 pub struct SaveMeta {
     pub provider: Option<String>,
@@ -294,4 +325,45 @@ fn normalize_path_string(s: &str) -> String {
     s.replace('\\', "/")
         .trim_end_matches('/')
         .to_ascii_lowercase()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::title_from_reply;
+
+    #[test]
+    fn title_from_reply_uses_markdown_heading() {
+        let reply = "# 重构会话标题生成\n\n这里是对标题管理逻辑的改动说明。";
+        assert_eq!(title_from_reply(reply), "重构会话标题生成");
+    }
+
+    #[test]
+    fn title_from_reply_uses_title_marker() {
+        let reply = "标题：修复聊天标题\n\n正文内容...";
+        assert_eq!(title_from_reply(reply), "修复聊天标题");
+    }
+
+    #[test]
+    fn title_from_reply_falls_back_to_first_line() {
+        let reply = "我分析了标题生成的链路，并给出了改进方案。";
+        assert_eq!(
+            title_from_reply(reply),
+            "我分析了标题生成的链路，并给出了改进方案。"
+        );
+    }
+
+    #[test]
+    fn title_from_reply_truncates_long() {
+        // 24 chars taken + "..." appended.
+        let long = "这是一段非常非常非常非常非常非常非常非常漫长的标题文本";
+        let t = title_from_reply(long);
+        assert!(t.chars().count() <= 27);
+        assert!(t.ends_with("..."));
+    }
+
+    #[test]
+    fn title_from_reply_empty_falls_back() {
+        assert_eq!(title_from_reply(""), "session");
+        assert_eq!(title_from_reply("   \n\n  "), "session");
+    }
 }
