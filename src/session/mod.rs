@@ -31,6 +31,19 @@ pub enum ContentPart {
 /// of message content (markdown + wrapping) per viewport width, since the
 /// exact number of display lines depends on the terminal width.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct CachedGapCount {
+    pub width: u16,
+    pub count: u32,
+    /// `Message::content_version` when this count was computed. Guards
+    /// against stale counts when content or tool segments change.
+    pub content_version: u64,
+    /// `Message::thinking_version` when this count was computed.
+    /// Gap layout depends on thinking segment offsets, so thinking
+    /// changes must invalidate the cached gap count too.
+    pub thinking_version: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 pub struct CachedLineCount {
     pub width: u16,
     pub count: u32,
@@ -289,6 +302,14 @@ pub struct Message {
     /// undercount and causes the bottom of such messages to be hidden.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cached_content_line_count: Option<CachedLineCount>,
+    /// Cached count of leading blank gaps inserted before thinking/tool
+    /// blocks. Validated by `CachedGapCount::content_version` and
+    /// `thinking_version`. Computing gaps requires rendering each content
+    /// segment through Markdown (`count_block_gaps`), so caching it avoids
+    /// re-parsing every message's content on every layout pass — the
+    /// dominant cost during streaming in long sessions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_gap_count: Option<CachedGapCount>,
     /// Per-message version counter. Bumped whenever this message's
     /// content, thinking, or tool results change. The render LRU is
     /// keyed on this so changing one message does not invalidate
@@ -331,6 +352,7 @@ impl Message {
             skill_ref: None,
             line_count,
             cached_content_line_count: None,
+            cached_gap_count: None,
             content_version: 0,
             thinking_version: 0,
             prefix: false,
@@ -383,6 +405,7 @@ impl Message {
     /// blocks change.
     pub fn invalidate_caches(&mut self) {
         self.cached_content_line_count = None;
+        self.cached_gap_count = None;
         self.bump_version();
         for seg in &mut self.thinking_segments {
             seg.cached_line_count_expanded = None;
@@ -403,6 +426,7 @@ impl Message {
     /// re-renders. This avoids a full markdown re-parse on every delta.
     pub fn invalidate_render_caches(&mut self) {
         self.bump_version();
+        self.cached_gap_count = None;
         for seg in &mut self.thinking_segments {
             seg.cached_line_count_expanded = None;
             seg.cached_line_count_collapsed = None;
@@ -418,6 +442,7 @@ impl Message {
     /// preserved. Called on every thinking delta append.
     pub fn invalidate_thinking_caches(&mut self) {
         self.thinking_version = self.thinking_version.wrapping_add(1);
+        self.cached_gap_count = None;
         for seg in &mut self.thinking_segments {
             seg.cached_line_count_expanded = None;
             seg.cached_line_count_collapsed = None;
@@ -879,6 +904,7 @@ impl Session {
             skill_ref: None,
             line_count: 0,
             cached_content_line_count: None,
+            cached_gap_count: None,
             content_version: 0,
             thinking_version: 0,
             prefix: false,
@@ -1339,13 +1365,52 @@ impl Session {
             // Gaps before thinking/tool blocks.  Pass content and width
             // so `count_block_gaps` can verify each segment actually
             // renders non-zero lines before counting a gap.
-            let segments = crate::session::render::get_thinking_segments(m);
-            let gap_count = crate::session::render::count_block_gaps(
-                &m.content,
-                width as usize,
-                &segments,
-                &m.tool_results,
-            );
+            //
+            // The gap count is cached per message (keyed on width,
+            // content_version, thinking_version) because computing it
+            // re-renders every content segment through Markdown. During
+            // streaming, only the streaming message's content changes, so
+            // caching lets every *other* message reuse its previous gap
+            // count instead of re-parsing full Markdown on every layout
+            // pass — the dominant cost in long sessions.
+            let gap_count = if let Some(c) = m.cached_gap_count {
+                if c.width == width
+                    && c.content_version == m.content_version
+                    && c.thinking_version == m.thinking_version
+                {
+                    c.count
+                } else {
+                    let segments = crate::session::render::get_thinking_segments(m);
+                    let n = crate::session::render::count_block_gaps(
+                        &m.content,
+                        width as usize,
+                        &segments,
+                        &m.tool_results,
+                    );
+                    m.cached_gap_count = Some(CachedGapCount {
+                        width,
+                        count: n,
+                        content_version: m.content_version,
+                        thinking_version: m.thinking_version,
+                    });
+                    n
+                }
+            } else {
+                let segments = crate::session::render::get_thinking_segments(m);
+                let n = crate::session::render::count_block_gaps(
+                    &m.content,
+                    width as usize,
+                    &segments,
+                    &m.tool_results,
+                );
+                m.cached_gap_count = Some(CachedGapCount {
+                    width,
+                    count: n,
+                    content_version: m.content_version,
+                    thinking_version: m.thinking_version,
+                });
+                n
+            };
             n += gap_count;
 
             // User messages: background padding + skill block.

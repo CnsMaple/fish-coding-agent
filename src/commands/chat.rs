@@ -105,6 +105,7 @@ pub fn send_message(app: &mut App, user_msg: Message) {
         display_cursor: 0,
         line_count: 0,
         cached_content_line_count: None,
+        cached_gap_count: None,
         ts: chrono::Utc::now(),
         streaming: true,
         skill_ref: None,
