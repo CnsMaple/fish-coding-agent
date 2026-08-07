@@ -407,8 +407,8 @@ pub fn compact_now(app: &mut App, _arg: &str) {
         app.notify(ToastLevel::Fail, e.clone());
         return;
     }
-    let (provider, _mode) = match crate::config::parse_id(&active_id) {
-        Some(p) => p,
+    let provider = match app.config.entry(&active_id).map(|e| e.kind) {
+        Some(k) => k,
         None => {
             app.notify(ToastLevel::Fail, MSG_PROVIDER_INVALID);
             return;
@@ -568,7 +568,7 @@ pub fn open_model_picker(app: &mut App) {
         1 => {
             // Only one configured entry — skip the chooser and jump
             // straight to the model list for its kind.
-            if let Some(id) = app.config.entries.keys().next().cloned() {
+            if let Some(id) = app.config.entries.first().map(|e| e.id.clone()) {
                 open_model_picker_for_entry(app, &id);
             }
         }
@@ -614,9 +614,10 @@ pub fn open_model_picker_for_kind(app: &mut App, provider: crate::config::Provid
 /// cache so each endpoint's model list is cached independently.
 pub fn open_model_picker_for_entry(app: &mut App, entry_id: &str) {
     use crate::config::ProviderKind;
-    let Some(mut state) = crate::function::ModelPickerState::new_for_entry(entry_id) else {
+    let Some(kind) = app.config.entry(entry_id).map(|e| e.kind) else {
         return;
     };
+    let mut state = crate::function::ModelPickerState::new_for_entry(kind, entry_id);
     let provider = state.provider;
     // Dedup by the exact entry id, not just the kind — two pickers for
     // different same-kind entries are distinct tabs.
@@ -673,9 +674,18 @@ pub fn open_hotkey(app: &mut App) {
 }
 
 pub fn open_thinking_picker(app: &mut App) {
-    app.function.push(SidebarTab::ThinkingPicker(
-        crate::function::ThinkingPickerState::new(),
-    ));
+    let mut state = crate::function::ThinkingPickerState::new();
+    // Pre-select the current reasoning strength so the user sees which
+    // one is active.
+    let current = app.config.thinking.as_str();
+    if let Some(fi) = state
+        .filtered
+        .iter()
+        .position(|&i| crate::function::ThinkingPickerState::LEVELS[i] == current)
+    {
+        state.cursor = fi;
+    }
+    app.function.push(SidebarTab::ThinkingPicker(state));
     app.show_panel();
     app.acknowledge_panel();
 }

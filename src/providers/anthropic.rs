@@ -14,7 +14,7 @@ pub struct AnthropicProvider;
 #[async_trait]
 impl Provider for AnthropicProvider {
     fn kind(&self) -> ProviderKind {
-        ProviderKind::Anthropic
+        ProviderKind::AnthropicMessages
     }
 
     async fn list_models(

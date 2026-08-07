@@ -314,10 +314,10 @@ pub fn render_new_provider_picker(
         );
         for row in range {
             let idx = s.filtered[row];
-            let id = &s.entries[idx];
+            let entry = &s.entries[idx];
             let is_cursor = row == s.cursor;
             let y = list_area.y + (row - s.scroll) as u16;
-            let picker_label = s.picker_label(id);
+            let picker_label = s.picker_label(entry);
             let line = if is_cursor {
                 Line::from(vec![
                     Span::styled("> ", Theme::bold()),

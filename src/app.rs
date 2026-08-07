@@ -26,8 +26,8 @@ impl App {
         let has_usable = self
             .config
             .entries
-            .keys()
-            .any(|id| self.config.validate_provider(id).is_ok());
+            .iter()
+            .any(|e| self.config.validate_provider(&e.id).is_ok());
         let msg = if has_usable {
             if errs.len() == 1 {
                 errs.into_iter().next().unwrap()

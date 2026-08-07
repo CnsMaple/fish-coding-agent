@@ -1,5 +1,5 @@
 use crate::app::App;
-use crate::config::{parse_id, ProviderKind};
+use crate::config::ProviderKind;
 use crate::function::notifications::ToastLevel;
 use crate::function::SidebarTab;
 use crate::providers::{ChatMessage, ChatRequest};
@@ -59,8 +59,8 @@ pub fn send_message(app: &mut App, user_msg: Message) {
         }
         return;
     }
-    let (provider, _mode) = match parse_id(&active_id) {
-        Some(p) => p,
+    let provider = match app.config.entry(&active_id).map(|e| e.kind) {
+        Some(k) => k,
         None => {
             app.notify(ToastLevel::Fail, MSG_PROVIDER_INVALID);
             return;
@@ -823,7 +823,8 @@ pub(super) async fn run_sub_agent(
 
     let system_prompt = sub_agent_system_prompt(sub);
     let tools = match provider {
-        ProviderKind::Anthropic => crate::tools::anthropic_tool_specs_for_sub_agent(sub),
+        ProviderKind::AnthropicMessages => crate::tools::anthropic_tool_specs_for_sub_agent(sub),
+        ProviderKind::OpenaiResponses => crate::tools::responses_tool_specs_for_sub_agent(sub),
         _ => crate::tools::openai_tool_specs_for_sub_agent(sub),
     };
 

@@ -929,7 +929,6 @@ pub(super) fn commit_timeline_jump(app: &mut App, state: &crate::function::Timel
     app.notify(ToastLevel::Info, label);
 }
 pub(super) fn trigger_picker_fetch(app: &mut App, state: &mut crate::function::ModelPickerState) {
-    use crate::config::parse_id;
     let p = state.provider;
     // Resolve the entry to fetch from. Prefer the picker's bound entry id
     // (multiple entries can share a kind — e.g. two OpenAI endpoints —
@@ -939,13 +938,13 @@ pub(super) fn trigger_picker_fetch(app: &mut App, state: &mut crate::function::M
     let target_id: Option<String> = match state.entry_id.as_deref() {
         Some(id) if app.config.entry(id).is_some() => Some(id.to_string()),
         _ => match app.config.active.as_deref() {
-            Some(id) if parse_id(id).map(|(k, _)| k == p).unwrap_or(false) => Some(id.to_string()),
+            Some(id) if app.config.entry(id).map(|e| e.kind) == Some(p) => Some(id.to_string()),
             _ => app
                 .config
                 .entries
-                .keys()
-                .find(|id| parse_id(id).map(|(k2, _)| k2 == p).unwrap_or(false))
-                .cloned(),
+                .iter()
+                .find(|e| e.kind == p)
+                .map(|e| e.id.clone()),
         },
     };
     let target_id = match target_id {
@@ -1174,6 +1173,11 @@ pub(super) fn handle_settings_back(app: &mut App, state: &mut crate::function::S
             state.cursor = 0;
             state.clamp_cursor(&app.config);
         }
+        SettingsLevel::ProtocolPicker(_) => {
+            state.level = SettingsLevel::NewProviderKind;
+            state.cursor = 0;
+            state.clamp_cursor(&app.config);
+        }
         SettingsLevel::ThinkingDisplayList
         | SettingsLevel::ToolResultDisplayList
         | SettingsLevel::EnterBehaviorList
@@ -1216,7 +1220,7 @@ pub(super) fn handle_settings_back(app: &mut App, state: &mut crate::function::S
 /// Also: Enter on a text field in the form does **not** auto-advance focus.
 /// The user moves between fields with Up/Down/Tab.
 pub(super) fn handle_settings_enter(app: &mut App, state: &mut crate::function::SettingsState) {
-    use crate::config::parse_id;
+    use crate::function::states::NewProviderEntry;
     use crate::function::{ConfigField, SettingsLevel};
 
     let cursor = state.cursor;
@@ -1241,15 +1245,15 @@ pub(super) fn handle_settings_enter(app: &mut App, state: &mut crate::function::
         },
         SettingsLevel::ProviderList => {
             if cursor == 0 {
-                // Transitioning to NewProviderKind — reload models.dev
-                // providers from cache (background fetch may have
-                // completed since SettingsState was created).
-                let cache_parent = app
+                // Reload models.dev presets from cache every time we
+                // enter this level (the background fetch may have
+                // completed since the SettingsState was created).
+                let cache_path = app
                     .model_cache_path
                     .parent()
                     .unwrap_or(&app.model_cache_path)
                     .to_path_buf();
-                state.new_provider.load_model_dev_providers(&cache_parent);
+                state.new_provider.load_model_dev_providers(&cache_path);
                 SettingsLevel::NewProviderKind
             } else {
                 let keys = app.config.configured_provider_ids();
@@ -1260,72 +1264,88 @@ pub(super) fn handle_settings_enter(app: &mut App, state: &mut crate::function::
             }
         }
         SettingsLevel::NewProviderKind => {
-            // Reload models.dev providers from cache every time we
-            // enter this level (the background fetch may have completed
-            // since the SettingsState was created).
-            let cache_parent = app
-                .model_cache_path
-                .parent()
-                .unwrap_or(&app.model_cache_path)
-                .to_path_buf();
-            state.new_provider.load_model_dev_providers(&cache_parent);
-
-            let selected = state.new_provider.selected_id();
-            match selected {
-                Some(id) if id.starts_with("__md__/") => {
-                    // models.dev provider — extract provider_id from
-                    // the `__md__/{name}/{provider_id}` format.
-                    let provider_id = id.rsplit('/').next().unwrap_or("").to_string();
-                    // Load ModelData to get base_url and display name.
+            match state.new_provider.selected() {
+                Some(NewProviderEntry::Custom) => {
+                    // Custom uses a placeholder kind; the real protocol
+                    // is chosen after the form is saved.
+                    let mut form = crate::function::ConfigFormState::new_for_create(
+                        crate::config::ProviderKind::OpenaiChat,
+                        crate::config::ProviderMode::Key,
+                    );
+                    form.is_custom = true;
+                    SettingsLevel::ConfigForm(form)
+                }
+                Some(NewProviderEntry::Cursor) => {
+                    SettingsLevel::ConfigForm(crate::function::ConfigFormState::new_for_create(
+                        crate::config::ProviderKind::Cursor,
+                        crate::config::ProviderMode::Oauth,
+                    ))
+                }
+                Some(NewProviderEntry::Volcengine) => {
+                    SettingsLevel::ConfigForm(crate::function::ConfigFormState::new_for_create(
+                        crate::config::ProviderKind::Volcengine,
+                        crate::config::ProviderMode::Key,
+                    ))
+                }
+                Some(NewProviderEntry::ModelsDev { provider_id, name }) => {
+                    // Look up base_url from the models.dev cache.
                     let cache_path = app
                         .model_cache_path
                         .parent()
                         .unwrap_or(&app.model_cache_path)
                         .to_path_buf();
-                    let model_data_path = cache_path.join("model-data.json");
-                    let model_data = crate::model_data::ModelData::load(&model_data_path);
-                    let provider_meta = model_data
+                    let model_data =
+                        crate::model_data::ModelData::load(&cache_path.join("model-data.json"));
+                    let base_url = model_data
                         .as_ref()
-                        .and_then(|d| d.providers.get(&provider_id));
-                    let base_url = provider_meta
+                        .and_then(|d| d.providers.get(provider_id))
                         .map(|m| m.base_url.clone())
                         .unwrap_or_default();
-                    let name = provider_meta
-                        .map(|m| m.name.clone())
-                        .unwrap_or_else(|| provider_id.clone());
-
-                    let kind = crate::config::ProviderKind::Openai;
-                    let mode = crate::config::ProviderMode::Key;
-                    let mut form = crate::function::ConfigFormState::new_for_create(kind, mode);
-                    form.name = name;
+                    let mut form = crate::function::ConfigFormState::new_for_create(
+                        crate::config::ProviderKind::OpenaiChat,
+                        crate::config::ProviderMode::Key,
+                    );
+                    form.name = name.clone();
                     form.base_url = base_url;
-                    form.provider_id = provider_id;
+                    form.provider_id = provider_id.clone();
                     SettingsLevel::ConfigForm(form)
                 }
-                Some(id) => match parse_id(&id) {
-                    Some((kind, mode)) => SettingsLevel::ConfigForm(
-                        crate::function::ConfigFormState::new_for_create(kind, mode),
-                    ),
-                    None => SettingsLevel::NewProviderKind,
-                },
                 None => SettingsLevel::NewProviderKind,
             }
+        }
+        SettingsLevel::ProtocolPicker(p) => {
+            if let Some(choice) = p.selected() {
+                // Assign the chosen protocol to the entry. When the
+                // protocol actually changes (or the entry had no
+                // protocol yet), apply the protocol's default base_url;
+                // otherwise preserve the user's edited base_url.
+                if let Some(entry) = app.config.entry_mut(&p.entry_id) {
+                    let changed = p.current_kind != Some(choice.kind());
+                    entry.kind = choice.kind();
+                    if changed {
+                        entry.base_url = choice.default_base_url().to_string();
+                    }
+                }
+                let _ = app.config.save(&app.config_path);
+                close_active_function_tab(app);
+                open_model_picker_for_entry_after_save(app, &p.entry_id);
+            }
+            SettingsLevel::ProviderList
         }
         SettingsLevel::ExistingActions(id) => {
             if cursor == 0 {
                 // edit
-                if let Some((_kind, mode)) = parse_id(&id) {
-                    let cfg = app.config.entry(&id).cloned().unwrap_or_default();
+                if let Some(cfg) = app.config.entry(&id).cloned() {
                     SettingsLevel::ConfigForm(crate::function::ConfigFormState::new_for_edit(
-                        id, &cfg, mode,
+                        id, &cfg, cfg.mode,
                     ))
                 } else {
                     SettingsLevel::ProviderList
                 }
             } else {
                 // delete
-                if let Some(cfg) = app.config.entry(&id).cloned() {
-                    app.config.entries.remove(&id);
+                if let Some(index) = app.config.entry_index(&id) {
+                    let cfg = app.config.entries.remove(index);
                     if app.config.active.as_deref() == Some(id.as_str()) {
                         app.config.active = app.config.configured_provider_ids().into_iter().next();
                     }
@@ -1333,7 +1353,7 @@ pub(super) fn handle_settings_enter(app: &mut App, state: &mut crate::function::
                         use crate::function::notifications::ToastLevel;
                         app.notify(ToastLevel::Fail, format!("delete: {e}"));
                         // restore
-                        app.config.entries.insert(id, cfg);
+                        app.config.entries.insert(index, cfg);
                     } else {
                         use crate::function::notifications::ToastLevel;
                         app.notify(ToastLevel::Ok, format!("deleted {id}"));
@@ -1468,8 +1488,7 @@ pub(super) fn handle_settings_enter(app: &mut App, state: &mut crate::function::
                         app.notify(ToastLevel::Fail, "api_key or env name is required");
                         SettingsLevel::ConfigForm(f)
                     } else {
-                        settings_save_form(app, form);
-                        SettingsLevel::ProviderList
+                        settings_save_form(app, form)
                     }
                 }
                 ConfigField::Exit => SettingsLevel::ProviderList,
@@ -1484,25 +1503,18 @@ pub(super) fn handle_settings_enter(app: &mut App, state: &mut crate::function::
     let _ = cursor;
 }
 /// Commit a form into the config. The form's focused field must be Save
-/// (caller is responsible). Updates `app.config`, writes to disk, refreshes
-/// status, and pushes a toast.
-pub(super) fn settings_save_form(app: &mut App, form: crate::function::ConfigFormState) {
-    use crate::config::{parse_id, ProviderKind, ProviderMode};
+/// (caller is responsible). Updates `app.config`, writes to disk,
+/// refreshes status, and returns the next settings level to show.
+pub(super) fn settings_save_form(
+    app: &mut App,
+    form: crate::function::ConfigFormState,
+) -> crate::function::SettingsLevel {
+    use crate::config::ProviderKind;
     use crate::function::notifications::ToastLevel;
 
-    let mut id = form.id.clone();
-    let (_kind, _mode) = parse_id(&id).unwrap_or((ProviderKind::Openai, ProviderMode::Key));
+    let id = form.id.clone();
     let base_url = form.base_url.trim().to_string();
     let was_new = form.is_new;
-
-    // Deduplicate: if the base ID already exists, append -2, -3, etc.
-    if was_new {
-        let mut n = 2;
-        while app.config.entries.contains_key(&id) {
-            id = format!("{}-{}", form.id, n);
-            n += 1;
-        }
-    }
 
     // Preserve existing model and api_key if the user did not touch
     // the corresponding fields.
@@ -1516,7 +1528,10 @@ pub(super) fn settings_save_form(app: &mut App, form: crate::function::ConfigFor
         .map(|c| c.model_display.clone())
         .unwrap_or_default();
 
-    let mut new_cfg = crate::config::ProviderConfig {
+    let mut new_cfg = crate::config::ProviderEntry {
+        id: id.clone(),
+        kind: form.kind,
+        mode: form.mode,
         api_key: existing
             .as_ref()
             .map(|c| c.api_key.clone())
@@ -1544,13 +1559,18 @@ pub(super) fn settings_save_form(app: &mut App, form: crate::function::ConfigFor
         new_cfg.api_key_env = form.api_key_env.trim().to_string();
     }
 
-    app.config.entries.insert(id.clone(), new_cfg);
+    // Insert (or replace) the entry in the vector.
+    if let Some(existing_entry) = app.config.entries.iter_mut().find(|e| e.id == id) {
+        *existing_entry = new_cfg.clone();
+    } else {
+        app.config.entries.push(new_cfg);
+    }
     app.config.active = Some(id.clone());
     app.config.sanitize_entries();
 
     if let Err(e) = app.config.save(&app.config_path) {
         app.notify(ToastLevel::Fail, format!("save: {e}"));
-        return;
+        return crate::function::SettingsLevel::ProviderList;
     }
 
     if was_new {
@@ -1564,102 +1584,115 @@ pub(super) fn settings_save_form(app: &mut App, form: crate::function::ConfigFor
     app.status.set_model(&app.config.active_model_display());
     app.refresh_status_model_context();
 
-    // Open the model picker so the user can pick a model. Validate first
-    // so we can set the picker's initial state correctly (fetching vs
-    // idle with an error message).
-    if let Some(k) = app.config.active_kind() {
-        if k == ProviderKind::Cursor {
-            start_cursor_oauth(app);
-            return;
-        }
-        let active_id = match app.config.active.clone() {
-            Some(id) => id,
-            None => return,
-        };
+    // Protocol-kind endpoints (OpenAI chat / responses / Anthropic
+    // messages) need the protocol confirmed before fetching models —
+    // for both new and edited entries. Cursor uses OAuth instead of a
+    // model list; Volcengine opens the model picker directly.
+    if crate::function::ProtocolChoice::from_kind(form.kind).is_some() {
+        return crate::function::SettingsLevel::ProtocolPicker(
+            crate::function::ProtocolPickerState::new(id, Some(form.kind)),
+        );
+    }
 
-        let mut state = crate::function::ModelPickerState::new(k);
-        state.entry_id = Some(active_id.clone());
-        match app.config.validate_provider(&active_id) {
-            Ok(_) => state.fetching = true,
-            Err(e) => state.fetch_error = Some(e),
-        }
-        let should_fetch = state.fetching;
-        app.function
-            .push(crate::function::SidebarTab::ModelPicker(state));
-        app.show_panel();
-        app.acknowledge_panel();
+    // Cursor uses OAuth instead of a model list.
+    if form.kind == ProviderKind::Cursor {
+        start_cursor_oauth(app);
+        return crate::function::SettingsLevel::ProviderList;
+    }
 
-        if should_fetch {
-            let base = app
-                .config
-                .entry(&active_id)
-                .map(|c| c.base_url.clone())
-                .unwrap_or_default();
-            let key = app.config.effective_api_key(&active_id).unwrap_or_default();
-            let access_key = app
-                .config
-                .entry(&active_id)
-                .map(|c| c.access_key.clone())
-                .unwrap_or_default();
-            let secret_key = app
-                .config
-                .entry(&active_id)
-                .map(|c| c.secret_key.clone())
-                .unwrap_or_default();
-            let client = app.reqwest.clone();
-            let provider_name = app
-                .config
-                .entry(&active_id)
-                .map(|c| c.name.clone())
-                .unwrap_or_default();
-            let provider_id = app
-                .config
-                .entry(&active_id)
-                .map(|c| c.provider_id.clone())
-                .unwrap_or_default();
-            let cache_path = app
-                .model_cache_path
-                .parent()
-                .unwrap_or(&app.model_cache_path)
-                .to_path_buf();
-            if let Some(tx) = app.msg_tx.clone() {
-                tokio::spawn(async move {
-                    match crate::providers::list_models(crate::providers::ListModelsArgs {
-                        client: &client,
-                        kind: k,
-                        base_url: &base,
-                        api_key: &key,
-                        access_key: &access_key,
-                        secret_key: &secret_key,
-                        cache_path: &cache_path,
-                        provider_name: &provider_name,
-                        provider_id: &provider_id,
-                    })
-                    .await
-                    {
-                        Ok(models) => {
-                            let _ = tx.send(AppMsg::ModelsFetched {
-                                provider: k,
-                                entry_id: active_id.clone(),
-                                base_url: base,
-                                api_key: key,
-                                models,
-                            });
-                        }
-                        Err(e) => {
-                            let no_endpoint = matches!(
-                                e.downcast_ref::<crate::providers::ProviderError>(),
-                                Some(crate::providers::ProviderError::NoModelsEndpoint)
-                            );
-                            let _ = tx.send(AppMsg::ModelsFetchFailed {
-                                provider: k,
-                                error: format!("{e}"),
-                                no_endpoint,
-                            });
-                        }
+    open_model_picker_for_entry_after_save(app, &id);
+    crate::function::SettingsLevel::ProviderList
+}
+
+/// Open the model picker for a freshly-saved entry and start fetching
+/// its models. Shared by the "save custom form" path.
+pub(super) fn open_model_picker_for_entry_after_save(app: &mut App, entry_id: &str) {
+    let Some(k) = app.config.entry(entry_id).map(|e| e.kind) else {
+        return;
+    };
+    let mut state = crate::function::ModelPickerState::new(k);
+    state.entry_id = Some(entry_id.to_string());
+    match app.config.validate_provider(entry_id) {
+        Ok(_) => state.fetching = true,
+        Err(e) => state.fetch_error = Some(e),
+    }
+    let should_fetch = state.fetching;
+    app.function
+        .push(crate::function::SidebarTab::ModelPicker(state));
+    app.show_panel();
+    app.acknowledge_panel();
+
+    if should_fetch {
+        let base = app
+            .config
+            .entry(entry_id)
+            .map(|c| c.base_url.clone())
+            .unwrap_or_default();
+        let key = app.config.effective_api_key(entry_id).unwrap_or_default();
+        let access_key = app
+            .config
+            .entry(entry_id)
+            .map(|c| c.access_key.clone())
+            .unwrap_or_default();
+        let secret_key = app
+            .config
+            .entry(entry_id)
+            .map(|c| c.secret_key.clone())
+            .unwrap_or_default();
+        let client = app.reqwest.clone();
+        let provider_name = app
+            .config
+            .entry(entry_id)
+            .map(|c| c.name.clone())
+            .unwrap_or_default();
+        let provider_id = app
+            .config
+            .entry(entry_id)
+            .map(|c| c.provider_id.clone())
+            .unwrap_or_default();
+        let cache_path = app
+            .model_cache_path
+            .parent()
+            .unwrap_or(&app.model_cache_path)
+            .to_path_buf();
+        if let Some(tx) = app.msg_tx.clone() {
+            let entry_id_owned = entry_id.to_string();
+            tokio::spawn(async move {
+                match crate::providers::list_models(crate::providers::ListModelsArgs {
+                    client: &client,
+                    kind: k,
+                    base_url: &base,
+                    api_key: &key,
+                    access_key: &access_key,
+                    secret_key: &secret_key,
+                    cache_path: &cache_path,
+                    provider_name: &provider_name,
+                    provider_id: &provider_id,
+                })
+                .await
+                {
+                    Ok(models) => {
+                        let _ = tx.send(AppMsg::ModelsFetched {
+                            provider: k,
+                            entry_id: entry_id_owned,
+                            base_url: base,
+                            api_key: key,
+                            models,
+                        });
                     }
-                });
-            }
+                    Err(e) => {
+                        let no_endpoint = matches!(
+                            e.downcast_ref::<crate::providers::ProviderError>(),
+                            Some(crate::providers::ProviderError::NoModelsEndpoint)
+                        );
+                        let _ = tx.send(AppMsg::ModelsFetchFailed {
+                            provider: k,
+                            error: format!("{e}"),
+                            no_endpoint,
+                        });
+                    }
+                }
+            });
         }
     }
 }
@@ -1816,7 +1849,6 @@ pub(super) fn open_context_picker(
     state: &mut crate::function::ModelPickerState,
     model_idx: usize,
 ) {
-    use crate::config::parse_id;
     // Resolve the entry by the picker's bound entry id when available
     // (multiple entries can share a kind), else by kind. Uses the right
     // provider name for the models.dev lookup instead of the global
@@ -1825,13 +1857,13 @@ pub(super) fn open_context_picker(
     let target_id: Option<String> = match state.entry_id.as_deref() {
         Some(id) if app.config.entry(id).is_some() => Some(id.to_string()),
         _ => match app.config.active.as_deref() {
-            Some(id) if parse_id(id).map(|(k, _)| k == p).unwrap_or(false) => Some(id.to_string()),
+            Some(id) if app.config.entry(id).map(|e| e.kind) == Some(p) => Some(id.to_string()),
             _ => app
                 .config
                 .entries
-                .keys()
-                .find(|id| parse_id(id).map(|(k2, _)| k2 == p).unwrap_or(false))
-                .cloned(),
+                .iter()
+                .find(|e| e.kind == p)
+                .map(|e| e.id.clone()),
         },
     };
     let provider_name = target_id
@@ -1999,7 +2031,6 @@ pub fn commit_model_with_entry(
     model_id: String,
     manual: bool,
 ) {
-    use crate::config::parse_id;
     use crate::function::notifications::ToastLevel;
 
     // 1. Find target entry id:
@@ -2011,15 +2042,15 @@ pub fn commit_model_with_entry(
     let target_id: Option<String> = match entry_id {
         Some(id) if app.config.entry(id).is_some() => Some(id.to_string()),
         _ => match app.config.active.as_deref() {
-            Some(id) if parse_id(id).map(|(k, _)| k == provider).unwrap_or(false) => {
+            Some(id) if app.config.entry(id).map(|e| e.kind) == Some(provider) => {
                 Some(id.to_string())
             }
             Some(_) | None => app
                 .config
                 .entries
-                .keys()
-                .find(|id| parse_id(id).map(|(k2, _)| k2 == provider).unwrap_or(false))
-                .cloned(),
+                .iter()
+                .find(|e| e.kind == provider)
+                .map(|e| e.id.clone()),
         },
     };
 
@@ -2087,6 +2118,11 @@ pub fn commit_model_with_entry(
             format!("model set: {}:{model_id}", provider.as_str()),
         );
     }
+
+    // 7. After committing a model, open the thinking-strength picker so
+    //    the user can immediately choose how hard the model should
+    //    reason. The current strength is pre-selected.
+    crate::commands::open_thinking_picker(app);
 }
 
 /// Search / navigate / toggle for the tool picker.  Space toggles

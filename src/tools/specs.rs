@@ -15,6 +15,7 @@ const MCP_DESC_LIMIT: usize = 200;
 enum ToolFormat {
     OpenAi,
     Anthropic,
+    Responses,
 }
 
 impl ToolFormat {
@@ -35,6 +36,14 @@ impl ToolFormat {
                 "description": description,
                 "input_schema": schema,
             }),
+            // OpenAI Responses API: fields are top-level, not nested
+            // under a `function` key.
+            ToolFormat::Responses => json!({
+                "type": "function",
+                "name": name,
+                "description": description,
+                "parameters": schema,
+            }),
         }
     }
 
@@ -43,6 +52,7 @@ impl ToolFormat {
         match self {
             ToolFormat::OpenAi => spec["function"]["name"].as_str().unwrap_or(""),
             ToolFormat::Anthropic => spec["name"].as_str().unwrap_or(""),
+            ToolFormat::Responses => spec["name"].as_str().unwrap_or(""),
         }
     }
 }
@@ -53,6 +63,10 @@ pub fn openai_tool_specs() -> Vec<serde_json::Value> {
 
 pub fn anthropic_tool_specs() -> Vec<serde_json::Value> {
     tool_specs(ToolFormat::Anthropic)
+}
+
+pub fn responses_tool_specs() -> Vec<serde_json::Value> {
+    tool_specs(ToolFormat::Responses)
 }
 
 fn tool_specs(fmt: ToolFormat) -> Vec<serde_json::Value> {
@@ -90,6 +104,12 @@ pub fn anthropic_tool_specs_for_sub_agent(
     sub_agent: crate::permission::SubAgent,
 ) -> Vec<serde_json::Value> {
     tool_specs_for_sub_agent(ToolFormat::Anthropic, sub_agent)
+}
+
+pub fn responses_tool_specs_for_sub_agent(
+    sub_agent: crate::permission::SubAgent,
+) -> Vec<serde_json::Value> {
+    tool_specs_for_sub_agent(ToolFormat::Responses, sub_agent)
 }
 
 fn tool_specs_for_sub_agent(

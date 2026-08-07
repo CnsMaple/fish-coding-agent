@@ -4,9 +4,12 @@ fn make_test_app() -> App {
     use crate::config::{make_id, Config, ProviderConfig, ProviderKind, ProviderMode};
     use crate::function::notifications::Notifications;
     let mut cfg = Config::default();
-    let kind = ProviderKind::Openai;
+    let kind = ProviderKind::OpenaiChat;
     let id = make_id(kind, ProviderMode::Key);
-    cfg.entries.entry(id).or_insert_with(|| ProviderConfig {
+    cfg.entries.push(ProviderConfig {
+        id,
+        kind,
+        mode: ProviderMode::Key,
         api_key: String::new(),
         api_key_env: String::new(),
         base_url: crate::config::default_base_url(kind).to_string(),
@@ -17,7 +20,7 @@ fn make_test_app() -> App {
         secret_key: String::new(),
         provider_id: String::new(),
     });
-    cfg.active = Some(make_id(ProviderKind::Openai, ProviderMode::Key));
+    cfg.active = Some(make_id(ProviderKind::OpenaiChat, ProviderMode::Key));
     let tmp = std::env::temp_dir().join("fish-coding-agent-fns-test.json");
     let _ = std::fs::remove_file(&tmp);
     let cache_file = tmp.parent().unwrap_or(&tmp).join("model-cache.json");

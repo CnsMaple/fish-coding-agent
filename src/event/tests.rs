@@ -1,5 +1,5 @@
 use super::*;
-use crate::config::{make_id, Config, ProviderConfig, ProviderId, ProviderKind, ProviderMode};
+use crate::config::{make_id, Config, ProviderConfig, ProviderKind, ProviderMode};
 use crate::function::notifications::Notifications;
 use crate::function::SidebarTab;
 use crate::function::{FunctionPanel, ModelPickerState};
@@ -10,9 +10,12 @@ fn make_app() -> App {
     let mut cfg = Config::default();
     // Add default entries so tests that expect providers work.
     // (Real app starts with empty config; test helper adds stubs.)
-    for kind in [ProviderKind::Openai, ProviderKind::Anthropic] {
+    for kind in [ProviderKind::OpenaiChat, ProviderKind::AnthropicMessages] {
         let id = make_id(kind, ProviderMode::Key);
-        cfg.entries.entry(id).or_insert_with(|| ProviderConfig {
+        cfg.entries.push(ProviderConfig {
+            id,
+            kind,
+            mode: ProviderMode::Key,
             api_key: String::new(),
             api_key_env: String::new(),
             base_url: crate::config::default_base_url(kind).to_string(),
@@ -24,7 +27,7 @@ fn make_app() -> App {
             provider_id: String::new(),
         });
     }
-    cfg.active = Some(make_id(ProviderKind::Openai, ProviderMode::Key));
+    cfg.active = Some(make_id(ProviderKind::OpenaiChat, ProviderMode::Key));
     // Use a per-test config file so parallel `cargo test` invocations
     // do not race on the same path. The atomic counter is process-wide
     // and yields a unique id for every call to `make_app`.
@@ -115,7 +118,7 @@ fn make_app() -> App {
 /// skill dispatch sends a real prompt through send_message).
 fn make_app_with_provider() -> App {
     let mut app = make_app();
-    let id = make_id(ProviderKind::Openai, ProviderMode::Key);
+    let id = make_id(ProviderKind::OpenaiChat, ProviderMode::Key);
     app.config.active = Some(id.clone());
     if let Some(entry) = app.config.entry_mut(&id) {
         entry.base_url = "https://api.example.invalid/v1".to_string();
@@ -140,13 +143,14 @@ fn paste_line_count_ignores_trailing_newline() {
 #[test]
 fn settings_save_form_creates_new_entry() {
     let mut app = make_app();
-    let form =
-        crate::function::ConfigFormState::new_for_create(ProviderKind::Openai, ProviderMode::Key);
+    let form = crate::function::ConfigFormState::new_for_create(
+        ProviderKind::OpenaiChat,
+        ProviderMode::Key,
+    );
+    let id = form.id.clone();
     // form starts with empty base_url and key.
     settings_save_form(&mut app, form.clone());
-    // make_app already has openai:key, so dedup creates openai:key-2.
-    let id: ProviderId = format!("{}-2", make_id(ProviderKind::Openai, ProviderMode::Key));
-    assert!(app.config.entries.contains_key(&id));
+    assert!(app.config.entry(&id).is_some());
     assert_eq!(app.config.active.as_deref(), Some(id.as_str()));
     let entry = app.config.entry(&id).unwrap();
     assert_eq!(entry.base_url, "");
@@ -157,21 +161,22 @@ fn settings_save_form_creates_new_entry() {
 fn settings_save_form_preserves_existing_model_on_edit() {
     let mut app = make_app();
     // Pre-populate an existing entry with a custom model.
-    let id = make_id(ProviderKind::Anthropic, ProviderMode::Env);
-    app.config.entries.insert(
-        id.clone(),
-        ProviderConfig {
-            api_key: String::new(),
-            api_key_env: "ANTHROPIC_API_KEY".to_string(),
-            base_url: "https://api.anthropic.com".to_string(),
-            model: "claude-3-5-sonnet-latest".to_string(),
-            model_display: String::new(),
-            name: String::new(),
-            access_key: String::new(),
-            secret_key: String::new(),
-            provider_id: String::new(),
-        },
-    );
+    let id = make_id(ProviderKind::AnthropicMessages, ProviderMode::Env);
+    app.config.entries.retain(|e| e.id != id);
+    app.config.entries.push(ProviderConfig {
+        id: id.clone(),
+        kind: ProviderKind::AnthropicMessages,
+        mode: ProviderMode::Env,
+        api_key: String::new(),
+        api_key_env: "ANTHROPIC_API_KEY".to_string(),
+        base_url: "https://api.anthropic.com".to_string(),
+        model: "claude-3-5-sonnet-latest".to_string(),
+        model_display: String::new(),
+        name: String::new(),
+        access_key: String::new(),
+        secret_key: String::new(),
+        provider_id: String::new(),
+    });
     let form = crate::function::ConfigFormState::new_for_edit(
         id.clone(),
         app.config.entry(&id).unwrap(),
@@ -193,9 +198,14 @@ fn settings_save_form_preserves_existing_model_on_edit() {
 #[test]
 fn commit_model_updates_active_entry_model() {
     let mut app = make_app();
-    let id = make_id(ProviderKind::Openai, ProviderMode::Key);
+    let id = make_id(ProviderKind::OpenaiChat, ProviderMode::Key);
     app.config.active = Some(id.clone());
-    commit_model(&mut app, ProviderKind::Openai, "gpt-4o".to_string(), false);
+    commit_model(
+        &mut app,
+        ProviderKind::OpenaiChat,
+        "gpt-4o".to_string(),
+        false,
+    );
     let entry = app.config.entry(&id).unwrap();
     assert_eq!(entry.model, "gpt-4o");
 }
@@ -204,15 +214,15 @@ fn commit_model_updates_active_entry_model() {
 fn commit_model_falls_back_to_matching_kind() {
     let mut app = make_app();
     // active is Openai:key but user picks for Anthropic
-    app.config.active = Some(make_id(ProviderKind::Openai, ProviderMode::Key));
+    app.config.active = Some(make_id(ProviderKind::OpenaiChat, ProviderMode::Key));
     commit_model(
         &mut app,
-        ProviderKind::Anthropic,
+        ProviderKind::AnthropicMessages,
         "claude-3-5-sonnet-latest".to_string(),
         false,
     );
     // active should now be the Anthropic entry
-    let id = make_id(ProviderKind::Anthropic, ProviderMode::Key);
+    let id = make_id(ProviderKind::AnthropicMessages, ProviderMode::Key);
     assert_eq!(app.config.active.as_deref(), Some(id.as_str()));
     let entry = app.config.entry(&id).unwrap();
     assert_eq!(entry.model, "claude-3-5-sonnet-latest");
@@ -220,33 +230,34 @@ fn commit_model_falls_back_to_matching_kind() {
 
 #[test]
 fn commit_model_with_entry_pins_to_bound_same_kind_entry() {
-    // Regression: two configured entries share ProviderKind::Openai
+    // Regression: two configured entries share ProviderKind::OpenaiChat
     // (e.g. "opencode" and "alibaba" both via the OpenAI-compatible
     // endpoint). The picker was opened for the non-active entry; a
     // commit must activate THAT entry, not the global active one.
     use crate::config::ProviderConfig;
     let mut app = make_app();
-    let opencode_id = make_id(ProviderKind::Openai, ProviderMode::Key);
-    let alibaba_id = "openai:key-2".to_string();
-    app.config.entries.insert(
-        alibaba_id.clone(),
-        ProviderConfig {
-            api_key: "ali-key".to_string(),
-            api_key_env: String::new(),
-            base_url: "https://ali.example/v1".to_string(),
-            model: String::new(),
-            model_display: String::new(),
-            name: "alibaba".to_string(),
-            access_key: String::new(),
-            secret_key: String::new(),
-            provider_id: String::new(),
-        },
-    );
+    let opencode_id = make_id(ProviderKind::OpenaiChat, ProviderMode::Key);
+    let alibaba_id = "openai_chat:key-2".to_string();
+    app.config.entries.retain(|e| e.id != alibaba_id);
+    app.config.entries.push(ProviderConfig {
+        id: alibaba_id.clone(),
+        kind: ProviderKind::OpenaiChat,
+        mode: ProviderMode::Key,
+        api_key: "ali-key".to_string(),
+        api_key_env: String::new(),
+        base_url: "https://ali.example/v1".to_string(),
+        model: String::new(),
+        model_display: String::new(),
+        name: "alibaba".to_string(),
+        access_key: String::new(),
+        secret_key: String::new(),
+        provider_id: String::new(),
+    });
     // Active is the opencode entry, NOT alibaba.
     app.config.active = Some(opencode_id.clone());
     commit_model_with_entry(
         &mut app,
-        ProviderKind::Openai,
+        ProviderKind::OpenaiChat,
         Some(&alibaba_id),
         "qwen-max".to_string(),
         false,
@@ -269,28 +280,29 @@ fn open_model_picker_for_entry_skips_stale_same_kind_cache() {
     use crate::config::ProviderConfig;
     use crate::function::notifications::{ModelCache, ModelInfo};
     let mut app = make_app();
-    let _opencode_id = make_id(ProviderKind::Openai, ProviderMode::Key);
-    let alibaba_id = "openai:key-2".to_string();
-    app.config.entries.insert(
-        alibaba_id.clone(),
-        ProviderConfig {
-            api_key: "ali-key".to_string(),
-            api_key_env: String::new(),
-            base_url: "https://ali.example/v1".to_string(),
-            model: String::new(),
-            model_display: String::new(),
-            name: "alibaba".to_string(),
-            access_key: String::new(),
-            secret_key: String::new(),
-            provider_id: String::new(),
-        },
-    );
+    let _opencode_id = make_id(ProviderKind::OpenaiChat, ProviderMode::Key);
+    let alibaba_id = "openai_chat:key-2".to_string();
+    app.config.entries.retain(|e| e.id != alibaba_id);
+    app.config.entries.push(ProviderConfig {
+        id: alibaba_id.clone(),
+        kind: ProviderKind::OpenaiChat,
+        mode: ProviderMode::Key,
+        api_key: "ali-key".to_string(),
+        api_key_env: String::new(),
+        base_url: "https://ali.example/v1".to_string(),
+        model: String::new(),
+        model_display: String::new(),
+        name: "alibaba".to_string(),
+        access_key: String::new(),
+        secret_key: String::new(),
+        provider_id: String::new(),
+    });
     // Seed the Openai-kind cache with opencode's models (different
     // base_url/api_key than alibaba).
     let mut cache = ModelCache::default();
     cache.put(
-        make_id(ProviderKind::Openai, ProviderMode::Key),
-        ProviderKind::Openai,
+        make_id(ProviderKind::OpenaiChat, ProviderMode::Key),
+        ProviderKind::OpenaiChat,
         "https://api.openai.com/v1".to_string(),
         "openai-key".to_string(),
         vec![ModelInfo {
@@ -320,8 +332,8 @@ fn open_model_picker_for_entry_skips_stale_same_kind_cache() {
 #[test]
 fn picker_state_initializes() {
     // Sanity: ModelPickerState::new(provider) doesn't panic
-    let _p = ModelPickerState::new(ProviderKind::Anthropic);
-    let _ = SidebarTab::ModelPicker(ModelPickerState::new(ProviderKind::Openai));
+    let _p = ModelPickerState::new(ProviderKind::AnthropicMessages);
+    let _ = SidebarTab::ModelPicker(ModelPickerState::new(ProviderKind::OpenaiChat));
 }
 
 #[test]
@@ -333,8 +345,10 @@ fn config_form_enter_on_text_field_does_not_advance_focus() {
     use crate::function::SettingsLevel;
 
     let mut app = make_app();
-    let form =
-        crate::function::ConfigFormState::new_for_create(ProviderKind::Openai, ProviderMode::Key);
+    let form = crate::function::ConfigFormState::new_for_create(
+        ProviderKind::OpenaiChat,
+        ProviderMode::Key,
+    );
     // Caller has typed a base url, now sits on BaseUrl, presses Enter.
     let mut form = form;
     form.base_url = "https://api.openai.com/v1".to_string();
@@ -372,10 +386,10 @@ fn commit_model_with_open_picker_does_not_panic() {
     // press Enter. The function should write the model and remove the
     // picker tab without panicking.
     let mut app = make_app();
-    let id = make_id(ProviderKind::Openai, ProviderMode::Key);
+    let id = make_id(ProviderKind::OpenaiChat, ProviderMode::Key);
     app.config.active = Some(id.clone());
     app.function.push(SidebarTab::ModelPicker(
-        crate::function::ModelPickerState::new(ProviderKind::Openai),
+        crate::function::ModelPickerState::new(ProviderKind::OpenaiChat),
     ));
     let picker_idx = app.function.tabs.len() - 1;
     app.function.active = picker_idx;
@@ -387,7 +401,12 @@ fn commit_model_with_open_picker_does_not_panic() {
         .iter()
         .any(|t| matches!(t, SidebarTab::ModelPicker(_))));
 
-    commit_model(&mut app, ProviderKind::Openai, "gpt-4o".to_string(), false);
+    commit_model(
+        &mut app,
+        ProviderKind::OpenaiChat,
+        "gpt-4o".to_string(),
+        false,
+    );
 
     // Picker tab should be gone.
     assert!(!app
@@ -516,7 +535,7 @@ fn commit_model_closes_provider_picker_behind_it() {
     ));
     let _provider_idx = app.function.tabs.len() - 1;
     app.function.push(SidebarTab::ModelPicker(
-        crate::function::ModelPickerState::new(ProviderKind::Anthropic),
+        crate::function::ModelPickerState::new(ProviderKind::AnthropicMessages),
     ));
     app.function.active = app.function.tabs.len() - 1;
     // Sanity: 2 tabs, ModelPicker active.
@@ -525,13 +544,13 @@ fn commit_model_closes_provider_picker_behind_it() {
         app.function.tabs[app.function.active],
         SidebarTab::ModelPicker(_)
     ));
-    let provider_id = make_id(ProviderKind::Anthropic, ProviderMode::Key);
+    let provider_id = make_id(ProviderKind::AnthropicMessages, ProviderMode::Key);
     app.config.active = Some(provider_id.clone());
 
     // Commit a model directly.
     commit_model(
         &mut app,
-        ProviderKind::Anthropic,
+        ProviderKind::AnthropicMessages,
         "claude-3-5".to_string(),
         false,
     );
@@ -597,7 +616,7 @@ async fn dispatch_settings_esc_at_toplevel_with_other_tab_does_not_resurrect_set
 
 #[test]
 fn picker_scroll_keeps_cursor_visible() {
-    let mut s = ModelPickerState::new(ProviderKind::Openai);
+    let mut s = ModelPickerState::new(ProviderKind::OpenaiChat);
     for i in 0..20 {
         s.models.push(crate::function::notifications::ModelInfo {
             id: format!("m{i}"),
@@ -631,11 +650,11 @@ fn commit_model_picks_model_from_picker_list() {
 
     let mut app = make_app();
     // Ensure openai:key is the active entry.
-    let id = make_id(ProviderKind::Openai, ProviderMode::Key);
+    let id = make_id(ProviderKind::OpenaiChat, ProviderMode::Key);
     app.config.active = Some(id.clone());
 
     // Open the picker.
-    let mut picker = crate::function::ModelPickerState::new(ProviderKind::Openai);
+    let mut picker = crate::function::ModelPickerState::new(ProviderKind::OpenaiChat);
     picker.focus = crate::function::PickerFocus::List;
     picker
         .models
@@ -673,7 +692,12 @@ fn commit_model_picks_model_from_picker_list() {
         };
         s.models[s.filtered[s.cursor]].id.clone()
     };
-    commit_model(&mut app, ProviderKind::Openai, model_to_pick.clone(), false);
+    commit_model(
+        &mut app,
+        ProviderKind::OpenaiChat,
+        model_to_pick.clone(),
+        false,
+    );
 
     // Verify post-state.
     assert!(!app
@@ -698,16 +722,26 @@ fn commit_model_with_empty_function_panel_does_not_panic() {
     app.function.push(SidebarTab::Notifications);
     app.function.tabs.clear();
     app.function.active = 0;
-    app.config.active = Some(make_id(ProviderKind::Openai, ProviderMode::Key));
+    app.config.active = Some(make_id(ProviderKind::OpenaiChat, ProviderMode::Key));
     app.function.push(SidebarTab::ModelPicker(
-        crate::function::ModelPickerState::new(ProviderKind::Openai),
+        crate::function::ModelPickerState::new(ProviderKind::OpenaiChat),
     ));
     app.function.active = 0;
 
-    commit_model(&mut app, ProviderKind::Openai, "gpt-4o".to_string(), false);
+    commit_model(
+        &mut app,
+        ProviderKind::OpenaiChat,
+        "gpt-4o".to_string(),
+        false,
+    );
 
-    // After commit, no Notifications tab is auto-created by notify() anymore.
-    assert_eq!(app.function.tabs.len(), 0);
+    // After commit, the thinking-strength picker is opened (no
+    // Notifications tab is auto-created by notify() anymore).
+    assert_eq!(app.function.tabs.len(), 1);
+    assert!(matches!(
+        app.function.tabs[0],
+        SidebarTab::ThinkingPicker(_)
+    ));
 }
 
 #[test]
@@ -849,21 +883,22 @@ fn check_config_does_not_auto_open_settings() {
 
     let mut app = make_app();
     // Plant a bad entry so validate_all returns an error.
-    let id = make_id(ProviderKind::Openai, ProviderMode::Key);
-    app.config.entries.insert(
-        id.clone(),
-        ProviderConfig {
-            api_key: String::new(),
-            api_key_env: String::new(),
-            base_url: String::new(), // triggers "base_url is required"
-            model: "gpt-4o-mini".to_string(),
-            model_display: String::new(),
-            name: String::new(),
-            access_key: String::new(),
-            secret_key: String::new(),
-            provider_id: String::new(),
-        },
-    );
+    let id = make_id(ProviderKind::OpenaiChat, ProviderMode::Key);
+    app.config.entries.retain(|e| e.id != id);
+    app.config.entries.push(ProviderConfig {
+        id: id.clone(),
+        kind: ProviderKind::OpenaiChat,
+        mode: ProviderMode::Key,
+        api_key: String::new(),
+        api_key_env: String::new(),
+        base_url: String::new(), // triggers "base_url is required"
+        model: "gpt-4o-mini".to_string(),
+        model_display: String::new(),
+        name: String::new(),
+        access_key: String::new(),
+        secret_key: String::new(),
+        provider_id: String::new(),
+    });
     app.config.active = Some(id.clone());
 
     let result = app.check_config();
@@ -916,21 +951,23 @@ fn check_config_shows_specific_errors_when_some_usable() {
 
     let mut app = make_app();
     // Replace the default openai:key with a valid one (direct api_key).
-    let valid_id = make_id(ProviderKind::Openai, ProviderMode::Key);
-    app.config.entries.insert(
-        valid_id.clone(),
-        ProviderConfig {
-            api_key: "test_key".to_string(),
-            api_key_env: "OPENAI_API_KEY".to_string(),
-            base_url: "https://api.openai.com/v1".to_string(),
-            model: "gpt-4o-mini".to_string(),
-            model_display: String::new(),
-            name: String::new(),
-            access_key: String::new(),
-            secret_key: String::new(),
-            provider_id: String::new(),
-        },
-    );
+    let valid_id = make_id(ProviderKind::OpenaiChat, ProviderMode::Key);
+    app.config.entries.retain(|e| e.id != valid_id);
+    app.config.entries.retain(|e| e.id != valid_id);
+    app.config.entries.push(ProviderConfig {
+        id: valid_id.clone(),
+        kind: ProviderKind::OpenaiChat,
+        mode: ProviderMode::Key,
+        api_key: "test_key".to_string(),
+        api_key_env: "OPENAI_API_KEY".to_string(),
+        base_url: "https://api.openai.com/v1".to_string(),
+        model: "gpt-4o-mini".to_string(),
+        model_display: String::new(),
+        name: String::new(),
+        access_key: String::new(),
+        secret_key: String::new(),
+        provider_id: String::new(),
+    });
     // Default anthropic:key is still invalid (empty api_key, env unset).
     app.config.active = Some(valid_id);
 
@@ -940,7 +977,7 @@ fn check_config_shows_specific_errors_when_some_usable() {
     assert_eq!(app.notifications.items.len(), 1);
     let toast = &app.notifications.items[0];
     assert!(
-        toast.text.contains("anthropic:key"),
+        toast.text.contains("anthropic_messages:key"),
         "toast must mention the broken entry, got: {}",
         toast.text
     );
@@ -1157,8 +1194,10 @@ fn settings_form_up_down_moves_focus() {
     use crate::function::{ConfigField, SettingsLevel};
 
     let mut app = make_app();
-    let form =
-        crate::function::ConfigFormState::new_for_create(ProviderKind::Openai, ProviderMode::Key);
+    let form = crate::function::ConfigFormState::new_for_create(
+        ProviderKind::OpenaiChat,
+        ProviderMode::Key,
+    );
     let mut state = crate::function::SettingsState::new(&app.config);
     state.level = SettingsLevel::ConfigForm(form);
     state.cursor = 0;
@@ -1215,21 +1254,23 @@ fn settings_form_first_edit_clears_masked_key() {
 
     let mut app = make_app();
     // Pre-populate an entry with a saved key.
-    let id = make_id(ProviderKind::Openai, ProviderMode::Key);
-    app.config.entries.insert(
-        id.clone(),
-        ProviderConfig {
-            api_key: "sk-saved-key-1234".to_string(),
-            api_key_env: String::new(),
-            base_url: "https://api.openai.com/v1".to_string(),
-            model: "gpt-4o-mini".to_string(),
-            model_display: String::new(),
-            name: String::new(),
-            access_key: String::new(),
-            secret_key: String::new(),
-            provider_id: String::new(),
-        },
-    );
+    let id = make_id(ProviderKind::OpenaiChat, ProviderMode::Key);
+    app.config.entries.retain(|e| e.id != id);
+    app.config.entries.retain(|e| e.id != id);
+    app.config.entries.push(ProviderConfig {
+        id: id.clone(),
+        kind: ProviderKind::OpenaiChat,
+        mode: ProviderMode::Key,
+        api_key: "sk-saved-key-1234".to_string(),
+        api_key_env: String::new(),
+        base_url: "https://api.openai.com/v1".to_string(),
+        model: "gpt-4o-mini".to_string(),
+        model_display: String::new(),
+        name: String::new(),
+        access_key: String::new(),
+        secret_key: String::new(),
+        provider_id: String::new(),
+    });
     let form = crate::function::ConfigFormState::new_for_edit(
         id.clone(),
         app.config.entry(&id).unwrap(),
@@ -1273,21 +1314,22 @@ fn settings_form_save_preserves_untouched_api_key() {
     use crate::config::{make_id, ProviderConfig, ProviderKind, ProviderMode};
 
     let mut app = make_app();
-    let id = make_id(ProviderKind::Openai, ProviderMode::Key);
-    app.config.entries.insert(
-        id.clone(),
-        ProviderConfig {
-            api_key: "sk-original".to_string(),
-            api_key_env: String::new(),
-            base_url: "https://api.openai.com/v1".to_string(),
-            model: "gpt-4o-mini".to_string(),
-            model_display: String::new(),
-            name: String::new(),
-            access_key: String::new(),
-            secret_key: String::new(),
-            provider_id: String::new(),
-        },
-    );
+    let id = make_id(ProviderKind::OpenaiChat, ProviderMode::Key);
+    app.config.entries.retain(|e| e.id != id);
+    app.config.entries.push(ProviderConfig {
+        id: id.clone(),
+        kind: ProviderKind::OpenaiChat,
+        mode: ProviderMode::Key,
+        api_key: "sk-original".to_string(),
+        api_key_env: String::new(),
+        base_url: "https://api.openai.com/v1".to_string(),
+        model: "gpt-4o-mini".to_string(),
+        model_display: String::new(),
+        name: String::new(),
+        access_key: String::new(),
+        secret_key: String::new(),
+        provider_id: String::new(),
+    });
     let form = crate::function::ConfigFormState::new_for_edit(
         id.clone(),
         app.config.entry(&id).unwrap(),
@@ -1311,21 +1353,22 @@ fn settings_form_save_uses_edited_key() {
     use crate::config::{make_id, ProviderConfig, ProviderKind, ProviderMode};
 
     let mut app = make_app();
-    let id = make_id(ProviderKind::Openai, ProviderMode::Key);
-    app.config.entries.insert(
-        id.clone(),
-        ProviderConfig {
-            api_key: "sk-old".to_string(),
-            api_key_env: String::new(),
-            base_url: "https://api.openai.com/v1".to_string(),
-            model: "gpt-4o-mini".to_string(),
-            model_display: String::new(),
-            name: String::new(),
-            access_key: String::new(),
-            secret_key: String::new(),
-            provider_id: String::new(),
-        },
-    );
+    let id = make_id(ProviderKind::OpenaiChat, ProviderMode::Key);
+    app.config.entries.retain(|e| e.id != id);
+    app.config.entries.push(ProviderConfig {
+        id: id.clone(),
+        kind: ProviderKind::OpenaiChat,
+        mode: ProviderMode::Key,
+        api_key: "sk-old".to_string(),
+        api_key_env: String::new(),
+        base_url: "https://api.openai.com/v1".to_string(),
+        model: "gpt-4o-mini".to_string(),
+        model_display: String::new(),
+        name: String::new(),
+        access_key: String::new(),
+        secret_key: String::new(),
+        provider_id: String::new(),
+    });
     let mut form = crate::function::ConfigFormState::new_for_edit(
         id.clone(),
         app.config.entry(&id).unwrap(),
@@ -1426,7 +1469,7 @@ fn open_model_picker_with_single_provider_skips_provider_picker() {
     // anthropic by removing openai.
     app.config
         .entries
-        .retain(|id, _| id.starts_with("anthropic:"));
+        .retain(|e| e.id.starts_with("anthropic_messages:"));
     app.config.active = None;
     let tabs_before = app.function.tabs.len();
 
@@ -1479,30 +1522,30 @@ fn provider_picker_shows_user_names_not_kinds() {
         let mut cfg = crate::config::Config::default();
         // Wipe so we control the entries exactly.
         cfg.entries.clear();
-        cfg.entries.insert(
-            make_id(ProviderKind::Openai, ProviderMode::Key),
-            ProviderConfig {
-                name: "staging-openai".to_string(),
-                provider_id: String::new(),
-                ..ProviderConfig::default()
-            },
-        );
-        cfg.entries.insert(
-            make_id(ProviderKind::Openai, ProviderMode::Env),
-            ProviderConfig {
-                name: "prod-openai".to_string(),
-                provider_id: String::new(),
-                ..ProviderConfig::default()
-            },
-        );
-        cfg.entries.insert(
-            make_id(ProviderKind::Anthropic, ProviderMode::Key),
-            ProviderConfig {
-                name: String::new(),
-                provider_id: String::new(),
-                ..ProviderConfig::default()
-            },
-        );
+        cfg.entries.push(ProviderConfig {
+            id: make_id(ProviderKind::OpenaiChat, ProviderMode::Key),
+            kind: ProviderKind::OpenaiChat,
+            mode: ProviderMode::Key,
+            name: "staging-openai".to_string(),
+            provider_id: String::new(),
+            ..ProviderConfig::default()
+        });
+        cfg.entries.push(ProviderConfig {
+            id: make_id(ProviderKind::OpenaiChat, ProviderMode::Env),
+            kind: ProviderKind::OpenaiChat,
+            mode: ProviderMode::Env,
+            name: "prod-openai".to_string(),
+            provider_id: String::new(),
+            ..ProviderConfig::default()
+        });
+        cfg.entries.push(ProviderConfig {
+            id: make_id(ProviderKind::AnthropicMessages, ProviderMode::Key),
+            kind: ProviderKind::AnthropicMessages,
+            mode: ProviderMode::Key,
+            name: String::new(),
+            provider_id: String::new(),
+            ..ProviderConfig::default()
+        });
         cfg
     };
     let state = crate::function::ProviderPickerState::new(&cfg);
@@ -1513,16 +1556,16 @@ fn provider_picker_shows_user_names_not_kinds() {
     let staging_display = state
         .entries
         .iter()
-        .find(|e| e.id.ends_with(":key") && e.id.starts_with("openai:"))
+        .find(|e| e.id.ends_with(":key") && e.id.starts_with("openai_chat:"))
         .map(|e| e.display.as_str());
     assert_eq!(staging_display, Some("staging-openai"));
     // The nameless Anthropic entry falls back to the kind name.
     let anthro_display = state
         .entries
         .iter()
-        .find(|e| e.id.starts_with("anthropic:"))
+        .find(|e| e.id.starts_with("anthropic_messages:"))
         .map(|e| e.display.as_str());
-    assert_eq!(anthro_display, Some("Anthropic"));
+    assert_eq!(anthro_display, Some("Anthropic-messages"));
 }
 
 #[test]
@@ -1533,30 +1576,30 @@ fn provider_picker_filter_narrows_list() {
 
     let mut cfg = crate::config::Config::default();
     cfg.entries.clear();
-    cfg.entries.insert(
-        make_id(ProviderKind::Openai, ProviderMode::Key),
-        ProviderConfig {
-            name: "staging-openai".to_string(),
-            provider_id: String::new(),
-            ..ProviderConfig::default()
-        },
-    );
-    cfg.entries.insert(
-        make_id(ProviderKind::Openai, ProviderMode::Env),
-        ProviderConfig {
-            name: "prod-openai".to_string(),
-            provider_id: String::new(),
-            ..ProviderConfig::default()
-        },
-    );
-    cfg.entries.insert(
-        make_id(ProviderKind::Anthropic, ProviderMode::Key),
-        ProviderConfig {
-            name: "prod-anthropic".to_string(),
-            provider_id: String::new(),
-            ..ProviderConfig::default()
-        },
-    );
+    cfg.entries.push(ProviderConfig {
+        id: make_id(ProviderKind::OpenaiChat, ProviderMode::Key),
+        kind: ProviderKind::OpenaiChat,
+        mode: ProviderMode::Key,
+        name: "staging-openai".to_string(),
+        provider_id: String::new(),
+        ..ProviderConfig::default()
+    });
+    cfg.entries.push(ProviderConfig {
+        id: make_id(ProviderKind::OpenaiChat, ProviderMode::Env),
+        kind: ProviderKind::OpenaiChat,
+        mode: ProviderMode::Env,
+        name: "prod-openai".to_string(),
+        provider_id: String::new(),
+        ..ProviderConfig::default()
+    });
+    cfg.entries.push(ProviderConfig {
+        id: make_id(ProviderKind::AnthropicMessages, ProviderMode::Key),
+        kind: ProviderKind::AnthropicMessages,
+        mode: ProviderMode::Key,
+        name: "prod-anthropic".to_string(),
+        provider_id: String::new(),
+        ..ProviderConfig::default()
+    });
 
     let mut state = crate::function::ProviderPickerState::new(&cfg);
     assert_eq!(state.filtered.len(), 3);
@@ -1569,7 +1612,7 @@ fn provider_picker_filter_narrows_list() {
     state.query = "staging".into();
     state.rebuild_filter();
     assert_eq!(state.filtered.len(), 1);
-    assert_eq!(state.selected_id().as_deref(), Some("openai:key"));
+    assert_eq!(state.selected_id().as_deref(), Some("openai_chat:key"));
 
     state.query = String::new();
     state.rebuild_filter();
@@ -1592,14 +1635,14 @@ fn provider_picker_keeps_cursor_visible_when_scrolling() {
         } else {
             ProviderMode::Env
         };
-        cfg.entries.insert(
-            make_id(ProviderKind::Openai, mode),
-            ProviderConfig {
-                name: format!("entry-{i:02}"),
-                provider_id: String::new(),
-                ..ProviderConfig::default()
-            },
-        );
+        cfg.entries.push(ProviderConfig {
+            id: make_id(ProviderKind::OpenaiChat, mode),
+            kind: ProviderKind::OpenaiChat,
+            mode,
+            name: format!("entry-{i:02}"),
+            provider_id: String::new(),
+            ..ProviderConfig::default()
+        });
     }
 
     let mut state = crate::function::ProviderPickerState::new(&cfg);
@@ -1637,23 +1680,24 @@ fn active_name_falls_back_to_kind_when_unset() {
     use crate::config::{make_id, ProviderConfig, ProviderKind, ProviderMode};
 
     let mut app = make_app();
-    let id = make_id(ProviderKind::Openai, ProviderMode::Key);
-    app.config.entries.insert(
-        id.clone(),
-        ProviderConfig {
-            api_key: "k".to_string(),
-            api_key_env: String::new(),
-            base_url: "https://api.openai.com/v1".to_string(),
-            model: "gpt-4o-mini".to_string(),
-            model_display: String::new(),
-            name: String::new(),
-            access_key: String::new(),
-            secret_key: String::new(),
-            provider_id: String::new(),
-        },
-    );
+    let id = make_id(ProviderKind::OpenaiChat, ProviderMode::Key);
+    app.config.entries.retain(|e| e.id != id);
+    app.config.entries.push(ProviderConfig {
+        id: id.clone(),
+        kind: ProviderKind::OpenaiChat,
+        mode: ProviderMode::Key,
+        api_key: "k".to_string(),
+        api_key_env: String::new(),
+        base_url: "https://api.openai.com/v1".to_string(),
+        model: "gpt-4o-mini".to_string(),
+        model_display: String::new(),
+        name: String::new(),
+        access_key: String::new(),
+        secret_key: String::new(),
+        provider_id: String::new(),
+    });
     app.config.active = Some(id.clone());
-    assert_eq!(app.config.active_name(), "openai");
+    assert_eq!(app.config.active_name(), "OpenAI-chat");
 }
 
 #[test]
@@ -1825,21 +1869,22 @@ fn active_name_uses_user_set_value() {
     use crate::config::{make_id, ProviderConfig, ProviderKind, ProviderMode};
 
     let mut app = make_app();
-    let id = make_id(ProviderKind::Anthropic, ProviderMode::Key);
-    app.config.entries.insert(
-        id.clone(),
-        ProviderConfig {
-            api_key: "k".to_string(),
-            api_key_env: String::new(),
-            base_url: "https://api.anthropic.com".to_string(),
-            model: "claude-3-5-sonnet-latest".to_string(),
-            model_display: String::new(),
-            name: "mybot".to_string(),
-            access_key: String::new(),
-            secret_key: String::new(),
-            provider_id: String::new(),
-        },
-    );
+    let id = make_id(ProviderKind::AnthropicMessages, ProviderMode::Key);
+    app.config.entries.retain(|e| e.id != id);
+    app.config.entries.push(ProviderConfig {
+        id: id.clone(),
+        kind: ProviderKind::AnthropicMessages,
+        mode: ProviderMode::Key,
+        api_key: "k".to_string(),
+        api_key_env: String::new(),
+        base_url: "https://api.anthropic.com".to_string(),
+        model: "claude-3-5-sonnet-latest".to_string(),
+        model_display: String::new(),
+        name: "mybot".to_string(),
+        access_key: String::new(),
+        secret_key: String::new(),
+        provider_id: String::new(),
+    });
     app.config.active = Some(id.clone());
     assert_eq!(app.config.active_name(), "mybot");
 }
@@ -1849,21 +1894,22 @@ fn active_model_display_shows_no_model_when_empty() {
     use crate::config::{make_id, ProviderConfig, ProviderKind, ProviderMode};
 
     let mut app = make_app();
-    let id = make_id(ProviderKind::Openai, ProviderMode::Key);
-    app.config.entries.insert(
-        id.clone(),
-        ProviderConfig {
-            api_key: "k".to_string(),
-            api_key_env: String::new(),
-            base_url: "https://api.openai.com/v1".to_string(),
-            model: String::new(),
-            model_display: String::new(),
-            name: "mybot".to_string(),
-            access_key: String::new(),
-            secret_key: String::new(),
-            provider_id: String::new(),
-        },
-    );
+    let id = make_id(ProviderKind::OpenaiChat, ProviderMode::Key);
+    app.config.entries.retain(|e| e.id != id);
+    app.config.entries.push(ProviderConfig {
+        id: id.clone(),
+        kind: ProviderKind::OpenaiChat,
+        mode: ProviderMode::Key,
+        api_key: "k".to_string(),
+        api_key_env: String::new(),
+        base_url: "https://api.openai.com/v1".to_string(),
+        model: String::new(),
+        model_display: String::new(),
+        name: "mybot".to_string(),
+        access_key: String::new(),
+        secret_key: String::new(),
+        provider_id: String::new(),
+    });
     app.config.active = Some(id.clone());
     assert_eq!(app.config.active_model_display(), "(no model)");
 }
@@ -2007,7 +2053,6 @@ fn enter_key() -> KeyEvent {
 // next `terminal.draw(...)` returns, so the freshly-pushed user
 // message is on screen first.
 // ============================================================
-
 fn chat_app() -> App {
     let mut app = make_app_with_provider();
     // The chat / tool paths only build a `pending_request` if

@@ -2,6 +2,7 @@ pub mod anthropic;
 pub mod common;
 pub mod cursor;
 pub mod openai;
+pub mod responses;
 pub mod volcengine;
 
 use crate::config::ProviderKind;
@@ -347,8 +348,9 @@ pub fn provider(kind: ProviderKind) -> Box<dyn Provider> {
 /// (`list_models`) uses `VolcengineProvider` which needs V4 signing.
 fn make_chat_provider(kind: ProviderKind) -> Box<dyn Provider> {
     match kind {
-        ProviderKind::Openai | ProviderKind::Volcengine => Box::new(openai::OpenAiProvider),
-        ProviderKind::Anthropic => Box::new(anthropic::AnthropicProvider),
+        ProviderKind::OpenaiChat | ProviderKind::Volcengine => Box::new(openai::OpenAiProvider),
+        ProviderKind::OpenaiResponses => Box::new(responses::ResponsesProvider),
+        ProviderKind::AnthropicMessages => Box::new(anthropic::AnthropicProvider),
         ProviderKind::Cursor => Box::new(cursor::CursorProvider),
     }
 }
@@ -358,8 +360,9 @@ fn make_chat_provider(kind: ProviderKind) -> Box<dyn Provider> {
 /// unlike `make_chat_provider` which maps it to `OpenAiProvider`.
 fn make_list_provider(kind: ProviderKind) -> Box<dyn Provider> {
     match kind {
-        ProviderKind::Openai => Box::new(openai::OpenAiProvider),
-        ProviderKind::Anthropic => Box::new(anthropic::AnthropicProvider),
+        ProviderKind::OpenaiChat => Box::new(openai::OpenAiProvider),
+        ProviderKind::OpenaiResponses => Box::new(responses::ResponsesProvider),
+        ProviderKind::AnthropicMessages => Box::new(anthropic::AnthropicProvider),
         ProviderKind::Cursor => Box::new(cursor::CursorProvider),
         ProviderKind::Volcengine => Box::new(volcengine::VolcengineProvider),
     }

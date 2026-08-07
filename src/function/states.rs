@@ -576,6 +576,11 @@ pub fn settings_body_lines(
                 lines.push(ratatui::text::Line::raw(""));
             }
         }
+        SettingsLevel::ProtocolPicker(p) => {
+            for _ in 0..p.choices.len().max(1) + 1 {
+                lines.push(ratatui::text::Line::raw(""));
+            }
+        }
         SettingsLevel::ExistingActions(_) => {
             lines.push(ratatui::text::Line::raw(""));
             lines.push(ratatui::text::Line::raw(""));
@@ -638,9 +643,17 @@ pub enum ConfigField {
 #[derive(Debug, Clone)]
 pub struct ConfigFormState {
     pub is_new: bool,
-    pub id: String, // target entry id (kind:mode)
-    /// Optional display name. When empty, the kind name (`openai` /
-    /// `anthropic`) is used in the status bar.
+    /// Target entry id (random, generated once per create).
+    pub id: String,
+    /// Protocol kind the form is editing/creating.
+    pub kind: crate::config::ProviderKind,
+    /// Auth mode the form is editing/creating.
+    pub mode: crate::config::ProviderMode,
+    /// True for a brand-new custom provider whose protocol has not yet
+    /// been chosen (assigned after the form is saved).
+    pub is_custom: bool,
+    /// Optional display name. When empty, the kind name is used in the
+    /// status bar.
     pub name: String,
     pub base_url: String,
     pub api_key: String,
@@ -669,7 +682,7 @@ impl ConfigFormState {
         kind: crate::config::ProviderKind,
         mode: crate::config::ProviderMode,
     ) -> Self {
-        let id = crate::config::make_id(kind, mode);
+        let id = crate::config::new_entry_id();
         let name = match kind {
             crate::config::ProviderKind::Cursor => "Cursor".to_string(),
             crate::config::ProviderKind::Volcengine => "Volcengine".to_string(),
@@ -684,6 +697,9 @@ impl ConfigFormState {
         Self {
             is_new: true,
             id,
+            kind,
+            mode,
+            is_custom: false,
             name,
             base_url,
             api_key: String::new(),
@@ -700,12 +716,15 @@ impl ConfigFormState {
 
     pub fn new_for_edit(
         id: String,
-        cfg: &crate::config::ProviderConfig,
+        cfg: &crate::config::ProviderEntry,
         _mode: crate::config::ProviderMode,
     ) -> Self {
         Self {
             is_new: false,
             id,
+            kind: cfg.kind,
+            mode: cfg.mode,
+            is_custom: false,
             name: cfg.name.clone(),
             base_url: cfg.base_url.clone(),
             api_key: cfg.api_key.clone(),
@@ -721,15 +740,11 @@ impl ConfigFormState {
     }
 
     pub fn is_cursor(&self) -> bool {
-        crate::config::parse_id(&self.id)
-            .map(|(k, _)| k == crate::config::ProviderKind::Cursor)
-            .unwrap_or(false)
+        self.kind == crate::config::ProviderKind::Cursor
     }
 
     pub fn is_volcengine(&self) -> bool {
-        crate::config::parse_id(&self.id)
-            .map(|(k, _)| k == crate::config::ProviderKind::Volcengine)
-            .unwrap_or(false)
+        self.kind == crate::config::ProviderKind::Volcengine
     }
 
     pub fn active_fields(&self) -> Vec<ConfigField> {
@@ -784,8 +799,10 @@ pub enum SettingsLevel {
     TopLevel,
     /// Provider list: "new provider" + existing entries.
     ProviderList,
-    /// Choose (kind, mode) for a new entry.
+    /// Choose the kind of a new entry (Custom / Cursor / Volcengine).
     NewProviderKind,
+    /// Choose the protocol of a newly-saved custom provider.
+    ProtocolPicker(ProtocolPickerState),
     /// Action menu for an existing entry: edit / delete.
     ExistingActions(String),
     /// Edit / create form.
@@ -813,6 +830,9 @@ impl SettingsLevel {
             SettingsLevel::TopLevel => "settings".to_string(),
             SettingsLevel::ProviderList => "settings / set provider".to_string(),
             SettingsLevel::NewProviderKind => "settings / set provider / new".to_string(),
+            SettingsLevel::ProtocolPicker(_) => {
+                "settings / set provider / new / protocol".to_string()
+            }
             SettingsLevel::ExistingActions(id) => {
                 format!(
                     "settings / set provider / {}",
@@ -845,6 +865,7 @@ impl SettingsLevel {
             SettingsLevel::NewProviderKind => {
                 "Up/Down: nav | type: filter | Enter: select | Esc: back"
             }
+            SettingsLevel::ProtocolPicker(_) => "Up/Down: nav | Enter: select | Esc: back",
             SettingsLevel::ExistingActions(_) => "Up/Down: nav | Enter: select | Esc: back",
             SettingsLevel::ConfigForm(_) => {
                 "Up/Down: nav | type: edit | Enter: confirm | Esc: back"
@@ -860,9 +881,85 @@ impl SettingsLevel {
     }
 }
 
+/// Kinds offered when creating a new provider. `Custom` is a generic
+/// endpoint whose protocol (OpenAI chat / OpenAI responses /
+/// Anthropic messages) is chosen *after* the form is saved. `ModelsDev`
+/// represents a preset from the models.dev catalog (fetching its own
+/// base_url and provider_id).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NewProviderEntry {
+    Custom,
+    Cursor,
+    Volcengine,
+    ModelsDev { provider_id: String, name: String },
+}
+
+impl NewProviderEntry {
+    pub fn label(&self) -> String {
+        match self {
+            NewProviderEntry::Custom => "Custom".to_string(),
+            NewProviderEntry::Cursor => "Cursor".to_string(),
+            NewProviderEntry::Volcengine => "Volcengine".to_string(),
+            NewProviderEntry::ModelsDev { name, .. } => name.clone(),
+        }
+    }
+}
+
+/// The protocol to assign to a newly-saved custom provider. Picked
+/// after the form is saved, before fetching models.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProtocolChoice {
+    OpenaiChat,
+    OpenaiResponses,
+    AnthropicMessages,
+}
+
+impl ProtocolChoice {
+    pub fn all() -> [ProtocolChoice; 3] {
+        [
+            ProtocolChoice::OpenaiChat,
+            ProtocolChoice::OpenaiResponses,
+            ProtocolChoice::AnthropicMessages,
+        ]
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            ProtocolChoice::OpenaiChat => "OpenAI chat/completions",
+            ProtocolChoice::OpenaiResponses => "OpenAI responses",
+            ProtocolChoice::AnthropicMessages => "Anthropic messages",
+        }
+    }
+
+    pub fn kind(&self) -> crate::config::ProviderKind {
+        match self {
+            ProtocolChoice::OpenaiChat => crate::config::ProviderKind::OpenaiChat,
+            ProtocolChoice::OpenaiResponses => crate::config::ProviderKind::OpenaiResponses,
+            ProtocolChoice::AnthropicMessages => crate::config::ProviderKind::AnthropicMessages,
+        }
+    }
+
+    pub fn default_base_url(&self) -> &'static str {
+        crate::config::default_base_url(self.kind())
+    }
+
+    /// Map a protocol `ProviderKind` back to its `ProtocolChoice`.
+    /// Returns `None` for non-protocol kinds (Cursor / Volcengine).
+    pub fn from_kind(kind: crate::config::ProviderKind) -> Option<ProtocolChoice> {
+        match kind {
+            crate::config::ProviderKind::OpenaiChat => Some(ProtocolChoice::OpenaiChat),
+            crate::config::ProviderKind::OpenaiResponses => Some(ProtocolChoice::OpenaiResponses),
+            crate::config::ProviderKind::AnthropicMessages => {
+                Some(ProtocolChoice::AnthropicMessages)
+            }
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct NewProviderPickerState {
-    pub entries: Vec<ProviderId>,
+    pub entries: Vec<NewProviderEntry>,
     pub filtered: Vec<usize>,
     pub query: String,
     pub cursor: usize,
@@ -872,7 +969,11 @@ pub struct NewProviderPickerState {
 
 impl NewProviderPickerState {
     pub fn new() -> Self {
-        let entries = crate::config::Config::all_possible_ids();
+        let entries = vec![
+            NewProviderEntry::Custom,
+            NewProviderEntry::Cursor,
+            NewProviderEntry::Volcengine,
+        ];
         let mut s = Self {
             entries,
             filtered: Vec::new(),
@@ -885,53 +986,58 @@ impl NewProviderPickerState {
         s
     }
 
-    /// Load models.dev providers from the cache and append them to the
-    /// entry list with a special `__md__/{name}/{provider_id}` prefix.
-    /// Idempotent — already-present entries are not added again.
+    /// Load models.dev presets from the cache and append them to the
+    /// entry list. Idempotent — already-present entries are not added
+    /// again.
     pub fn load_model_dev_providers(&mut self, cache_path: &std::path::Path) {
         let model_data_path = cache_path.join("model-data.json");
         let Some(data) = crate::model_data::ModelData::load(&model_data_path) else {
             return;
         };
-        let mut dev_entries: Vec<String> = data
+        let mut dev_entries: Vec<NewProviderEntry> = data
             .providers
             .iter()
-            .map(|(id, meta)| format!("__md__/{}/{}", meta.name, id))
+            .map(|(id, meta)| NewProviderEntry::ModelsDev {
+                provider_id: id.clone(),
+                name: meta.name.clone(),
+            })
             .collect();
         if dev_entries.is_empty() {
             return;
         }
-        dev_entries.sort();
+        dev_entries.sort_by_key(|e| e.label());
         // Filter out already-present entries.
-        let existing: std::collections::HashSet<String> = self.entries.iter().cloned().collect();
-        let insert_at = self
+        let existing: std::collections::HashSet<String> = self
             .entries
             .iter()
-            .position(|id| {
-                crate::config::parse_id(id)
-                    .map(|(k, _)| k == crate::config::ProviderKind::Openai)
-                    .unwrap_or(false)
+            .filter_map(|e| match e {
+                NewProviderEntry::ModelsDev { provider_id, .. } => Some(provider_id.clone()),
+                _ => None,
             })
-            .unwrap_or(self.entries.len());
+            .collect();
         for entry in dev_entries {
-            if !existing.contains(&entry) {
-                self.entries.insert(insert_at, entry);
+            if let NewProviderEntry::ModelsDev { provider_id, .. } = &entry {
+                if !existing.contains(provider_id) {
+                    self.entries.push(entry);
+                }
             }
         }
         self.rebuild_filter();
     }
 
-    pub fn picker_label(&self, id: &str) -> String {
-        if let Some(rest) = id.strip_prefix("__md__/") {
-            // Format: __md__/{name}/{provider_id}
-            if let Some(name_end) = rest.rfind('/') {
-                return format!("{} (models.dev)", &rest[..name_end]);
+    pub fn picker_label(&self, entry: &NewProviderEntry) -> String {
+        match entry {
+            NewProviderEntry::Custom => "Custom (pick protocol after save)".to_string(),
+            NewProviderEntry::Cursor => "Cursor".to_string(),
+            NewProviderEntry::Volcengine => "Volcengine".to_string(),
+            NewProviderEntry::ModelsDev { name, .. } => {
+                format!("{name} (models.dev)")
             }
-            return format!("{} (models.dev)", rest);
         }
-        crate::config::parse_id(id)
-            .map(|(k, _)| k.picker_label().to_string())
-            .unwrap_or_else(|| crate::config::id_display(id))
+    }
+
+    pub fn selected(&self) -> Option<&NewProviderEntry> {
+        self.filtered.get(self.cursor).map(|&i| &self.entries[i])
     }
 
     pub fn rebuild_filter(&mut self) {
@@ -942,11 +1048,9 @@ impl NewProviderPickerState {
                 .entries
                 .iter()
                 .enumerate()
-                .filter_map(|(i, id)| {
-                    let label = self.picker_label(id);
-                    crate::fuzzy::score(&self.query, id)
-                        .or_else(|| crate::fuzzy::score(&self.query, &label))
-                        .map(|sc| (sc, i))
+                .filter_map(|(i, entry)| {
+                    let label = self.picker_label(entry);
+                    crate::fuzzy::score(&self.query, &label).map(|sc| (sc, i))
                 })
                 .collect();
             scored.sort_by_key(|&(sc, i)| (sc, i));
@@ -959,17 +1063,46 @@ impl NewProviderPickerState {
             self.scroll = self.cursor;
         }
     }
-
-    pub fn selected_id(&self) -> Option<ProviderId> {
-        self.filtered
-            .get(self.cursor)
-            .map(|&i| self.entries[i].clone())
-    }
 }
 
 impl Default for NewProviderPickerState {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Picker for choosing the protocol of a newly-saved custom provider.
+/// Shown immediately after the custom form is saved, before fetching
+/// models.
+#[derive(Debug, Clone)]
+pub struct ProtocolPickerState {
+    pub entry_id: ProviderId,
+    /// The entry's current protocol (if any), used to pre-select and to
+    /// decide whether the default base_url should be applied.
+    pub current_kind: Option<crate::config::ProviderKind>,
+    pub choices: Vec<ProtocolChoice>,
+    pub cursor: usize,
+    pub scroll: usize,
+    pub focus: PickerFocus,
+}
+
+impl ProtocolPickerState {
+    pub fn new(entry_id: ProviderId, current_kind: Option<crate::config::ProviderKind>) -> Self {
+        let selected_idx = current_kind
+            .and_then(ProtocolChoice::from_kind)
+            .and_then(|c| ProtocolChoice::all().iter().position(|&x| x == c));
+        Self {
+            entry_id,
+            current_kind,
+            choices: ProtocolChoice::all().to_vec(),
+            cursor: selected_idx.unwrap_or(0),
+            scroll: 0,
+            focus: PickerFocus::List,
+        }
+    }
+
+    pub fn selected(&self) -> Option<ProtocolChoice> {
+        self.choices.get(self.cursor).copied()
     }
 }
 
@@ -999,8 +1132,8 @@ impl SettingsState {
         Self::with_cache(cfg, None)
     }
 
-    pub fn with_cache(_cfg: &Config, model_cache_parent: Option<&std::path::Path>) -> Self {
-        let mut state = Self {
+    pub fn with_cache(_cfg: &Config, _model_cache_parent: Option<&std::path::Path>) -> Self {
+        Self {
             level: SettingsLevel::TopLevel,
             cursor: 0,
             scroll: 0,
@@ -1010,11 +1143,7 @@ impl SettingsState {
             query: String::new(),
             filtered: Vec::new(),
             search_cursor: 0,
-        };
-        if let Some(cache_path) = model_cache_parent {
-            state.new_provider.load_model_dev_providers(cache_path);
         }
-        state
     }
 
     /// The 8 top-level settings item labels.
@@ -1063,6 +1192,7 @@ impl SettingsState {
             }
             SettingsLevel::ProviderList => 1 + cfg.configured_provider_ids().len(), // new + existing
             SettingsLevel::NewProviderKind => self.new_provider.filtered.len(),
+            SettingsLevel::ProtocolPicker(p) => p.choices.len(),
             SettingsLevel::ExistingActions(_) => 2, // edit, delete
             SettingsLevel::ConfigForm(form) => form.active_fields().len(),
             SettingsLevel::ThinkingDisplayList => 3, // show, hide, while streaming
@@ -1243,14 +1373,13 @@ impl ModelPickerState {
     }
 
     /// Construct a picker bound to a specific configured entry id. The
-    /// kind is derived from the id; `entry_id` is stored so fetches and
-    /// commits target this exact entry rather than the global active one
-    /// (which may be a different entry of the same kind).
-    pub fn new_for_entry(id: &str) -> Option<Self> {
-        let (kind, _) = crate::config::parse_id(id)?;
+    /// `kind` is passed in; `entry_id` is stored so fetches and commits
+    /// target this exact entry rather than the global active one (which
+    /// may be a different entry of the same kind).
+    pub fn new_for_entry(kind: ProviderKind, id: &str) -> Self {
         let mut s = Self::new(kind);
         s.entry_id = Some(id.to_string());
-        Some(s)
+        s
     }
 
     pub fn rebuild_filter(&mut self) {
@@ -1373,11 +1502,7 @@ impl ProviderPickerState {
             .into_iter()
             .filter_map(|id| {
                 let entry = cfg.entry(&id)?;
-                let display = if entry.name.trim().is_empty() {
-                    crate::config::id_display(&id)
-                } else {
-                    entry.name.clone()
-                };
+                let display = entry.display();
                 Some(ProviderPickerEntry { id, display })
             })
             .collect();

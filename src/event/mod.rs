@@ -948,8 +948,9 @@ fn handle_msg(msg: AppMsg, app: &mut App) {
             no_endpoint,
         } => {
             let models_path = match provider {
-                crate::config::ProviderKind::Openai => "/models",
-                crate::config::ProviderKind::Anthropic => "/v1/models",
+                crate::config::ProviderKind::OpenaiChat => "/models",
+                crate::config::ProviderKind::OpenaiResponses => "/models",
+                crate::config::ProviderKind::AnthropicMessages => "/v1/models",
                 crate::config::ProviderKind::Cursor => "",
                 crate::config::ProviderKind::Volcengine => "/models",
             };
@@ -981,9 +982,19 @@ fn handle_msg(msg: AppMsg, app: &mut App) {
             access_token,
             refresh_token,
         } => {
-            use crate::config::{make_id, ProviderKind, ProviderMode};
+            use crate::config::ProviderKind;
             use crate::function::notifications::ToastLevel;
-            let id = make_id(ProviderKind::Cursor, ProviderMode::Oauth);
+            // Find the active Cursor entry (mode Oauth) and store tokens.
+            let id = app
+                .config
+                .entries
+                .iter()
+                .find(|e| {
+                    e.kind == ProviderKind::Cursor && e.mode == crate::config::ProviderMode::Oauth
+                })
+                .map(|e| e.id.clone())
+                .or_else(|| app.config.active.clone())
+                .unwrap_or_default();
             if let Some(entry) = app.config.entry_mut(&id) {
                 entry.api_key = access_token;
                 entry.api_key_env = refresh_token;

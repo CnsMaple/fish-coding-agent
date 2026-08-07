@@ -13,7 +13,7 @@ pub struct OpenAiProvider;
 #[async_trait]
 impl Provider for OpenAiProvider {
     fn kind(&self) -> ProviderKind {
-        ProviderKind::Openai
+        ProviderKind::OpenaiChat
     }
 
     async fn list_models(

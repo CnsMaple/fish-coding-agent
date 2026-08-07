@@ -346,7 +346,7 @@ pub struct CachedModels {
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct ModelCache {
-    /// Cache keyed by entry_id (e.g. "openai:key" or "openai:key-2")
+    /// Cache keyed by entry_id (e.g. "openai_chat:key" or "openai:key-2")
     /// so that different entries with the same ProviderKind do not
     /// overwrite each other's cached model lists.
     pub by_entry: HashMap<String, CachedModels>,

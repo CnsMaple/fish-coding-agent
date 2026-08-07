@@ -1,5 +1,5 @@
 {
-  "active": "openai:key",
+  "active": "openai-chat-1",
   "thinking": "off",
   "thinking_display": "show",
   "tool_display": "show",
@@ -10,8 +10,11 @@
   "auto_compact": true,
   "compact_reserved": null,
   "cache_retention": "normal",
-  "entries": {
-    "openai:key": {
+  "entries": [
+    {
+      "id": "openai-chat-1",
+      "kind": "openai_chat",
+      "mode": "key",
       "api_key": "",
       "api_key_env": "OPENAI_API_KEY",
       "base_url": "https://api.openai.com/v1",
@@ -20,7 +23,10 @@
       "access_key": "",
       "secret_key": ""
     },
-    "anthropic:key": {
+    {
+      "id": "anthropic-1",
+      "kind": "anthropic_messages",
+      "mode": "key",
       "api_key": "",
       "api_key_env": "ANTHROPIC_API_KEY",
       "base_url": "https://api.anthropic.com",
@@ -29,7 +35,7 @@
       "access_key": "",
       "secret_key": ""
     }
-  },
+  ],
   "mcp": {},
   "agents": {
     "entries": {},

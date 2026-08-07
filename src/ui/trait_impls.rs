@@ -1007,8 +1007,11 @@ impl TabWidget for crate::function::SettingsState {
                         }
                     })
                 });
-                let active_display =
-                    active_name.or_else(|| cfg.active.as_deref().map(crate::config::id_display));
+                let active_display = active_name.or_else(|| {
+                    cfg.active
+                        .as_deref()
+                        .and_then(|id| cfg.entry(id).map(|e| e.kind.display_name().to_string()))
+                });
                 for (pos, &i) in indices.iter().enumerate() {
                     let (label, value): (&str, Option<String>) = match i {
                         0 => ("set provider", active_display.clone()),
@@ -1058,7 +1061,11 @@ impl TabWidget for crate::function::SettingsState {
                             Some(e.name.clone())
                         }
                     });
-                    let mut label = name.unwrap_or_else(|| crate::config::id_display(id));
+                    let mut label = name.unwrap_or_else(|| {
+                        cfg.entry(id)
+                            .map(|e| e.kind.display_name().to_string())
+                            .unwrap_or_else(|| id.clone())
+                    });
                     if is_active {
                         label.push_str("  [active]");
                     }
@@ -1190,6 +1197,11 @@ impl TabWidget for crate::function::SettingsState {
                 body_lines.push(list_item(true, &label, None));
             }
             SettingsLevel::NewProviderKind => {}
+            SettingsLevel::ProtocolPicker(p) => {
+                for (i, choice) in p.choices.iter().enumerate() {
+                    body_lines.push(list_item(self.cursor == i, choice.label(), None));
+                }
+            }
         }
         if let Some(err) = &self.load_error {
             body_lines.push(Line::from(""));
