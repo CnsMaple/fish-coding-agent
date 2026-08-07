@@ -2,11 +2,6 @@ name: Stable Release
 
 on:
   workflow_dispatch:
-    inputs:
-      version:
-        description: 'Release version (e.g. 1.2.3)'
-        required: true
-        type: string
 
 permissions:
   contents: write
@@ -56,11 +51,16 @@ jobs:
         if: matrix.os == 'windows-latest'
         run: Compress-Archive -Path target/${{ matrix.target }}/release/${{ matrix.artifact }} -DestinationPath ${{ matrix.archive }}
 
+      - name: Compute version
+        id: version
+        shell: bash
+        run: echo "VERSION=$(date +'%Y.%m.%d')" >> "$GITHUB_ENV"
+
       - name: Upload to stable release
         uses: softprops/action-gh-release@v2
         with:
-          name: v${{ inputs.version }}
-          tag_name: v${{ inputs.version }}
+          name: v${{ env.VERSION }}
+          tag_name: v${{ env.VERSION }}
           body: |
-            Release v${{ inputs.version }} of fish-coding-agent.
+            Release v${{ env.VERSION }} of fish-coding-agent.
           files: ${{ matrix.archive }}
