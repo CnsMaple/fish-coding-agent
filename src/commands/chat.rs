@@ -908,6 +908,8 @@ pub(super) async fn run_sub_agent(
             tool_calls.clear();
             let mut stream_done = false;
             let mut stream_err: Option<String> = None;
+            let mut usage: Option<crate::providers::Usage> = None;
+            let gen_started_at = std::time::Instant::now();
 
             while let Some(ev) = chat_rx.recv().await {
                 if *cancel_rx.borrow() {
@@ -916,6 +918,7 @@ pub(super) async fn run_sub_agent(
                 match ev {
                     crate::providers::ChatEvent::Delta(s) => text.push_str(&s),
                     crate::providers::ChatEvent::ToolCalls(calls) => tool_calls = calls,
+                    crate::providers::ChatEvent::Usage(u) => usage = Some(u),
                     crate::providers::ChatEvent::Done => {
                         stream_done = true;
                         break;
@@ -926,6 +929,17 @@ pub(super) async fn run_sub_agent(
                     }
                     _ => {}
                 }
+            }
+
+            // Fold the sub-agent request's real usage and pure generation
+            // time into the shared token/hit-rate stats. Tool execution
+            // happens later (outside this stream loop), so this elapsed
+            // time is generation-only.
+            if let Some(u) = usage.take() {
+                let _ = tx.send(crate::event::AppMsg::SubAgentUsage {
+                    usage: u,
+                    gen_secs: gen_started_at.elapsed().as_secs_f64(),
+                });
             }
 
             if let Some(e) = stream_err {

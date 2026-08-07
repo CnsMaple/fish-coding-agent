@@ -80,6 +80,16 @@ pub enum AppMsg {
         seq: u64,
         usage: crate::providers::Usage,
     },
+    /// A sub-agent's nested request completed. Its real usage and pure
+    /// generation time (tool execution time excluded) are folded into
+    /// the token-rate / hit-rate stats so sub-agent work counts toward
+    /// the totals just like the main stream.
+    SubAgentUsage {
+        usage: crate::providers::Usage,
+        /// Effective generation seconds for the sub-agent request
+        /// (excludes tool-execution wall time).
+        gen_secs: f64,
+    },
     /// Stream finished successfully. `seq` matches
     /// `App::current_request_seq` at the time the request started;
     /// the handler drops stale events from previous requests so a
@@ -822,6 +832,26 @@ fn handle_msg(msg: AppMsg, app: &mut App) {
             if u.output_tokens > 0 {
                 *app.response_output_tokens.get_or_insert(0) += u.output_tokens;
             }
+        }
+        AppMsg::SubAgentUsage { usage: u, gen_secs } => {
+            // Fold a sub-agent's nested request into the shared rate stats.
+            // Unlike the main stream, a sub-agent runs off the main clock
+            // (`response_started_at` is paused while it executes), so we
+            // record a completed response directly from its real usage and
+            // pure generation time.
+            if gen_secs > 0.0 && u.output_tokens > 0 {
+                app.token_rate.record(u.output_tokens as f64 / gen_secs);
+                app.status.total_output_tokens += u.output_tokens;
+                app.status.total_elapsed_secs += gen_secs;
+            }
+            app.status.total_input_tokens += u.input_tokens;
+            app.status.total_cache_read += u.cache_read_tokens;
+            if u.input_tokens > 0 {
+                let rate = u.cache_read_tokens as f64 / u.input_tokens as f64;
+                app.hit_rate.record(rate);
+            }
+            app.status.update_token_rate(&app.token_rate);
+            app.status.update_hit(&app.hit_rate);
         }
         AppMsg::ChatDone { seq } => {
             if seq != app.current_request_seq {
