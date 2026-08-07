@@ -1545,13 +1545,6 @@ async fn handle_key(k: crossterm::event::KeyEvent, app: &mut App) {
                 return;
             }
 
-            // Don't send or insert newline while inflight (streaming).
-            // Plain Enter and any modified Enter (Shift+Enter for send
-            // under EnterNewline mode) are both suppressed.
-            if app.inflight.is_some() {
-                return;
-            }
-
             // Treat any modifier (Shift, Ctrl, Alt, Meta) as the "modified
             // variant". This matters because some Windows consoles drop
             // the SHIFT bit for Enter specifically — without this fallback
@@ -1568,6 +1561,14 @@ async fn handle_key(k: crossterm::event::KeyEvent, app: &mut App) {
                 enter_action(app.config.enter_behavior, modified),
                 EnterAction::Newline
             );
+
+            // While inflight (streaming), suppress only the *send* variant
+            // of Enter so the user can still draft (insert newlines) while
+            // the model is replying. The newline variant always passes
+            // through; both are never blocked at once.
+            if app.inflight.is_some() && !newline {
+                return;
+            }
             if newline {
                 if app.input.has_selection() {
                     app.input.delete_selection();
