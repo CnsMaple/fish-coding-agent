@@ -1,4 +1,5 @@
 use crate::app::App;
+use crate::config::Config;
 use crate::function::{CancelState, Selection};
 use crate::session::Session;
 use ratatui::buffer::{Buffer, CellDiffOption};
@@ -116,12 +117,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
         .scroll
         .min(total_lines.saturating_sub(inner_h).min(u32::MAX as usize) as u32);
 
-    crate::session::render::render(
-        content_area,
-        f.buffer_mut(),
-        &app.session,
-        &mut app.tool_toggle_rows,
-    );
+    crate::session::render::render(content_area, f.buffer_mut(), &app.session);
     if app.function_visible {
         app.function_panel_area = Some(chunks[panel_idx]);
         function_panel::render(chunks[panel_idx], f.buffer_mut(), app);
@@ -145,29 +141,86 @@ pub fn render(f: &mut Frame, app: &mut App) {
     let start = total_lines.saturating_sub(inner_h + scroll as usize);
     let end = start + inner_h;
 
-    let first_visible = if app.session.messages.is_empty() || app.session.line_offsets.len() <= 1 {
-        0
+    collect_toggle_rows(app, content_area, start, end, inner_h, width_u16);
+    if let Some(sel) = app.tui_selection {
+        let buf = f.buffer_mut();
+        let total = app.session.line_offsets.last().copied().unwrap_or(0);
+        let scroll = app.session.scroll;
+        if let Some(area) = app.session_area {
+            apply_selection_style(buf, &sel, &area, scroll, total);
+        }
+        let width = app.session_area.map(|a| a.width as usize).unwrap_or(80);
+        app.selected_text = Some(extract_selection_text(&sel, &app.session, width));
     } else {
-        match app.session.line_offsets[..app.session.messages.len()].binary_search(&(start as u32))
-        {
-            Ok(i) => i,
-            Err(i) => i.saturating_sub(1),
+        app.selected_text = None;
+    }
+
+    if app.force_full_repaint && app.inflight.is_none() {
+        let buf = f.buffer_mut();
+        let area = app.session_area.unwrap_or(*buf.area());
+        for y in area.top()..area.bottom() {
+            for x in area.left()..area.right() {
+                if let Some(cell) = buf.cell_mut((x, y)) {
+                    if matches!(cell.diff_option, CellDiffOption::None) {
+                        cell.set_diff_option(CellDiffOption::AlwaysUpdate);
+                    }
+                }
+            }
         }
+        app.force_full_repaint = false;
+    }
+
+    // Position the hardware cursor for the focused input.
+    //
+    // We always set the cursor position (even during inflight) so that
+    // ratatui calls `show_cursor()` + `set_cursor_position()` on every
+    // draw. The `CursorTrackingBackend` wrapper de-duplicates the
+    // `show_cursor` calls, preventing the terminal's native blink timer
+    // from being reset on every frame.
+    let cursor = match app.focus_target {
+        crate::function::FocusTarget::FunctionPanel => app.function_panel_cursor,
+        crate::function::FocusTarget::Input => app.input_cursor_screen,
+        crate::function::FocusTarget::AgentsCheckbox => None,
     };
+    if let Some((cx, cy)) = cursor {
+        f.set_cursor_position((cx, cy));
+    }
+}
 
-    let mut line_idx: usize = app
-        .session
-        .line_offsets
-        .get(first_visible)
-        .copied()
-        .unwrap_or(0) as usize;
+/// A thinking or tool block's document-line span produced by the
+/// toggle-row walk. `top`/`bottom` are exclusive/inclusive doc lines
+/// (like `Message::line_offsets`), `msg_idx`/`idx` are the message and
+/// segment/tool indices.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ToggleBlock {
+    top: u32,
+    bottom: u32,
+    msg_idx: usize,
+    idx: usize,
+}
 
-    for (msg_idx, m) in app.session.messages.iter().enumerate().skip(first_visible) {
-        let msg_start = app.session.line_offsets[msg_idx] as usize;
-        if msg_start >= end {
-            break;
-        }
+/// Walk the session and compute the document-line span of every
+/// thinking / tool toggle block, in render order. This is the single
+/// source of truth for toggle geometry and must stay in lockstep with
+/// `Session::compute_total_lines` / `build_message_lines` — the walk
+/// mirrors their block placement (content segments, `ensure_gap_before_block`,
+/// trailing blank per block, user +2 fill lines, inter-message gap).
+///
+/// Returns `(thinking, tool)` blocks in doc-line coordinates. The
+/// viewport→screen mapping is applied later by `collect_toggle_rows`,
+/// which makes this function trivially unit-testable against
+/// `Session::count_all_lines_with_width` / `build_message_lines`.
+fn collect_toggle_blocks(
+    session: &Session,
+    config: &Config,
+    width: u16,
+) -> (Vec<ToggleBlock>, Vec<ToggleBlock>, usize) {
+    let mut thinking: Vec<ToggleBlock> = Vec::new();
+    let mut tool: Vec<ToggleBlock> = Vec::new();
+    let width_u16: u16 = width;
+    let mut line_idx: usize = 0;
 
+    for (msg_idx, m) in session.messages.iter().enumerate() {
         // ── Skill block (rendered before everything else, like
         // build_message_lines) ──────────────────────────────────
         if m.role == crate::session::Role::User {
@@ -180,15 +233,6 @@ pub fn render(f: &mut Frame, app: &mut App) {
 
         // ── Attachment block ─────────────────────────────────────
         if !m.attachments.is_empty() {
-            // ensure_gap_before_block: gap added when lines exist and
-            // last line is non-empty. At this point, if skill block
-            // was pushed, the last line is a trailing blank (non-empty
-            // check fails → no gap). If no skill block and no prior
-            // lines in this message, no gap. So only add gap when a
-            // skill block was NOT pushed (lines start empty → no gap)
-            // — actually ensure_gap_before_block returns early if
-            // msg_lines is empty, so no gap before attachment when
-            // message is empty. This matches: no gap here.
             line_idx +=
                 crate::session::render::attachment_block_line_count(&m.attachments) as usize;
         }
@@ -206,15 +250,13 @@ pub fn render(f: &mut Frame, app: &mut App) {
 
         let think_show = m.role == crate::session::Role::Assistant
             && crate::session::render::message_has_thinking(m)
-            && app.config.thinking_display != crate::config::ThinkingDisplay::Hide;
-        let tool_show = app.config.tool_display != crate::config::ToolResultDisplay::Hide;
+            && config.thinking_display != crate::config::ThinkingDisplay::Hide;
+        let tool_show = config.tool_display != crate::config::ToolResultDisplay::Hide;
 
         // Build sorted items matching build_message_lines.
-        // (offset, is_thinking, thinking_seg_idx or tool_idx,
-        //  tool_results_len_at_open for tiebreaker)
         enum WalkItem {
-            Thinking(usize), // segment index
-            Tool(usize),     // tool index
+            Thinking(usize),
+            Tool(usize),
         }
         let mut items: Vec<(usize, WalkItem)> = Vec::new();
         if think_show {
@@ -264,8 +306,8 @@ pub fn render(f: &mut Frame, app: &mut App) {
         });
 
         let mut cursor = 0usize;
-        let mut prev_line_was_blank = false; // tracks ensure_gap_before_block
-        let mut has_any_line = false; // tracks whether msg_lines was non-empty
+        let mut prev_line_was_blank = false;
+        let mut has_any_line = false;
 
         for (offset, item) in &items {
             let offset = *offset;
@@ -289,9 +331,6 @@ pub fn render(f: &mut Frame, app: &mut App) {
                 cursor = offset;
                 if seg_lines > 0 {
                     has_any_line = true;
-                    // Mirror ensure_gap_before_block: if the last
-                    // rendered content line is blank, the next block
-                    // needs no extra gap.
                     prev_line_was_blank = seg_buf.last().map(|l| l.width() == 0).unwrap_or(false);
                 }
             }
@@ -305,10 +344,10 @@ pub fn render(f: &mut Frame, app: &mut App) {
             match item {
                 WalkItem::Thinking(si) => {
                     let seg = &m.thinking_segments[*si];
-                    let expanded = (app.config.thinking_display
+                    let expanded = (config.thinking_display
                         == crate::config::ThinkingDisplay::Show
                         && seg.visible)
-                        || (app.config.thinking_display
+                        || (config.thinking_display
                             == crate::config::ThinkingDisplay::ShowWhileStreaming
                             && (m.streaming || seg.visible));
                     let lines = if expanded {
@@ -318,17 +357,13 @@ pub fn render(f: &mut Frame, app: &mut App) {
                     };
                     let block_top = line_idx;
                     let block_bot = line_idx + lines; // exclusive
-                    if lines > 0 && block_top < end && block_bot > start {
-                        let screen_top =
-                            content_area.y + block_top.saturating_sub(start).min(inner_h) as u16;
-                        let screen_bot =
-                            content_area.y + (block_bot.min(end) - start).min(inner_h) as u16;
-                        app.thinking_toggle_rows.push((
-                            screen_top,
-                            screen_bot.saturating_sub(1),
+                    if lines > 0 {
+                        thinking.push(ToggleBlock {
+                            top: block_top as u32,
+                            bottom: block_bot as u32,
                             msg_idx,
-                            *si,
-                        ));
+                            idx: *si,
+                        });
                     }
                     line_idx += lines;
                     line_idx += 1; // trailing blank
@@ -338,7 +373,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
                 WalkItem::Tool(ti) => {
                     let t = &m.tool_results[*ti];
                     let t_vis = t.name == "plan"
-                        || match app.config.tool_display {
+                        || match config.tool_display {
                             crate::config::ToolResultDisplay::Show => t.visible,
                             crate::config::ToolResultDisplay::ShowWhileStreaming => {
                                 m.streaming || t.visible
@@ -352,17 +387,13 @@ pub fn render(f: &mut Frame, app: &mut App) {
                     };
                     let block_top = line_idx;
                     let block_bot = line_idx + lines; // exclusive
-                    if lines > 0 && block_top < end && block_bot > start && t.name != "plan" {
-                        let screen_top =
-                            content_area.y + block_top.saturating_sub(start).min(inner_h) as u16;
-                        let screen_bot =
-                            content_area.y + (block_bot.min(end) - start).min(inner_h) as u16;
-                        app.tool_toggle_rows.push((
-                            screen_top,
-                            screen_bot.saturating_sub(1),
+                    if lines > 0 && t.name != "plan" {
+                        tool.push(ToggleBlock {
+                            top: block_top as u32,
+                            bottom: block_bot as u32,
                             msg_idx,
-                            *ti,
-                        ));
+                            idx: *ti,
+                        });
                     }
                     line_idx += lines;
                     line_idx += 1; // trailing blank
@@ -377,13 +408,10 @@ pub fn render(f: &mut Frame, app: &mut App) {
             let seg_text = crate::session::render::strip_legacy_markers(&raw[cursor..]);
             let seg_lines = crate::session::render::count_md_segment(&seg_text, width_u16 as usize);
             line_idx += seg_lines as usize;
-            // Remaining content lines are non-blank; not tracked since
-            // the message loop ends after this.
         }
 
         // User messages: 2 background-fill lines (one above content,
-        // one below). build_message_lines inserts a blank at index 0
-        // and pushes a blank at the end, so +2 total.
+        // one below).
         if m.role == crate::session::Role::User {
             line_idx += 2;
         }
@@ -391,48 +419,47 @@ pub fn render(f: &mut Frame, app: &mut App) {
         line_idx += 1; // inter-message gap
     }
 
-    if let Some(sel) = app.tui_selection {
-        let buf = f.buffer_mut();
-        let total = app.session.line_offsets.last().copied().unwrap_or(0);
-        let scroll = app.session.scroll;
-        if let Some(area) = app.session_area {
-            apply_selection_style(buf, &sel, &area, scroll, total);
-        }
-        let width = app.session_area.map(|a| a.width as usize).unwrap_or(80);
-        app.selected_text = Some(extract_selection_text(&sel, &app.session, width));
-    } else {
-        app.selected_text = None;
-    }
+    (thinking, tool, line_idx)
+}
 
-    if app.force_full_repaint && app.inflight.is_none() {
-        let buf = f.buffer_mut();
-        let area = app.session_area.unwrap_or(*buf.area());
-        for y in area.top()..area.bottom() {
-            for x in area.left()..area.right() {
-                if let Some(cell) = buf.cell_mut((x, y)) {
-                    if matches!(cell.diff_option, CellDiffOption::None) {
-                        cell.set_diff_option(CellDiffOption::AlwaysUpdate);
-                    }
-                }
-            }
+/// Map document-line toggle blocks into screen rows for the current
+/// viewport and append them to `app.thinking_toggle_rows` /
+/// `app.tool_toggle_rows`. `start`..`end` is the visible doc-line
+/// range; `content_area.y` is the screen origin.
+fn collect_toggle_rows(
+    app: &mut App,
+    content_area: Rect,
+    start: usize,
+    end: usize,
+    inner_h: usize,
+    width_u16: u16,
+) {
+    let (thinking, tool, _total) = collect_toggle_blocks(&app.session, &app.config, width_u16);
+    app.thinking_toggle_rows.clear();
+    app.tool_toggle_rows.clear();
+    for b in thinking {
+        if b.bottom > b.top && b.bottom as usize > start && (b.top as usize) < end {
+            let screen_top =
+                content_area.y + (b.top as usize).saturating_sub(start).min(inner_h) as u16;
+            let screen_bot =
+                content_area.y + ((b.bottom as usize).min(end) - start).min(inner_h) as u16;
+            app.thinking_toggle_rows.push((
+                screen_top,
+                screen_bot.saturating_sub(1),
+                b.msg_idx,
+                b.idx,
+            ));
         }
-        app.force_full_repaint = false;
     }
-
-    // Position the hardware cursor for the focused input.
-    //
-    // We always set the cursor position (even during inflight) so that
-    // ratatui calls `show_cursor()` + `set_cursor_position()` on every
-    // draw. The `CursorTrackingBackend` wrapper de-duplicates the
-    // `show_cursor` calls, preventing the terminal's native blink timer
-    // from being reset on every frame.
-    let cursor = match app.focus_target {
-        crate::function::FocusTarget::FunctionPanel => app.function_panel_cursor,
-        crate::function::FocusTarget::Input => app.input_cursor_screen,
-        crate::function::FocusTarget::AgentsCheckbox => None,
-    };
-    if let Some((cx, cy)) = cursor {
-        f.set_cursor_position((cx, cy));
+    for b in tool {
+        if b.bottom > b.top && b.bottom as usize > start && (b.top as usize) < end {
+            let screen_top =
+                content_area.y + (b.top as usize).saturating_sub(start).min(inner_h) as u16;
+            let screen_bot =
+                content_area.y + ((b.bottom as usize).min(end) - start).min(inner_h) as u16;
+            app.tool_toggle_rows
+                .push((screen_top, screen_bot.saturating_sub(1), b.msg_idx, b.idx));
+        }
     }
 }
 
@@ -960,6 +987,181 @@ pub fn render_agents_area(
                 height: 1,
             },
             buf,
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::ThinkingDisplay;
+    use crate::session::{Message, Role, ThinkingSegment, ToolResultBlock};
+
+    fn shell_tool() -> ToolResultBlock {
+        ToolResultBlock {
+            name: "shell_command".to_string(),
+            title: "$ echo hi".to_string(),
+            content: serde_json::json!({
+                "ok": true,
+                "result": "exit_code: 0\nwall_secs: 0.01\ntimeout_secs: 300\nstdout:\nhi\n\nstderr:\n"
+            })
+            .to_string(),
+            metadata: String::new(),
+            content_offset: 0,
+            visible: true,
+            running: false,
+            failed: false,
+            call_id: String::new(),
+            pruned: false,
+            streaming_input: String::new(),
+            cached_line_count_visible: None,
+            cached_line_count_collapsed: None,
+            started_at: None,
+        }
+    }
+
+    fn thinking_seg(offset: usize, content: &str) -> ThinkingSegment {
+        ThinkingSegment {
+            offset,
+            content: content.to_string(),
+            closed: false,
+            tool_results_len_at_open: 0,
+            cached_line_count_expanded: None,
+            cached_line_count_collapsed: None,
+            started_at: None,
+            ended_at: None,
+            visible: false,
+        }
+    }
+
+    /// The toggle walk and `Session::compute_total_lines` must agree on
+    /// the total document line count. Any placement drift in either side
+    /// (content segments, gaps, trailing blanks, user +2 fill, inter-
+    /// message gap) breaks toggle click alignment, so this is the core
+    /// regression guard for `collect_toggle_blocks`.
+    fn assert_walk_matches_total(session: &mut Session, config: &Config, width: u16) {
+        // Mirror what `ui::render` does before counting: sync the
+        // session's display fields from the config so `compute_total_lines`
+        // and the walk agree on which blocks are visible.
+        session.sync_display_mode(
+            config.thinking_display,
+            config.tool_display,
+            config.tool_preview_lines,
+        );
+        let expected = session.count_all_lines_with_width(width as usize);
+        let (thinking, tool, walked) = collect_toggle_blocks(session, config, width);
+        assert_eq!(
+            walked as u32, expected,
+            "toggle walk total ({walked}) != compute_total_lines ({expected})"
+        );
+        // Every collected block must be non-empty and within [0, total).
+        for b in thinking.iter().chain(tool.iter()) {
+            assert!(b.bottom > b.top, "empty block span {:?}", b);
+            assert!(
+                b.bottom as u32 <= expected,
+                "block {:?} exceeds total {expected}",
+                b
+            );
+        }
+    }
+
+    #[test]
+    fn toggle_walk_total_matches_compute_for_mixed_session() {
+        let cfg = Config::default(); // thinking_display=Show, tool_display=Show
+        let mut s = Session::default();
+        s.push(Message::new(Role::User, "short user message"));
+
+        let mut asst = Message::new(Role::Assistant, "I will run a command for you.");
+        asst.thinking_segments
+            .push(thinking_seg(0, "hidden reasoning"));
+        asst.thinking_visible = true;
+        asst.tool_results.push(shell_tool());
+        s.push(asst);
+
+        let width = 80u16;
+        assert_walk_matches_total(&mut s, &cfg, width);
+
+        // Thinking and tool blocks must both be collected exactly once.
+        let (thinking, tool, _) = collect_toggle_blocks(&s, &cfg, width);
+        assert_eq!(thinking.len(), 1, "expected one thinking block");
+        assert_eq!(tool.len(), 1, "expected one tool block");
+    }
+
+    #[test]
+    fn toggle_walk_honors_hidden_display_modes() {
+        let mut cfg = Config::default();
+        cfg.thinking_display = ThinkingDisplay::Hide;
+        cfg.tool_display = crate::config::ToolResultDisplay::Hide;
+
+        let mut s = Session::default();
+        s.push(Message::new(Role::User, "do it"));
+        let mut asst = Message::new(Role::Assistant, "ok");
+        asst.thinking_segments
+            .push(thinking_seg(0, "secret reasoning"));
+        asst.thinking_visible = true;
+        asst.tool_results.push(shell_tool());
+        s.push(asst);
+
+        let width = 80u16;
+        assert_walk_matches_total(&mut s, &cfg, width);
+        let (thinking, tool, _) = collect_toggle_blocks(&s, &cfg, width);
+        assert!(thinking.is_empty(), "hidden thinking must not be collected");
+        assert!(tool.is_empty(), "hidden tool must not be collected");
+    }
+
+    #[test]
+    fn toggle_walk_plan_tool_is_not_collected_but_still_counts_lines() {
+        let cfg = Config::default();
+        let mut s = Session::default();
+        s.push(Message::new(Role::User, "make a plan"));
+        let mut asst = Message::new(Role::Assistant, "here is a plan:");
+        asst.tool_results.push(ToolResultBlock {
+            name: "plan".to_string(),
+            title: "plan".to_string(),
+            content: "1. step one\n2. step two".to_string(),
+            metadata: String::new(),
+            content_offset: 0,
+            visible: true,
+            running: false,
+            failed: false,
+            call_id: String::new(),
+            pruned: false,
+            streaming_input: String::new(),
+            cached_line_count_visible: None,
+            cached_line_count_collapsed: None,
+            started_at: None,
+        });
+        s.push(asst);
+
+        let width = 80u16;
+        assert_walk_matches_total(&mut s, &cfg, width);
+        let (_, tool, _) = collect_toggle_blocks(&s, &cfg, width);
+        assert!(tool.is_empty(), "plan tool is not toggleable");
+    }
+
+    #[test]
+    fn toggle_walk_spans_offsets_within_content() {
+        let cfg = Config::default();
+        let mut s = Session::default();
+        s.push(Message::new(Role::User, "analyze this"));
+        // Thinking segment at an offset inside the content, followed by
+        // a tool, exercising the interleave + gap logic.
+        let mut asst = Message::new(Role::Assistant, "first part\n\nsecond part");
+        asst.thinking_segments
+            .push(thinking_seg("first part\n\n".len(), "reasoning"));
+        asst.thinking_visible = true;
+        asst.tool_results.push(shell_tool());
+        s.push(asst);
+
+        let width = 80u16;
+        assert_walk_matches_total(&mut s, &cfg, width);
+        let (thinking, tool, _) = collect_toggle_blocks(&s, &cfg, width);
+        assert_eq!(thinking.len(), 1);
+        assert_eq!(tool.len(), 1);
+        // The thinking block must start after the "first part" content.
+        assert!(
+            thinking[0].top > 0,
+            "thinking block should be offset past leading content"
         );
     }
 }

@@ -83,11 +83,15 @@ pub fn render(area: Rect, buf: &mut Buffer, app: &mut App) {
         return;
     }
 
-    let todo_items: Vec<crate::session::TodoItem> = app.session.todo_items.clone();
+    // Borrow immutable app fields (config / session todos / disabled
+    // tools) and the mutable function-panel tab separately so we don't
+    // need to clone `todo_items` every frame. Field-level borrows let
+    // the checker allow `&mut app.function` alongside reads of the
+    // other disjoint fields.
     if let Some(tab) = app.function.tabs.get_mut(app.function.active) {
         let ctx = crate::ui::tab_widget::TabCtx {
             config: &app.config,
-            todos: &todo_items,
+            todos: &app.session.todo_items[..],
             disabled_tools: &app.disabled_tools,
             agent: app.active_agent,
         };

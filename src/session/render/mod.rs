@@ -63,12 +63,7 @@ pub struct CachedMessageLines {
     pub content_line_count: u32,
 }
 
-pub fn render(
-    area: Rect,
-    buf: &mut Buffer,
-    session: &Session,
-    tool_toggle_rows: &mut Vec<(u16, u16, usize, usize)>,
-) {
+pub fn render(area: Rect, buf: &mut Buffer, session: &Session) {
     let inner_h = area.height as usize;
     let width = area.width as usize;
     if width == 0 || inner_h == 0 {
@@ -94,8 +89,6 @@ pub fn render(
     let offset_from_top: u32 = max_scroll_u32.saturating_sub(scroll_u32);
     let start: u32 = offset_from_top;
     let end: u32 = (offset_from_top + inner_h as u32).min(total_u32);
-
-    tool_toggle_rows.clear();
 
     // Viewport-aware: only build lines for messages that intersect
     // [start, end). The vast majority of messages in a 10M-token

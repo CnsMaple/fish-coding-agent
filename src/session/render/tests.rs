@@ -1745,8 +1745,7 @@ mod tests {
         ));
         let area = Rect::new(0, 0, 30, 6);
         let mut buf = Buffer::empty(area);
-        let mut toggles = Vec::new();
-        crate::session::render::render(area, &mut buf, &s, &mut toggles);
+        crate::session::render::render(area, &mut buf, &s);
         let user_bg = active_colors().user_bg;
         eprintln!("user_bg = {:?}", user_bg);
         for y in 0..area.height {
@@ -1963,8 +1962,7 @@ mod tests {
         s.push(asst);
         let area = Rect::new(0, 0, 60, 16);
         let mut buf = Buffer::empty(area);
-        let mut toggles = Vec::new();
-        crate::session::render::render(area, &mut buf, &s, &mut toggles);
+        crate::session::render::render(area, &mut buf, &s);
 
         let user_bg = active_colors().user_bg;
         for y in 0..area.height {
