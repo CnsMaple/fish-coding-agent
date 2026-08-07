@@ -485,6 +485,12 @@ pub async fn run_chat_stream(
                 crate::providers::ChatEvent::ToolCalls(calls) => {
                     tool_calls = calls;
                 }
+                crate::providers::ChatEvent::ToolWaitStarted => {
+                    send_msg(crate::event::AppMsg::ChatTimerPause);
+                }
+                crate::providers::ChatEvent::ToolWaitEnded => {
+                    send_msg(crate::event::AppMsg::ChatTimerResume);
+                }
                 crate::providers::ChatEvent::Done => {
                     stream_done = true;
                     break;

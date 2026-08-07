@@ -563,7 +563,13 @@ fn update_live_token_rate(app: &mut App) {
         return;
     };
     let elapsed = app.response_accumulated.as_secs_f64() + started_at.elapsed().as_secs_f64();
-    let tokens = estimate_output_tokens(app.response_output_chars);
+    // Prefer the provider's real output-token count once a `ChatUsage`
+    // has arrived, so the live rate matches what `finish_model_output_rate`
+    // records instead of jumping when the response completes. Falls back
+    // to the character-based estimate while usage is still pending.
+    let tokens = app
+        .response_output_tokens
+        .unwrap_or_else(|| estimate_output_tokens(app.response_output_chars));
     app.token_rate.update_live(tokens, elapsed);
     app.status.update_token_rate(&app.token_rate);
 }

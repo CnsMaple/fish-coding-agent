@@ -530,8 +530,13 @@ pub(super) async fn handle_server_message(
                     ),
                 );
                 if t.used_tokens > 0 {
-                    usage.input_tokens = t.used_tokens as u64;
-                    usage.output_tokens = 0;
+                    // `used_tokens` is the cumulative conversation context
+                    // (input + output) at this checkpoint. Do NOT clobber
+                    // `output_tokens`, which is accumulated separately from
+                    // `token_delta` events and fed into the token-rate
+                    // calculation; resetting it here would undercount the
+                    // response's output tokens.
+                    usage.input_tokens = usage.input_tokens.max(t.used_tokens as u64);
                 }
                 // Cursor often reports 200k as the default conversation budget.
                 // Treat that as an unknown/default placeholder so the status bar

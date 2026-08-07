@@ -48,7 +48,9 @@ pub(super) async fn handle_exec_server_message(
                     args.command.trim()
                 ),
             );
+            let _ = tx.send(ChatEvent::ToolWaitStarted);
             handle_shell_exec(exec.id, exec.exec_id, args, false, tx, body_tx).await?;
+            let _ = tx.send(ChatEvent::ToolWaitEnded);
             Ok(CursorServerOutcome::ToolOutput)
         }
         Some(exec_server_message::Message::ShellStreamArgs(args)) => {
@@ -60,7 +62,9 @@ pub(super) async fn handle_exec_server_message(
                     args.command.trim()
                 ),
             );
+            let _ = tx.send(ChatEvent::ToolWaitStarted);
             handle_shell_exec(exec.id, exec.exec_id, args, true, tx, body_tx).await?;
+            let _ = tx.send(ChatEvent::ToolWaitEnded);
             Ok(CursorServerOutcome::ToolOutput)
         }
         Some(exec_server_message::Message::ReadArgs(args)) => {
@@ -68,7 +72,9 @@ pub(super) async fn handle_exec_server_message(
                 tx,
                 format!("exec read_args id={} path={}", exec.id, args.path),
             );
+            let _ = tx.send(ChatEvent::ToolWaitStarted);
             handle_read_exec(exec.id, exec.exec_id, args, tx, body_tx).await?;
+            let _ = tx.send(ChatEvent::ToolWaitEnded);
             Ok(CursorServerOutcome::ToolOutput)
         }
         Some(exec_server_message::Message::LsArgs(args)) => {
@@ -76,7 +82,9 @@ pub(super) async fn handle_exec_server_message(
                 tx,
                 format!("exec ls_args id={} path={}", exec.id, args.path),
             );
+            let _ = tx.send(ChatEvent::ToolWaitStarted);
             handle_ls_exec(exec.id, exec.exec_id, args, tx, body_tx).await?;
+            let _ = tx.send(ChatEvent::ToolWaitEnded);
             Ok(CursorServerOutcome::ToolOutput)
         }
         Some(exec_server_message::Message::GrepArgs(args)) => {
@@ -84,7 +92,9 @@ pub(super) async fn handle_exec_server_message(
                 tx,
                 format!("exec grep_args id={} pattern={}", exec.id, args.pattern),
             );
+            let _ = tx.send(ChatEvent::ToolWaitStarted);
             handle_grep_exec(exec.id, exec.exec_id, args, tx, body_tx).await?;
+            let _ = tx.send(ChatEvent::ToolWaitEnded);
             Ok(CursorServerOutcome::ToolOutput)
         }
         None => {

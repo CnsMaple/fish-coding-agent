@@ -46,6 +46,14 @@ pub enum ChatEvent {
         args: String,
     },
     Debug(String),
+    /// Signals that the provider is about to block on a tool call
+    /// executed inline within the stream (Cursor protocol). The main
+    /// loop must pause the token-timing clock so the tool's wall time
+    /// is not counted as generation time.
+    ToolWaitStarted,
+    /// Emitted after the inline tool call finishes; resumes the
+    /// token-timing clock (which restarts lazily on the next delta).
+    ToolWaitEnded,
     ToolResult {
         name: String,
         title: String,
@@ -81,6 +89,8 @@ impl ChatEvent {
                 args,
             },
             ChatEvent::Debug(s) => crate::event::AppMsg::ChatDebug(s),
+            ChatEvent::ToolWaitStarted => crate::event::AppMsg::ChatTimerPause,
+            ChatEvent::ToolWaitEnded => crate::event::AppMsg::ChatTimerResume,
             ChatEvent::ToolResult {
                 name,
                 title,
