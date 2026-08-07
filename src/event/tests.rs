@@ -1866,6 +1866,36 @@ fn extract_selection_text_strips_tool_block_decoration() {
 }
 
 #[test]
+fn extract_selection_text_includes_cursor_cell_of_drag_end() {
+    // A drag ending on column `c` highlights column `c`, so the copied
+    // text must include it. Earlier the exclusive end column dropped the
+    // last cell, making every copied selection appear off by one (shifted
+    // left). This test pins the WYSIWYG contract: highlight == copy.
+    use crate::function::Selection;
+    use crate::session::{Message, Role, Session};
+    use crate::ui::extract_selection_text;
+
+    let mut s = Session::default();
+    s.push(Message::new(Role::Assistant, "hello world".to_string()));
+    let width = 80usize;
+    s.count_all_lines_with_width(width); // populate line_offsets
+
+    // Drag from column 0 to column 7 (inclusive) on the single row. The
+    // rendered line carries a `   ` gutter prefix, so "hello" occupies
+    // columns 3..=7; an exclusive end of 7 would have dropped the final
+    // 'o' (the off-by-one bug).
+    let sel = Selection {
+        doc_start: 0,
+        doc_end: 0,
+        col_start: Some(0),
+        col_end: Some(7),
+        active: false,
+    };
+    let text = extract_selection_text(&sel, &s, width);
+    assert_eq!(text, "   hello", "expected '   hello', got {text:?}");
+}
+
+#[test]
 fn active_name_uses_user_set_value() {
     use crate::config::{make_id, ProviderConfig, ProviderKind, ProviderMode};
 

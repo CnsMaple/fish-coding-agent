@@ -774,7 +774,12 @@ pub fn extract_selection_text(sel: &Selection, session: &Session, width: usize) 
         (sel.col_end, sel.col_start)
     };
     let col_lo = col_lo.unwrap_or(0) as usize;
-    let col_hi = col_hi.map(|c| c as usize).unwrap_or(width);
+    // `col_hi` is the exclusive end passed to `slice_by_visual_width`
+    // ([start, end)). The highlight rect (apply_selection_style) uses an
+    // inclusive end, so a drag ending on column `c` highlights column `c`
+    // but a raw `c` here would drop it. Bump any concrete end column by 1
+    // to include it; a None (full-width) end already maps to `width`.
+    let col_hi = col_hi.map(|c| c as usize + 1).unwrap_or(width);
     let mut lines: Vec<String> = Vec::new();
 
     let offsets = &session.line_offsets;
