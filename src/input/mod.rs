@@ -540,6 +540,50 @@ fn find_segment_at_visual(seg_vis: &[usize], target_visual: usize) -> usize {
     seg_vis.len().saturating_sub(1)
 }
 
+/// Render a text chunk for display, expanding tabs to `TAB_WIDTH` spaces.
+/// Returns a borrowed slice when there are no tabs so the common no-tab
+/// case avoids allocating a new String per span.
+fn render_tab(s: &str) -> std::borrow::Cow<'_, str> {
+    if s.contains('\t') {
+        std::borrow::Cow::Owned(s.replace('\t', "    "))
+    } else {
+        std::borrow::Cow::Borrowed(s)
+    }
+}
+
+/// Byte offset of the `\n`-segment containing byte offset `cursor`, i.e. the
+/// byte right after the previous `\n` (or 0 for the first segment).
+fn byte_at_line_start(cursor: usize, buffer: &str) -> usize {
+    buffer[..cursor].rfind('\n').map(|i| i + 1).unwrap_or(0)
+}
+
+/// Visual position `(line_index_within_segment, display_column)` of the
+/// cursor at byte offset `text_before.len()` inside a segment whose
+/// wrapped lines each start with `prompt_width` columns of prefix.
+fn segment_cursor_position(
+    text_before: &str,
+    prompt_width: usize,
+    inner_w: usize,
+) -> (usize, usize) {
+    let mut vi = 0usize;
+    let mut col = prompt_width;
+    let mut line_w = prompt_width;
+    for (_, ch) in text_before.char_indices() {
+        let cw = char_width(ch);
+        if line_w + cw > inner_w {
+            vi += 1;
+            line_w = prompt_width;
+        }
+        line_w += cw;
+        col = line_w;
+    }
+    if col >= inner_w {
+        vi += 1;
+        col = prompt_width;
+    }
+    (vi, col)
+}
+
 fn render_input_scrollbar(
     area: Rect,
     buf: &mut Buffer,
@@ -625,6 +669,8 @@ pub fn render(area: Rect, buf: &mut Buffer, app: &mut crate::app::App) {
 
     let prompt = " ".to_string();
     let prompt_width = UnicodeWidthStr::width(prompt.as_str());
+    // Padding for wrapped continuation lines (reused across segments).
+    let pad_line = " ".repeat(prompt_width);
     let buffer = &app.input.buffer;
     let cursor = app.input.cursor.min(buffer.len());
     let cursor_line_idx = buffer[..cursor].chars().filter(|&c| c == '\n').count();
@@ -699,9 +745,24 @@ pub fn render(area: Rect, buf: &mut Buffer, app: &mut crate::app::App) {
     }
     let end_line = end_line.min(all_lines.len().max(1));
 
-    let mut visual_lines: Vec<Line<'static>> = Vec::new();
-    // Map each (\n-segment, visual_line_within_segment) -> global visual line index
-    let mut seg_visual_starts: Vec<usize> = Vec::new(); // per segment: first global visual line
+    let mut visual_lines = Vec::new();
+    // Map each (\n-segment) -> global visual line index (first visual line
+    // of that segment). Computed for all segments; used both to render the
+    // visible window and to translate the cursor to a screen position.
+    let mut seg_visual_starts: Vec<usize> = Vec::new();
+    let mut global_visual = 0usize;
+    for &v in seg_vis.iter() {
+        seg_visual_starts.push(global_visual);
+        global_visual += v;
+    }
+    // Cursor's visual position within its segment, computed once here and
+    // reused for scroll positioning and screen translation below.
+    let cursor_vi = {
+        let cursor_line = all_lines[cursor_line_idx];
+        let text_before = &cursor_line[..cursor - byte_at_line_start(cursor, buffer)];
+        segment_cursor_position(text_before, prompt_width, inner_w).0
+    };
+
     let mut byte_pos = 0usize;
     for (idx, text) in all_lines.iter().enumerate() {
         let line_start = byte_pos;
@@ -711,7 +772,6 @@ pub fn render(area: Rect, buf: &mut Buffer, app: &mut crate::app::App) {
         if idx < start_line || idx >= end_line {
             continue;
         }
-        seg_visual_starts.push(visual_lines.len());
 
         // Manually split this segment into visual lines
         let mut text_byte_offset = 0usize;
@@ -734,22 +794,18 @@ pub fn render(area: Rect, buf: &mut Buffer, app: &mut crate::app::App) {
             let chunk = &remaining[..split_at];
             text_byte_offset += split_at;
 
-            let mut spans: Vec<Span<'static>> = Vec::new();
+            let mut spans: Vec<Span<'_>> = Vec::new();
             // Prompt prefix only on first visual line of each segment
             if is_first {
                 spans.push(Span::styled(prompt.clone(), Theme::bold()));
             } else {
-                spans.push(Span::raw(" ".repeat(prompt_width)));
+                // Continuation lines use `prompt_width` spaces of padding.
+                spans.push(Span::raw(pad_line.clone()));
             }
             // Compute byte ranges for this chunk in absolute buffer coordinates
             let chunk_abs_start = line_start + text_byte_offset - split_at;
             let chunk_abs_end = line_start + text_byte_offset;
             let chunk_len = chunk.len();
-
-            // Replace tabs with spaces for display only (terminal renders \t
-            // at its own tab stop, breaking width alignment). The chunk is
-            // still indexed by original buffer byte offsets for cursor/selection.
-            let render = |s: &str| s.replace('\t', "    ");
 
             // Selection handling
             if let Some((s, e)) = app.input.selection {
@@ -759,29 +815,29 @@ pub fn render(area: Rect, buf: &mut Buffer, app: &mut crate::app::App) {
                 let local_start = sel_start - chunk_abs_start;
                 let local_end = sel_end - chunk_abs_start;
                 if local_start > 0 {
-                    spans.push(Span::raw(render(&chunk[..local_start])));
+                    spans.push(Span::raw(render_tab(&chunk[..local_start])));
                 }
                 if local_start < local_end {
                     spans.push(Span::styled(
-                        render(&chunk[local_start..local_end]),
+                        render_tab(&chunk[local_start..local_end]),
                         Theme::reversed(),
                     ));
                 }
                 if local_end < chunk_len {
-                    spans.push(Span::raw(render(&chunk[local_end..])));
+                    spans.push(Span::raw(render_tab(&chunk[local_end..])));
                 }
             } else if cursor >= chunk_abs_start && cursor <= chunk_abs_end {
                 let local = cursor - chunk_abs_start;
                 if local > 0 {
-                    spans.push(Span::raw(render(&chunk[..local])));
+                    spans.push(Span::raw(render_tab(&chunk[..local])));
                 }
                 // Hardware cursor (shown via \x1B[?25h) handles the
                 // visual cursor; no block character needed.
                 if local < chunk_len {
-                    spans.push(Span::raw(render(&chunk[local..])));
+                    spans.push(Span::raw(render_tab(&chunk[local..])));
                 }
             } else {
-                spans.push(Span::raw(render(chunk)));
+                spans.push(Span::raw(render_tab(chunk)));
             }
             visual_lines.push(Line::from(spans));
         }
@@ -800,48 +856,21 @@ pub fn render(area: Rect, buf: &mut Buffer, app: &mut crate::app::App) {
         }
     }
 
-    // Cursor position: find which visual_line the cursor is on
+    // Cursor position: translate the precomputed segment + in-segment
+    // visual position to a screen location, offset by the visible window.
     {
-        let mut cursor_vis = 0usize;
-        let mut cursor_col = 0u16;
-        let mut found = false;
-        byte_pos = 0usize;
-        for (idx, text) in all_lines.iter().enumerate() {
-            let line_start = byte_pos;
-            let line_end = line_start + text.len();
-            byte_pos = line_end + 1;
-            if cursor < line_start || cursor > line_end {
-                continue;
-            }
-            // cursor is in this segment
-            let text_before = &text[..cursor - line_start];
-            let mut vi = 0usize;
-            cursor_col = prompt_width as u16;
-            let mut line_w = prompt_width;
-            for (_, ch) in text_before.char_indices() {
-                let cw = char_width(ch);
-                if line_w + cw > inner_w {
-                    vi += 1;
-                    line_w = prompt_width;
-                }
-                line_w += cw;
-                cursor_col = line_w as u16;
-            }
-            if cursor_col as usize >= inner_w {
-                vi += 1;
-                cursor_col = prompt_width as u16;
-            }
-            // Count visual lines from all earlier visible segments
-            let mut vis_before = 0usize;
-
-            for visible in seg_vis.iter().take(idx.min(end_line)).skip(start_line) {
-                vis_before += *visible;
-            }
-            cursor_vis = vis_before + vi;
-            found = true;
-            break;
-        }
-        if found {
+        let cursor_seg = seg_visual_starts.get(cursor_line_idx).copied().unwrap_or(0);
+        let start_seg = seg_visual_starts.first().copied().unwrap_or(0);
+        let cursor_vis = cursor_seg
+            .saturating_add(cursor_vi)
+            .saturating_sub(start_seg);
+        let cursor_col = segment_cursor_position(
+            &all_lines[cursor_line_idx][..cursor - byte_at_line_start(cursor, buffer)],
+            prompt_width,
+            inner_w,
+        )
+        .1 as u16;
+        if cursor_vis < inner.height as usize {
             let cy = inner.y + cursor_vis as u16;
             let cx = inner.x + cursor_col;
             if cy < inner.y + inner.height {
