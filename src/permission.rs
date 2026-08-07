@@ -120,9 +120,9 @@ fn general_sub_agent_rules() -> &'static [(&'static str, Action)] {
         (tool::PYTHON_COMMAND, Action::Allow),
         (tool::GREP, Action::Allow),
         (tool::LIST, Action::Allow),
-        (tool::PLAN, Action::Allow),
-        (tool::ASK, Action::Allow),
-        (tool::TODO_WRITE, Action::Allow),
+        (tool::PLAN, Action::Deny),
+        (tool::ASK, Action::Deny),
+        (tool::TODO_WRITE, Action::Deny),
         (tool::GLOB, Action::Allow),
         (tool::WRITE, Action::Allow),
         (tool::SKILL, Action::Allow),
@@ -150,7 +150,6 @@ fn explore_sub_agent_rules() -> &'static [(&'static str, Action)] {
         (tool::WEB_FETCH, Action::Allow),
         (tool::WEB_SEARCH, Action::Allow),
         (tool::SUB_AGENT, Action::Deny),
-        (tool::UPDATE_TITLE, Action::Allow),
     ]
 }
 
@@ -350,6 +349,16 @@ mod tests {
         assert_eq!(
             check_sub_agent(SubAgent::General, tool::SHELL_COMMAND),
             Action::Allow
+        );
+    }
+
+    #[test]
+    fn general_denies_interaction_and_global_tools() {
+        assert_eq!(check_sub_agent(SubAgent::General, tool::PLAN), Action::Deny);
+        assert_eq!(check_sub_agent(SubAgent::General, tool::ASK), Action::Deny);
+        assert_eq!(
+            check_sub_agent(SubAgent::General, tool::TODO_WRITE),
+            Action::Deny
         );
     }
 }

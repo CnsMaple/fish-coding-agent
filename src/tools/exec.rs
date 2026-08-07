@@ -254,6 +254,7 @@ pub(super) async fn run_shell_streaming_impl(
         .current_dir(cwd)
         .env("PYTHONIOENCODING", "utf-8")
         .env("PYTHONUTF8", "1")
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true)
