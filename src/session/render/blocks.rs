@@ -332,7 +332,7 @@ pub(super) fn build_tool_block_rows(
         }
     } else if tool.name == "ask" {
         vec![]
-    } else if tool.name == "plan" {
+    } else if tool.name == "plan" || tool.name == "sub_agent" {
         let (output, footer) = tool_display_content(tool);
         build_markdown_block_rows(
             &tool.title,
@@ -1405,6 +1405,11 @@ fn tool_display_content(tool: &ToolResultBlock) -> (String, String) {
             return (body, footer);
         }
     }
+    if tool.name == "sub_agent" {
+        if let Some(body) = sub_agent_tool_display(&tool.content) {
+            return (body, String::new());
+        }
+    }
     if tool.name == "update_title" {
         if let Some(title) = update_title_display(&tool.content) {
             return (title, String::new());
@@ -1450,6 +1455,18 @@ fn plan_tool_display(content: &str) -> Option<(String, String)> {
         _ => "↳ approve / reject in the plan tab".to_string(),
     };
     Some((rendered, footer))
+}
+
+/// Render a `sub_agent` tool result in the session. The sub-agent's
+/// final text reply is Markdown, so it is unwrapped from the
+/// `{"ok":true,"result":"…"}` envelope and returned for Markdown block
+/// rendering (headings, lists, tables, code blocks).
+fn sub_agent_tool_display(content: &str) -> Option<String> {
+    let inner = crate::session::unwrap_tool_result_content(content);
+    if inner.is_empty() {
+        return None;
+    }
+    Some(inner.trim().to_string())
 }
 
 fn update_title_display(content: &str) -> Option<String> {
