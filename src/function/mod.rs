@@ -256,6 +256,13 @@ pub struct App {
     /// streaming, while still providing smooth enough visual updates.
     pub last_thinking_flush: std::time::Instant,
 
+    /// Last wall-clock time a periodic autosave ran. During streaming the
+    /// main loop tick persists the session every ~5s so a crash mid-output
+    /// loses at most a few seconds of the in-flight response instead of the
+    /// whole last turn. Constant-time check (compare elapsed) so it adds no
+    /// per-frame cost.
+    pub last_autosave: std::time::Instant,
+
     /// Whether the agents.md splash area is visible (new session, no input yet).
     pub agents_visible: bool,
     /// Cursor position in the agents checkbox list.
@@ -410,6 +417,7 @@ impl App {
             pending_chat_content: String::new(),
             pending_thinking_content: String::new(),
             last_thinking_flush: std::time::Instant::now(),
+            last_autosave: std::time::Instant::now(),
             agents_visible: true,
             agents_cursor: 0,
             load_duration,
@@ -730,6 +738,15 @@ impl App {
                     line_offsets: Vec::new(),
                     pending_scroll_top: None,
                 };
+                // A snapshot saved mid-stream may carry `streaming: true`
+                // on the last assistant message (autosave/quit fallback).
+                // There is no live stream after resume, so clear the flag
+                // and reveal the full content — otherwise the renderer
+                // would truncate at `display_cursor`.
+                for m in &mut self.session.messages {
+                    m.streaming = false;
+                    m.display_cursor = m.content.len();
+                }
                 self.image_blocks.clear();
                 self.session.invalidate_layout_cache();
                 if !stored.todo_items.is_empty() {
@@ -842,6 +859,13 @@ impl App {
                     line_offsets: Vec::new(),
                     pending_scroll_top: None,
                 };
+                // See resume_session: a mid-stream snapshot may have left
+                // `streaming` set; clear it so the forked session renders
+                // fully and is not treated as having a live stream.
+                for m in &mut self.session.messages {
+                    m.streaming = false;
+                    m.display_cursor = m.content.len();
+                }
                 if let Some(ref p) = stored.provider {
                     self.status.set_provider_name(p);
                 }

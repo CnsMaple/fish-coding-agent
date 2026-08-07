@@ -57,6 +57,7 @@ fn make_app() -> App {
         model_cache: crate::function::notifications::ModelCache::default(),
         hit_rate: crate::function::notifications::HitRate::new(50),
         last_thinking_flush: std::time::Instant::now(),
+        last_autosave: std::time::Instant::now(),
         token_rate: crate::function::notifications::TokenRate::new(50),
         response_started_at: None,
         response_accumulated: std::time::Duration::ZERO,

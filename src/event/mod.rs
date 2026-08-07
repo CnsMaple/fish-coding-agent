@@ -374,6 +374,19 @@ where
                             last_status_refresh = std::time::Instant::now();
                             needs_draw = true;
                         }
+                        // Periodic autosave while a response is streaming:
+                        // persist the session every ~5s so an abnormal exit
+                        // (crash / kill / Ctrl+C hard quit) mid-output loses
+                        // at most a few seconds instead of the whole last turn.
+                        // Flush pending content into the session first so the
+                        // on-disk snapshot includes the latest tokens.
+                        if app.inflight.is_some()
+                            && app.last_autosave.elapsed() >= Duration::from_secs(5)
+                        {
+                            flush_pending_chat(app, false);
+                            app.save_current_session();
+                            app.last_autosave = std::time::Instant::now();
+                        }
                     }
                 }
 
@@ -389,6 +402,11 @@ where
         }
 
         if app.should_quit {
+            // Persist any buffered content and the session one final time
+            // before exiting, so a normal quit (Ctrl+Q) mid-stream still
+            // lands the user message and in-flight response on disk.
+            flush_pending_chat(app, true);
+            app.save_current_session();
             break;
         }
     }
