@@ -45,6 +45,11 @@ pub struct InputState {
     pub cursor: usize, // byte index
     pub history: Vec<String>,
     pub history_idx: Option<usize>,
+    /// Draft of the buffer preserved when the user first starts browsing
+    /// history (Up). Restored when they navigate back to the newest entry
+    /// (Down) instead of being cleared, so an unsent draft survives a
+    /// history round-trip.
+    pub history_draft: String,
     /// Whether we are actively editing a model id in /model picker.
     pub busy_hint: Option<String>,
     /// Active text selection within the buffer (byte indices, end exclusive).
@@ -65,6 +70,7 @@ impl InputState {
             cursor: 0,
             history: Vec::new(),
             history_idx: None,
+            history_draft: String::new(),
             busy_hint: None,
             selection: None,
             undo_stack: VecDeque::new(),
@@ -180,6 +186,7 @@ impl InputState {
         let v = std::mem::take(&mut self.buffer);
         self.cursor = 0;
         self.history_idx = None;
+        self.history_draft.clear();
         if !v.trim().is_empty() {
             self.history.push(v.clone());
             if self.history.len() > 200 {
@@ -460,7 +467,12 @@ impl InputState {
             return;
         }
         let idx = match self.history_idx {
-            None => self.history.len() - 1,
+            None => {
+                // First Up press: stash the current draft so it can be
+                // restored when navigating back down.
+                self.history_draft = self.buffer.clone();
+                self.history.len() - 1
+            }
             Some(0) => return,
             Some(i) => i - 1,
         };
@@ -474,8 +486,11 @@ impl InputState {
             None => return,
             Some(i) if i + 1 >= self.history.len() => {
                 self.history_idx = None;
-                self.buffer.clear();
-                self.cursor = 0;
+                // Restore the draft captured on the first Up press
+                // instead of clearing, so an unsent draft survives a
+                // history round-trip.
+                self.buffer = std::mem::take(&mut self.history_draft);
+                self.cursor = self.buffer.len();
                 return;
             }
             Some(i) => i + 1,
