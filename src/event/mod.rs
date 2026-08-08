@@ -793,6 +793,14 @@ fn handle_msg(msg: AppMsg, app: &mut App) {
             if name == "update_title" {
                 handle_update_title_result(app, &content);
             }
+            // Flush any buffered text deltas into the session BEFORE
+            // creating/updating the tool block. The Cursor inline-exec
+            // path delivers tool results via `ChatToolResult` while the
+            // preceding text may still sit in `pending_chat_content`; if
+            // we don't flush first, `content_offset` is captured from the
+            // old (shorter) content and the tool box lands mis-placed
+            // relative to the text that precedes it.
+            flush_pending_chat(app, true);
             open_tool_function_panel(app, &name, &content);
             app.session
                 .update_last_tool_content(name, title, content, call_id, metadata, failed);

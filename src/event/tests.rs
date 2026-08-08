@@ -2245,6 +2245,91 @@ fn direct_tool_input_also_uses_pending() {
 }
 
 #[test]
+fn inline_tool_result_flushes_pending_text_before_anchoring() {
+    // Regression for the Cursor inline-exec path: a tool result
+    // (`ChatToolResult`) can arrive while the preceding model text is
+    // still buffered in `pending_chat_content`. The handler must flush
+    // that text into the session BEFORE creating/updating the tool
+    // block, so `content_offset` points past the text that precedes
+    // the tool — otherwise the tool box lands before (or glued to) the
+    // text it should follow.
+    let mut app = chat_app();
+    app.session.push(crate::session::Message::new(
+        crate::session::Role::User,
+        "run the checks",
+    ));
+    app.session.push(crate::session::Message::new(
+        crate::session::Role::Assistant,
+        "",
+    ));
+    app.session.streaming_id = Some(1);
+
+    // Model streams text, but it's still buffered (approx. mid-frame).
+    handle_msg(
+        AppMsg::ChatDelta("测试全部通过。让我确认测试最终汇总行".to_string()),
+        &mut app,
+    );
+    assert!(
+        app.pending_chat_content.contains("测试全部通过"),
+        "text should still be pending before the tool result arrives"
+    );
+
+    // A Cursor inline exec tool result arrives.
+    handle_msg(
+        AppMsg::ChatToolResult {
+            name: "shell_command".to_string(),
+            title: "$ cargo test".to_string(),
+            content: "ok".to_string(),
+            metadata: String::new(),
+            call_id: String::new(),
+            failed: false,
+        },
+        &mut app,
+    );
+
+    let asst = &app.session.messages[1];
+    // The pending text must have been flushed into content BEFORE the
+    // tool block was anchored, so the tool offset points after the text.
+    assert!(
+        asst.content.contains("测试全部通过"),
+        "pending text must be flushed before the tool block is anchored"
+    );
+    assert_eq!(asst.tool_results.len(), 1, "one tool block expected");
+    let tool = &asst.tool_results[0];
+    assert_eq!(
+        tool.content_offset,
+        asst.content.len(),
+        "tool content_offset must anchor past the preceding text"
+    );
+    // And the content must not glue the tool to the text (trailing \n).
+    assert!(
+        asst.content.ends_with('\n'),
+        "tool block must be separated from preceding text by a newline, got {:?}",
+        asst.content
+    );
+
+    // Trailing text after the tool must come after the tool's offset.
+    handle_msg(
+        AppMsg::ChatDelta("\n\n全部通过。检查结果".to_string()),
+        &mut app,
+    );
+    flush_pending_chat(&mut app, true);
+    let asst = &app.session.messages[1];
+    assert!(
+        asst.content.contains("全部通过。检查结果"),
+        "trailing text must be appended after the tool offset"
+    );
+    assert!(
+        asst.content.find("测试全部通过").unwrap() < asst.tool_results[0].content_offset
+            && asst.tool_results[0].content_offset
+                <= asst.content.find("全部通过。检查结果").unwrap(),
+        "tool offset ({}) must sit between the leading and trailing text ({:?})",
+        asst.tool_results[0].content_offset,
+        asst.content
+    );
+}
+
+#[test]
 fn flush_pending_request_is_noop_when_empty() {
     // Sanity: calling `flush_pending_request` with nothing
     // staged must be a cheap no-op and must not crash.

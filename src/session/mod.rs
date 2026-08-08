@@ -732,6 +732,12 @@ impl Session {
         if let Some(id) = self.streaming_id {
             if let Some(m) = self.messages.get_mut(id) {
                 m.close_open_thinking();
+                // Break away from preceding text so the tool box is its
+                // own block (text before it on one line, nothing glued).
+                if !m.content.is_empty() && !m.content.ends_with('\n') {
+                    m.content.push('\n');
+                    m.line_count = m.content.split('\n').count().max(1) as u32;
+                }
                 let content_offset = m.content.len();
                 let visible = name == "plan" || self.expand_new_tool_results;
                 m.tool_results.push(ToolResultBlock::new(
@@ -775,6 +781,10 @@ impl Session {
                     m.invalidate_render_caches();
                     self.invalidate_layout_cache();
                     return;
+                }
+                if !m.content.is_empty() && !m.content.ends_with('\n') {
+                    m.content.push('\n');
+                    m.line_count = m.content.split('\n').count().max(1) as u32;
                 }
                 let content_offset = m.content.len();
                 let visible = name == "plan" || self.expand_new_tool_results;
@@ -848,6 +858,10 @@ impl Session {
                     tool.cached_line_count_collapsed = None;
                 } else {
                     m.close_open_thinking();
+                    if !m.content.is_empty() && !m.content.ends_with('\n') {
+                        m.content.push('\n');
+                        m.line_count = m.content.split('\n').count().max(1) as u32;
+                    }
                     let content_offset = m.content.len();
                     let visible = name == "plan" || self.expand_new_tool_results;
                     m.tool_results.push(ToolResultBlock::new(
