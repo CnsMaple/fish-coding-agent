@@ -382,15 +382,14 @@ pub fn build_message_lines(
         if tool.content.is_empty() && tool.streaming_input.is_empty() && tool.title.is_empty() {
             continue;
         }
-        let offset = clamp_char_boundary(raw, tool.content_offset.min(raw.len()));
-        // Clamp a tool that was anchored beyond the current content
-        // length back to the end of the content so it renders in the
-        // right visual order and does not create a bogus gap for
-        // content that no longer exists.
-        let offset = offset.min(raw.len());
-        // Advance to next word boundary so tool block doesn't split
-        // a word across the text-before / text-after boundary.
-        let offset = advance_to_word_boundary(raw, offset);
+        // Tools always render AFTER all content text (and any thinking
+        // blocks), so that when text and tool calls arrive together the
+        // text is fully rendered first and the tool boxes are shown
+        // together at the end. Anchoring to the end of content also
+        // avoids splitting a sentence mid-word when a stale/corrupt
+        // `content_offset` falls inside a line (the exact bug that
+        // merged paragraphs and stacked tool boxes in the same line).
+        let offset = raw.len();
         items.push(RenderItem {
             offset,
             kind: RenderItemKind::Tool(ti),
@@ -591,23 +590,34 @@ pub(crate) fn count_block_gaps(
     width: usize,
     thinking_segments: &[super::ThinkingSegment],
     tool_results: &[super::ToolResultBlock],
+    show_thinking: bool,
+    show_tools: bool,
 ) -> u32 {
-    let mut offsets: Vec<usize> = thinking_segments
-        .iter()
-        .map(|s| {
-            let off = clamp_char_boundary(content, s.offset.min(content.len()));
-            advance_to_word_boundary(content, off)
-        })
-        .chain(
+    // Only blocks that would actually be rendered by `build_message_lines`
+    // contribute gaps. Hidden thinking/tool blocks are skipped entirely
+    // (their row count is not added to the total either), so counting a
+    // gap for them would over-count.
+    let mut offsets: Vec<usize> = if show_thinking {
+        thinking_segments
+            .iter()
+            .map(|s| {
+                let off = clamp_char_boundary(content, s.offset.min(content.len()));
+                advance_to_word_boundary(content, off)
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    if show_tools {
+        offsets.extend(
             tool_results
                 .iter()
                 .filter(|t| has_renderable_content(t))
-                .map(|t| {
-                    let off = clamp_char_boundary(content, t.content_offset.min(content.len()));
-                    advance_to_word_boundary(content, off)
-                }),
-        )
-        .collect();
+                // Tool blocks render after all content (see
+                // `build_message_lines`), so they anchor at the end.
+                .map(|_| content.len()),
+        );
+    }
     offsets.sort();
     let mut gaps: u32 = 0;
     let mut cursor: usize = 0;

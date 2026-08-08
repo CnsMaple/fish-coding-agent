@@ -250,16 +250,14 @@ pub fn content_line_count_segmented(
             kind: ItemKind::Thinking,
         });
     }
-    for tool in tool_results.iter() {
-        let offset = clamp_char_boundary(raw, tool.content_offset.min(raw.len()));
-        let offset = advance_to_word_boundary(raw, offset);
-        items.push(Item {
-            offset,
-            kind: ItemKind::Tool,
-        });
-    }
-    // Sort by offset; stable sort keeps thinking before tools at the
-    // same offset, matching `build_message_lines`.
+    // Tool blocks are no longer split points: `build_message_lines`
+    // anchors every tool box at the end of the content, so the content
+    // renders as one contiguous run (only thinking segments split it).
+    // Dividing at tool offsets would miscount when a stale/corrupt
+    // `content_offset` falls mid-line.
+    let _ = tool_results;
+    // Sort by offset; stable sort keeps thinking in content order,
+    // matching `build_message_lines`.
     items.sort_by(|a, b| a.offset.cmp(&b.offset));
 
     let mut cursor = 0usize;
