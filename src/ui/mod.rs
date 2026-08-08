@@ -237,12 +237,11 @@ fn collect_toggle_blocks(
                 crate::session::render::attachment_block_line_count(&m.attachments) as usize;
         }
 
-        // ── Interleave content + thinking blocks by offset ─
-        // Mirrors build_message_lines: thinking blocks are placed by
-        // their offsets, content renders between them, but ALL tool
-        // blocks render after the complete content text (and after
-        // every thinking block). This keeps the tool boxes together
-        // at the end so text is never split by a mid-line tool offset.
+        // ── Interleave content + thinking/tool blocks by offset ─
+        // Mirrors build_message_lines: items sorted by offset (with
+        // the same tiebreaker), content rendered between items,
+        // ensure_gap_before_block before each block, trailing blank
+        // after each block.
         let raw = if m.streaming {
             m.visible_content()
         } else {
@@ -254,7 +253,7 @@ fn collect_toggle_blocks(
             && config.thinking_display != crate::config::ThinkingDisplay::Hide;
         let tool_show = config.tool_display != crate::config::ToolResultDisplay::Hide;
 
-        // Build sorted thinking items matching build_message_lines.
+        // Build sorted items matching build_message_lines.
         enum WalkItem {
             Thinking(usize),
             Tool(usize),
@@ -269,20 +268,39 @@ fn collect_toggle_blocks(
                 items.push((offset, WalkItem::Thinking(si)));
             }
         }
-        // Tools anchor at the end of content (matching build_message_lines).
         if tool_show {
             for (ti, t) in m.tool_results.iter().enumerate() {
                 if t.content.is_empty() && t.streaming_input.is_empty() {
                     continue;
                 }
-                items.push((raw.len(), WalkItem::Tool(ti)));
+                let offset = crate::session::render::clamp_char_boundary(
+                    raw,
+                    t.content_offset.min(raw.len()),
+                );
+                let offset = offset.min(raw.len());
+                let offset = crate::session::render::advance_to_word_boundary(raw, offset);
+                items.push((offset, WalkItem::Tool(ti)));
             }
         }
-        // Sort by offset; tools at the end render after thinking blocks.
+        // Sort by offset with the same tiebreaker as build_message_lines.
         items.sort_by(|(off_a, a), (off_b, b)| {
             off_a.cmp(off_b).then_with(|| match (a, b) {
-                (WalkItem::Tool(_), WalkItem::Thinking(_)) => std::cmp::Ordering::Greater,
-                (WalkItem::Thinking(_), WalkItem::Tool(_)) => std::cmp::Ordering::Less,
+                (WalkItem::Tool(ti), WalkItem::Thinking(si)) => {
+                    let seg = &m.thinking_segments[*si];
+                    if *ti >= seg.tool_results_len_at_open {
+                        std::cmp::Ordering::Greater
+                    } else {
+                        std::cmp::Ordering::Less
+                    }
+                }
+                (WalkItem::Thinking(si), WalkItem::Tool(ti)) => {
+                    let seg = &m.thinking_segments[*si];
+                    if *ti >= seg.tool_results_len_at_open {
+                        std::cmp::Ordering::Less
+                    } else {
+                        std::cmp::Ordering::Greater
+                    }
+                }
                 _ => std::cmp::Ordering::Equal,
             })
         });

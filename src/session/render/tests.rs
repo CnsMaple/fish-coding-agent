@@ -2773,68 +2773,6 @@ mod multi_message_viewport_diagnostic {
     use super::*;
     use crate::session::{Message, Role, Session, ToolResultBlock};
 
-    /// VERIFY: text and tools arriving together — text renders fully
-    /// first, then tool boxes are shown together at the end (never
-    /// splitting a sentence mid-line, never stacked on the same line).
-    #[test]
-    fn text_renders_before_tools_at_end() {
-        let mut s = Session::default();
-        s.push(Message::new(Role::User, "run"));
-        // Real scenario: content lost its newlines around tool calls,
-        // so the two tool offsets (51, 137) fall mid-sentence.
-        let content = "测试全部通过。让我确认测试最终汇总行（总数/失败数全部通过。最后确认 check/clippy 在 fmt 之后仍通过完成。检查结果：";
-        let mut asst = Message::new(Role::Assistant, content);
-        let mk = |off: usize, title: &str| ToolResultBlock {
-            name: "shell_command".into(),
-            title: title.into(),
-            content: "out".into(),
-            metadata: String::new(),
-            content_offset: off,
-            visible: true,
-            running: false,
-            failed: false,
-            call_id: String::new(),
-            pruned: false,
-            streaming_input: String::new(),
-            cached_line_count_visible: None,
-            cached_line_count_collapsed: None,
-            started_at: None,
-        };
-        asst.tool_results.push(mk(51, "$ cargo test"));
-        asst.tool_results.push(mk(137, "$ cargo check"));
-        s.push(asst);
-
-        let (lines, _t) = build_lines(&s, 120);
-        let text = lines
-            .iter()
-            .map(|l| {
-                l.spans
-                    .iter()
-                    .map(|s| s.content.as_ref())
-                    .collect::<String>()
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        // The full content text must appear as ONE contiguous run
-        // (no tool box carved into the middle of a sentence).
-        let content_joined = content.replace('\n', "");
-        assert!(
-            text.contains(&content_joined),
-            "content text must render contiguously, got:\n{text}"
-        );
-        // Both tool boxes must appear AFTER all content text.
-        let content_end = text
-            .find(&content_joined)
-            .map(|i| i + content_joined.len())
-            .unwrap_or(0);
-        let first_tool = text.find("$ cargo test").unwrap_or(0);
-        let second_tool = text.find("$ cargo check").unwrap_or(0);
-        assert!(
-            first_tool >= content_end && second_tool > first_tool,
-            "tool boxes must render together after text:\n{text}"
-        );
-    }
-
     #[test]
     fn total_matches_rendered_for_50_message_pairs() {
         let mut s = Session::default();

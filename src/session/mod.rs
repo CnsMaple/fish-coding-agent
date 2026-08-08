@@ -1373,11 +1373,6 @@ impl Session {
             // caching lets every *other* message reuse its previous gap
             // count instead of re-parsing full Markdown on every layout
             // pass — the dominant cost in long sessions.
-            // `show_thinking`/`show_tools` mirror the conditions under
-            // which `build_message_lines` actually renders these blocks
-            // (see the thinking/tool blocks sections above), so gap
-            // counting only accounts for blocks that are visible.
-            let show_tools = self.tool_display != crate::config::ToolResultDisplay::Hide;
             let gap_count = if let Some(c) = m.cached_gap_count {
                 if c.width == width
                     && c.content_version == m.content_version
@@ -1391,8 +1386,6 @@ impl Session {
                         width as usize,
                         &segments,
                         &m.tool_results,
-                        show_thinking,
-                        show_tools,
                     );
                     m.cached_gap_count = Some(CachedGapCount {
                         width,
@@ -1409,8 +1402,6 @@ impl Session {
                     width as usize,
                     &segments,
                     &m.tool_results,
-                    show_thinking,
-                    show_tools,
                 );
                 m.cached_gap_count = Some(CachedGapCount {
                     width,
@@ -1529,11 +1520,7 @@ impl Session {
     /// tool block in the message's rendered output. This includes
     /// content segments before the tool, leading gaps, and any
     /// thinking/tool blocks that sort before it.
-    ///
-    /// Tool blocks render after ALL content text and thinking blocks
-    /// (see `build_message_lines`), so the offset of `tool_idx` is the
-    /// sum of: content lines + every thinking block (rows + trailing
-    /// blank) + the leading gap(s) + the lines of every earlier tool.
+    #[allow(unused_assignments)]
     fn tool_line_offset_within_message(&self, msg_idx: usize, tool_idx: usize, width: u16) -> u32 {
         let Some(m) = self.messages.get(msg_idx) else {
             return 0;
@@ -1549,82 +1536,130 @@ impl Session {
         }
 
         let raw = m.visible_content();
-        use crate::session::render::{count_md_segment, strip_legacy_markers};
+        use crate::session::render::{clamp_char_boundary, count_md_segment, strip_legacy_markers};
 
-        // Content renders as one contiguous run now (tools no longer
-        // split it). Book-keeping matches `build_message_lines`.
+        // Build sorted items matching build_message_lines.
+        enum Item {
+            Thinking(usize),
+            Tool(usize),
+        }
+        let mut items: Vec<(usize, Item)> = Vec::new();
+        let segments = crate::session::render::get_thinking_segments(m);
+        for (si, seg) in segments.iter().enumerate() {
+            let offset = clamp_char_boundary(raw, seg.offset.min(raw.len()));
+            items.push((offset, Item::Thinking(si)));
+        }
+        for (ti, t) in m.tool_results.iter().enumerate() {
+            if t.content.is_empty() && t.streaming_input.is_empty() && t.title.is_empty() {
+                continue;
+            }
+            let offset = clamp_char_boundary(raw, t.content_offset.min(raw.len()));
+            items.push((offset, Item::Tool(ti)));
+        }
+        // Sort with the same tiebreaker as build_message_lines.
+        items.sort_by(|(off_a, a), (off_b, b)| {
+            off_a.cmp(off_b).then_with(|| match (a, b) {
+                (Item::Tool(ti), Item::Thinking(si)) => {
+                    let seg = &segments[*si];
+                    if *ti >= seg.tool_results_len_at_open {
+                        std::cmp::Ordering::Greater
+                    } else {
+                        std::cmp::Ordering::Less
+                    }
+                }
+                (Item::Thinking(si), Item::Tool(ti)) => {
+                    let seg = &segments[*si];
+                    if *ti >= seg.tool_results_len_at_open {
+                        std::cmp::Ordering::Less
+                    } else {
+                        std::cmp::Ordering::Greater
+                    }
+                }
+                _ => std::cmp::Ordering::Equal,
+            })
+        });
+
         let mut line_count: u32 = 0;
+        let mut cursor: usize = 0;
+        let mut prev_blank = false;
+        let mut has_lines = false;
+        let _ = prev_blank;
 
         // User messages: a blank padding line is inserted at the top.
         if m.role == crate::session::Role::User {
             line_count += 1;
+            prev_blank = true;
+            has_lines = true;
         }
 
-        // 1. All content lines (tools no longer create split points).
-        let content_text = strip_legacy_markers(raw);
-        line_count += count_md_segment(&content_text, width as usize);
-
-        // 2. Thinking blocks render interleaved by their offsets; each
-        //    is followed by a trailing blank, and a leading gap is
-        //    inserted before the first block when content precedes it.
-        let segments = crate::session::render::get_thinking_segments(m);
-        let show_thinking = crate::session::render::message_has_thinking(m)
-            && self.display != crate::config::ThinkingDisplay::Hide;
-        let thinking_blocks: u32 = if show_thinking {
-            let mut count = 0;
-            for seg in &segments {
-                let expanded = (self.display == crate::config::ThinkingDisplay::Show
-                    && m.thinking_visible)
-                    || (self.display == crate::config::ThinkingDisplay::ShowWhileStreaming
-                        && (m.streaming || m.thinking_visible));
-                let lines = if expanded {
-                    seg.cached_line_count_expanded.unwrap_or(0)
-                } else {
-                    seg.cached_line_count_collapsed.unwrap_or(0)
-                };
-                line_count += lines + 1; // rows + trailing blank
-                count += 1;
+        for (offset, item) in &items {
+            let offset = *offset;
+            if offset < cursor {
+                continue;
             }
-            count
-        } else {
-            0
-        };
-        if thinking_blocks > 0 && crate::session::render::message_has_thinking(m) {
-            // A leading gap precedes the first thinking block when
-            // content text above it renders non-empty.
-            if count_md_segment(&content_text, width as usize) > 0 {
+
+            // Content before this item.
+            if offset > cursor {
+                let seg_text = strip_legacy_markers(&raw[cursor..offset]);
+                let seg_lines = count_md_segment(&seg_text, width as usize);
+                line_count += seg_lines;
+                cursor = offset;
+                has_lines = true;
+                // A non-empty content segment ends with a non-blank line,
+                // so the next block needs a leading gap.
+                prev_blank = false;
+            }
+
+            // ensure_gap_before_block.
+            if has_lines && !prev_blank {
                 line_count += 1;
+                prev_blank = true;
             }
-        }
 
-        // 3. Tools render at the very end, in index order. Sum the
-        //    lines of every tool that precedes `tool_idx`.
-        if self.tool_display != crate::config::ToolResultDisplay::Hide {
-            for (ti, t) in m.tool_results.iter().enumerate() {
-                if t.content.is_empty() && t.streaming_input.is_empty() && t.title.is_empty() {
-                    continue;
-                }
-                if ti == tool_idx {
-                    return line_count;
-                }
-                let t_vis = t.name == "plan"
-                    || match self.tool_display {
-                        crate::config::ToolResultDisplay::Show => t.visible,
-                        crate::config::ToolResultDisplay::ShowWhileStreaming => {
-                            m.streaming || t.visible
-                        }
-                        _ => false,
+            match item {
+                Item::Thinking(si) => {
+                    let seg = &segments[*si];
+                    let expanded = (self.display == crate::config::ThinkingDisplay::Show
+                        && m.thinking_visible)
+                        || (self.display == crate::config::ThinkingDisplay::ShowWhileStreaming
+                            && (m.streaming || m.thinking_visible));
+                    let lines = if expanded {
+                        seg.cached_line_count_expanded.unwrap_or(0)
+                    } else {
+                        seg.cached_line_count_collapsed.unwrap_or(0)
                     };
-                let lines = if t_vis {
-                    t.cached_line_count_visible.unwrap_or(0)
-                } else {
-                    t.cached_line_count_collapsed.unwrap_or(0)
-                };
-                line_count += lines + 1; // rows + trailing blank
+                    line_count += lines;
+                    line_count += 1; // trailing blank
+                    has_lines = true;
+                    prev_blank = true;
+                }
+                Item::Tool(ti) => {
+                    if *ti == tool_idx {
+                        return line_count;
+                    }
+                    let t = &m.tool_results[*ti];
+                    let t_vis = t.name == "plan"
+                        || match self.tool_display {
+                            crate::config::ToolResultDisplay::Show => t.visible,
+                            crate::config::ToolResultDisplay::ShowWhileStreaming => {
+                                m.streaming || t.visible
+                            }
+                            _ => false,
+                        };
+                    let lines = if t_vis {
+                        t.cached_line_count_visible.unwrap_or(0)
+                    } else {
+                        t.cached_line_count_collapsed.unwrap_or(0)
+                    };
+                    line_count += lines;
+                    line_count += 1; // trailing blank
+                    has_lines = true;
+                    prev_blank = true;
+                }
             }
         }
 
-        // Tool not reached (shouldn't happen) — fallback.
+        // Tool not found in the sorted items — return 0 as fallback.
         0
     }
 
