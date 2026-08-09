@@ -8,7 +8,8 @@ use serde_json::json;
 use std::time::Duration;
 
 use super::utils::{
-    is_doom_loop, parse_text_tool_calls, parse_tool_result_display, tool_result_title,
+    detect_repeated_snippet, is_doom_loop, parse_text_tool_calls, parse_tool_result_display,
+    tool_result_title,
 };
 use super::{
     build_agents_content, compact_now, open_settings, system_prompt, system_prompt_dynamic,
@@ -419,6 +420,11 @@ pub async fn run_chat_stream(
     // user is asked to intervene. Matches opencode's
     // `DOOM_LOOP_THRESHOLD`.
     let mut doom_history: Vec<(String, String)> = Vec::new();
+    // Rolling record of recent assistant *text* (the prose emitted before
+    // tool calls). The argument-based doom-loop detector misses a model
+    // that loops by repeating the same sentence every turn while varying
+    // tool args; this detects the repeated text snippet instead.
+    let mut text_history: Vec<String> = Vec::new();
     loop {
         if *cancel_rx.borrow() {
             // Silent exit. We do NOT send `ChatDone` / `ChatError`
@@ -593,6 +599,30 @@ pub async fn run_chat_stream(
         if tool_calls.is_empty() {
             send_msg(crate::event::AppMsg::ChatDone { seq });
             return;
+        }
+
+        // Text-snippet repetition guard: if the assistant has emitted the
+        // same long text snippet across SNIPPET_MIN_COUNT distinct recent
+        // turns, it is stuck in a prose loop (the argument-based doom-loop
+        // detector below cannot catch it because the tool args vary).
+        if !assistant_content.trim().is_empty() {
+            if let Some(snippet) = detect_repeated_snippet(&text_history, &assistant_content) {
+                let display = if snippet.chars().count() > 60 {
+                    let mut it = snippet.chars();
+                    let head: String = it.by_ref().take(60).collect();
+                    format!("{head}…")
+                } else {
+                    snippet.clone()
+                };
+                send_msg(crate::event::AppMsg::ChatWarn(format!(
+                    "repeated assistant text detected ({:?}): `{}`. Pausing for user review.",
+                    snippet.len(),
+                    display
+                )));
+                send_msg(crate::event::AppMsg::ChatDone { seq });
+                return;
+            }
+            text_history.push(assistant_content.clone());
         }
 
         req.messages.push(ChatMessage {
