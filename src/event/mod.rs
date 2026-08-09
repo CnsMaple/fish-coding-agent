@@ -1416,6 +1416,30 @@ async fn handle_key(k: crossterm::event::KeyEvent, app: &mut App) {
         return;
     }
 
+    // Alt+O: switch to loop mode (autonomous).
+    if k.modifiers.contains(KeyModifiers::ALT)
+        && matches!(k.code, KeyCode::Char('o') | KeyCode::Char('O'))
+    {
+        app.set_mode(crate::function::AppMode::Loop);
+        app.notify(
+            crate::function::notifications::ToastLevel::Info,
+            "mode: loop",
+        );
+        return;
+    }
+
+    // Alt+Y: switch to yolo mode.
+    if k.modifiers.contains(KeyModifiers::ALT)
+        && matches!(k.code, KeyCode::Char('y') | KeyCode::Char('Y'))
+    {
+        app.set_mode(crate::function::AppMode::Yolo);
+        app.notify(
+            crate::function::notifications::ToastLevel::Info,
+            "mode: yolo",
+        );
+        return;
+    }
+
     // Alt+L: cycle focus between Input -> FunctionPanel -> AgentsCheckbox -> Input.
     if k.modifiers.contains(KeyModifiers::ALT)
         && matches!(k.code, KeyCode::Char('l') | KeyCode::Char('L'))

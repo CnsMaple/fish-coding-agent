@@ -18,7 +18,7 @@ pub async fn execute_tool_with_agent(
     use crate::permission::{tool as t, Action, Agent};
     if matches!(crate::permission::check(agent, name), Action::Deny) {
         let hint = match agent {
-            Agent::Plan => " (plan mode is read-only; switch to /yolo to edit or run commands)",
+            Agent::Plan => " (plan mode is read-only; switch to yolo mode to edit or run commands)",
             _ => "",
         };
         return json!({
@@ -95,7 +95,7 @@ pub async fn execute_tool_streaming_with_agent(
     use crate::permission::{tool as t, Action, Agent};
     if matches!(crate::permission::check(agent, name), Action::Deny) {
         let hint = match agent {
-            Agent::Plan => " (plan mode is read-only; switch to /yolo to edit or run commands)",
+            Agent::Plan => " (plan mode is read-only; switch to yolo mode to edit or run commands)",
             _ => "",
         };
         return json!({

@@ -33,13 +33,13 @@ impl App {
                 errs.into_iter().next().unwrap()
             } else {
                 format!(
-                    "config: {} issues, open /settings to fix: {}",
+                    "config: {} issues, fix in settings: {}",
                     errs.len(),
                     errs.join(" | ")
                 )
             }
         } else {
-            "no provider configured; open /settings to set up openai or anthropic".to_string()
+            "no provider configured; open settings to set up openai or anthropic".to_string()
         };
         self.notify(ToastLevel::Fail, msg);
         false

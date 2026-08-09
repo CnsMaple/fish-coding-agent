@@ -210,7 +210,7 @@ impl TabWidget for crate::function::ProviderPickerState {
         }
         if self.entries.is_empty() {
             Paragraph::new(Line::from(Span::styled(
-                "  [no providers configured - open /settings]",
+                "  [no providers configured - open settings]",
                 Theme::dim(),
             )))
             .wrap(Wrap { trim: false })
@@ -921,6 +921,8 @@ impl TabWidget for HotkeyTab {
         let rows: Vec<(&str, &str)> = vec![
             ("Alt+L", "Toggle focus: input \u{2194} panel"),
             ("Alt+P", "Toggle plan mode (read-only)"),
+            ("Alt+O", "Switch to loop mode (autonomous)"),
+            ("Alt+Y", "Switch to yolo mode"),
             ("Tab", "Cycle sidebar tabs"),
             ("Shift+Tab", "Cycle sidebar tabs backwards"),
             ("Enter", "Send / confirm"),
@@ -930,13 +932,6 @@ impl TabWidget for HotkeyTab {
             ("Ctrl+L", "Clear session"),
             ("Ctrl+N", "Toggle notifications panel"),
             ("Ctrl+P", "Open command palette"),
-            ("/timeline", "Jump to latest prompt"),
-            ("/session", "Manage and resume sessions"),
-            ("/retry", "Retry previous prompt"),
-            ("/continue", "Continue interrupted output"),
-            ("/plan", "Switch to plan mode (read-only)"),
-            ("/yolo", "Switch back to yolo mode"),
-            ("/tool", "Toggle tools for current session"),
             ("Mouse wheel", "Scroll session"),
         ];
         let lines: Vec<Line> = rows

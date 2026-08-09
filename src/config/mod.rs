@@ -762,7 +762,7 @@ impl Config {
             .entry(id)
             .ok_or_else(|| format!("{id}: not configured"))?;
         if p.base_url.trim().is_empty() {
-            return Err(format!("{id}: base_url is required (set it in /settings)"));
+            return Err(format!("{id}: base_url is required (set it in settings)"));
         }
         if p.mode == ProviderMode::Oauth {
             return match self.effective_api_key(id) {

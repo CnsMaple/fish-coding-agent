@@ -38,7 +38,7 @@ pub fn send_message(app: &mut App, user_msg: Message) {
     let Some(active_id) = app.config.active.clone() else {
         app.notify(
             ToastLevel::Fail,
-            "no active provider; configure one via /settings",
+            "no active provider; configure one in settings",
         );
         open_settings(app);
         return;
@@ -327,12 +327,22 @@ pub fn send_message(app: &mut App, user_msg: Message) {
             system_prompt_dynamic_with_title(&app.session_title)
         )
     };
+    // Loop mode advertises the full tool set minus `plan`/`ask` so the
+    // model keeps going autonomously until done (like the headless
+    // driver), but still renders into the session. Other modes pass
+    // `None`, letting the provider fall back to the global specs.
+    let tools = if app.mode == crate::function::AppMode::Loop {
+        Some(crate::tools::loop_tool_specs(provider))
+    } else {
+        None
+    };
+
     let req = ChatRequest {
         model,
         messages,
         thinking,
         system: Some(sp),
-        tools: None,
+        tools,
         prefix_messages,
         cache_retention: app.config.cache_retention,
     };

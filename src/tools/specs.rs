@@ -83,6 +83,29 @@ fn tool_specs(fmt: ToolFormat) -> Vec<serde_json::Value> {
     out
 }
 
+/// Tool specs for an autonomous loop run: the full builtin + MCP set
+/// minus the interaction tools `plan`/`ask`, which would pause the
+/// loop and hand control back to the user. Mirrors what the headless
+/// driver advertises, so Loop mode behaves the same way but renders
+/// into the session.
+pub fn loop_tool_specs(kind: crate::config::ProviderKind) -> Vec<serde_json::Value> {
+    let fmt = match kind {
+        crate::config::ProviderKind::OpenaiChat | crate::config::ProviderKind::Volcengine => {
+            ToolFormat::OpenAi
+        }
+        crate::config::ProviderKind::AnthropicMessages => ToolFormat::Anthropic,
+        crate::config::ProviderKind::OpenaiResponses => ToolFormat::Responses,
+        crate::config::ProviderKind::Cursor => return Vec::new(),
+    };
+    tool_specs(fmt)
+        .into_iter()
+        .filter(|spec| {
+            let name = fmt.name_of(spec);
+            name != "plan" && name != "ask"
+        })
+        .collect()
+}
+
 /// Return the names of all built-in tools (not MCP). Used by the
 /// `/tool` picker to populate its checkbox list.
 pub fn all_tool_names() -> Vec<String> {

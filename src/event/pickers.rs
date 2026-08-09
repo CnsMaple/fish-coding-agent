@@ -121,6 +121,22 @@ pub(super) fn handle_command_palette_key(
                             app.set_mode(crate::function::AppMode::Yolo);
                             app.notify(ToastLevel::Info, "mode: yolo");
                         }
+                        "loop" => {
+                            app.set_mode(crate::function::AppMode::Loop);
+                            app.notify(ToastLevel::Info, "mode: loop (autonomous)");
+                        }
+                        "mcp" => {
+                            // Authenticate the first configured MCP
+                            // server via OAuth.
+                            if let Some(first) = crate::mcp::builtin_names().into_iter().next() {
+                                crate::commands::open_mcp_auth_for(app, &first);
+                            } else {
+                                app.notify(
+                                    ToastLevel::Warn,
+                                    "no MCP servers configured - add to config `mcp` section",
+                                );
+                            }
+                        }
                         "clear" => {
                             app.start_new_session();
                             app.notify(ToastLevel::Info, "session cleared");
@@ -952,7 +968,7 @@ pub(super) fn trigger_picker_fetch(app: &mut App, state: &mut crate::function::M
         None => {
             app.notify(
                 ToastLevel::Fail,
-                "no provider configured for this kind; add one in /settings",
+                "no provider configured for this kind; add one in settings",
             );
             return;
         }

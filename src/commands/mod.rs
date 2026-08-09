@@ -1,4 +1,5 @@
 mod chat;
+mod headless;
 #[cfg(test)]
 mod tests;
 mod utils;
@@ -6,256 +7,28 @@ mod utils;
 use crate::app::App;
 use crate::function::notifications::ToastLevel;
 use crate::function::SidebarTab;
-use crate::session::{Message, Role};
+use crate::session::Role;
 pub use chat::{run_chat_stream, run_compaction_stream, send_chat, send_message};
+pub use headless::{run_headless_task, HeadlessOptions, HeadlessResult};
 pub use utils::{extract_partial_json_field, extract_partial_json_u64};
 
 pub(crate) const MSG_REQUEST_IN_FLIGHT: &str = "request in flight, please wait";
 pub(crate) const MSG_MCP_NOT_INIT: &str = "mcp service not initialised";
 pub(crate) const MSG_PROVIDER_INVALID: &str = "active provider id invalid";
 
-pub fn dispatch(app: &mut App, cmd: &str, arg: &str) {
-    match cmd {
-        "settings" => open_settings(app),
-        "model" => open_model_picker(app),
-        "compact" => compact_now(app, arg),
-        "hotkey" | "help" | "keys" => open_hotkey(app),
-        "new" | "clear" => {
-            app.start_new_session();
-            app.notify(
-                ToastLevel::Info,
-                if cmd == "new" {
-                    "new session"
-                } else {
-                    "session cleared"
-                },
-            );
-        }
-        "think" | "thinking" => {
-            use crate::config::ReasoningMode;
-            let arg = arg.trim();
-            if arg.is_empty() {
-                // Open a picker in the function panel.
-                open_thinking_picker(app);
-                return;
-            }
-            let next = match arg {
-                "off" => ReasoningMode::Off,
-                "minimal" => ReasoningMode::Minimal,
-                "low" => ReasoningMode::Low,
-                "med" | "medium" => ReasoningMode::Medium,
-                "high" => ReasoningMode::High,
-                "xhigh" => ReasoningMode::XHigh,
-                "adaptive" => ReasoningMode::Adaptive,
-                "max" => ReasoningMode::Max,
-                _ => {
-                    app.notify(
-                        ToastLevel::Fail,
-                        format!("unknown thinking level: {arg} (off/minimal/low/medium/high/xhigh/adaptive/max)"),
-                    );
-                    return;
-                }
-            };
-            app.config.thinking = next;
-            app.status.set_thinking(next);
-            app.save_config();
-            app.notify(ToastLevel::Ok, format!("thinking: {}", next.as_str()));
-        }
-        "timeline" => {
-            open_timeline_picker(app);
-        }
-        "session" | "sessions" => {
-            open_session_picker(app, crate::function::SessionPickerMode::Manage)
-        }
-        "rename" => {
-            let title = arg.trim();
-            if title.is_empty() {
-                open_session_rename(app, None, app.session_title.clone());
-            } else {
-                app.rename_session(None, title.to_string());
-            }
-        }
-        "fork" => app.fork_session(None),
-        "retry" => retry_last_prompt(app),
-        "continue" => continue_response(app, arg),
-        "plan" => {
-            let arg = arg.trim().to_lowercase();
-            if matches!(arg.as_str(), "exit" | "off" | "yolo" | "build") {
-                app.set_mode(crate::function::AppMode::Yolo);
-                app.notify(ToastLevel::Info, "mode: yolo");
-            } else if arg.is_empty() {
-                app.set_mode(crate::function::AppMode::Plan);
-                app.notify(
-                    ToastLevel::Info,
-                    "mode: plan (read-only — use /yolo to switch back)",
-                );
-            } else {
-                app.notify(
-                    ToastLevel::Fail,
-                    "unknown plan command: use /plan or /plan exit",
-                );
-            }
-        }
-        "yolo" | "build" => {
-            app.set_mode(crate::function::AppMode::Yolo);
-            app.notify(ToastLevel::Info, "mode: yolo");
-        }
-        "quit" | "exit" | "q" => {
-            app.should_quit = true;
-        }
-        "skill" => dispatch_skill(app, arg, ""),
-        "mcp" => open_mcp(app, arg),
-        "mcp-auth" => open_mcp_auth(app, arg),
-        "mcp-logout" => open_mcp_logout(app, arg),
-        "mcp-debug" => open_mcp_debug(app, arg),
-        "tool" | "tools" => open_tool_picker(app),
-        _ => {
-            app.notify(ToastLevel::Fail, format!("unknown command: /{cmd}"));
-        }
-    }
-}
-/// Public entry used by `event::submit_input` for the colon form.
-pub fn dispatch_skill(app: &mut App, name: &str, args: &str) {
-    open_skill(app, name, args);
-}
-
-/// `/skill:<name> [args...]` - dispatch immediately. The skill's
-/// template body goes to the AI as the user prompt; the chat UI
-/// renders a clean `[skill]` block (name / args / context path) so
-/// the user sees what was invoked without scrolling through the
-/// raw template.
-fn open_skill(app: &mut App, name: &str, args: &str) {
+/// Start the OAuth flow for a remote MCP server (invoked from the
+/// command palette). Delegates to the async handler via the event
+/// channel, which runs [`crate::event::mcp::run_mcp_oauth`].
+pub fn open_mcp_auth_for(app: &mut App, name: &str) {
     let name = name.trim();
-    let args = args.trim();
     if name.is_empty() {
-        let names = crate::skill::list_names();
-        let preview = names
-            .iter()
-            .take(8)
-            .map(|n| format!("/skill:{n}"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let more = names.len().saturating_sub(8);
-        let msg = if more == 0 {
-            format!("skills: {preview}")
-        } else {
-            format!("skills: {preview} (+{more} more)")
-        };
-        app.notify(ToastLevel::Info, msg);
-        return;
-    }
-    let Some(skill) = crate::skill::find(name) else {
-        let known = crate::skill::list_names().join(", ");
-        app.notify(
-            ToastLevel::Fail,
-            format!("unknown skill '{name}'. try: {known}"),
-        );
-        return;
-    };
-    if app.inflight.is_some() {
-        app.notify(ToastLevel::Warn, MSG_REQUEST_IN_FLIGHT);
-        return;
-    }
-    let context_path = crate::skill::skill_path(name)
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|| format!("<unknown skill path: {name}>"));
-    // Body sent to the AI: the skill template alone, or template +
-    // user's trailing instruction. The `[skill]` block is purely a
-    // UI artifact (`Message::skill_ref`) and never reaches the model.
-    let prompt_body = if args.is_empty() {
-        skill.template.clone()
-    } else {
-        format!("{}\n\n{}", skill.template, args)
-    };
-    let mut msg = Message::new(Role::User, prompt_body);
-    msg.skill_ref = Some(crate::session::SkillRef {
-        name: name.to_string(),
-        context_path,
-        args: if args.is_empty() {
-            None
-        } else {
-            Some(args.to_string())
-        },
-    });
-    send_message(app, msg);
-}
-
-/// `/mcp:<name>` - with no arg, list the available MCP servers; with a
-/// name, switch the session to that server's tool surface. Skill
-/// completion follows the same shape: Tab on a focused MCP
-/// candidate fills the input directly.
-fn open_mcp(app: &mut App, arg: &str) {
-    let name = arg.trim();
-    if name.is_empty() {
-        let names = crate::mcp::builtin_names();
-        if names.is_empty() {
-            app.notify(
-                ToastLevel::Warn,
-                "no MCP servers configured. add to config.json `mcp` section, then restart.",
-            );
-            return;
-        }
-        let preview = names
-            .iter()
-            .take(8)
-            .map(|n| format!("/mcp:{n}"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let more = names.len().saturating_sub(8);
-        let msg = if more == 0 {
-            format!("mcps: {preview}")
-        } else {
-            format!("mcps: {preview} (+{more} more)")
-        };
-        app.notify(ToastLevel::Info, msg);
-        return;
-    }
-    match crate::mcp::find(name) {
-        Some(_server_name) => {
-            let status_label = if let Some(svc) = crate::mcp::McpRegistry::current() {
-                let s = svc.status_of_sync(name).ok();
-                s.as_ref()
-                    .map(|st| {
-                        let base = format!("{} — {}", st.icon(), st.label());
-                        match st {
-                            crate::mcp::McpStatus::Failed { error } => {
-                                format!("{base}: {error}")
-                            }
-                            _ => base,
-                        }
-                    })
-                    .unwrap_or_else(|| "configured".to_string())
-            } else {
-                "configured".to_string()
-            };
-            app.notify(ToastLevel::Ok, format!("mcp '{name}' is {status_label}"));
-        }
-        None => {
-            let known = crate::mcp::builtin_names().join(", ");
-            app.notify(
-                ToastLevel::Fail,
-                format!("unknown mcp '{name}'. try: {known}"),
-            );
-        }
-    }
-}
-
-/// `/mcp-auth <name>` — start the OAuth flow for a remote MCP
-/// server. Opens a local callback server, constructs the
-/// authorization URL, opens the browser, and waits for the
-/// redirect. On success, stores the token and re-connects the
-/// server.
-fn open_mcp_auth(app: &mut App, arg: &str) {
-    let name = arg.trim();
-    if name.is_empty() {
-        app.notify(ToastLevel::Fail, "usage: /mcp-auth <server-name>");
+        app.notify(ToastLevel::Fail, "mcp: no server name");
         return;
     }
     if crate::mcp::McpRegistry::current().is_none() {
         app.notify(ToastLevel::Fail, MSG_MCP_NOT_INIT);
         return;
     }
-    // Delegate to the async handler via the event channel.
     let tx = match &app.msg_tx {
         Some(tx) => tx.clone(),
         None => {
@@ -270,57 +43,6 @@ fn open_mcp_auth(app: &mut App, arg: &str) {
         ToastLevel::Info,
         format!("starting OAuth for `{name}`... (see next notification)"),
     );
-}
-
-/// `/mcp-debug <name>` — print diagnostics for a server: status,
-/// auth state, tool count, and config preview.
-fn open_mcp_debug(app: &mut App, arg: &str) {
-    let name = arg.trim();
-    if name.is_empty() {
-        app.notify(ToastLevel::Fail, "usage: /mcp-debug <server-name>");
-        return;
-    }
-    let Some(svc) = crate::mcp::McpRegistry::current() else {
-        app.notify(ToastLevel::Fail, MSG_MCP_NOT_INIT);
-        return;
-    };
-    let status = svc.status_of_sync(name).ok();
-    let auth = crate::mcp::auth::McpAuthStore::load_or_default();
-    let has_tokens = auth.get(name).is_some();
-    let snap = svc.try_snapshot().ok();
-    let tool_count = snap
-        .as_ref()
-        .map(|s| s.tools.values().filter(|t| t.server == name).count())
-        .unwrap_or(0);
-    let mut lines = vec![format!("MCP server: {name}")];
-    let status_str = match status.as_ref() {
-        Some(crate::mcp::McpStatus::Failed { error }) => {
-            format!("✗ failed: {error}")
-        }
-        Some(s) => format!("{} {}", s.icon(), s.label()),
-        None => "unknown".to_string(),
-    };
-    lines.push(format!("  status: {status_str}"));
-    lines.push(format!("  has stored tokens: {has_tokens}"));
-    lines.push(format!("  tool count: {tool_count}"));
-    if let Some(crate::mcp::McpStatus::Connected) = status.as_ref() {
-        lines.push("  ✓ ready to receive tool calls".to_string());
-    }
-    app.notify(ToastLevel::Info, lines.join(" | "));
-}
-
-/// `/mcp-logout <name>` — remove stored OAuth tokens for a
-/// remote MCP server.
-fn open_mcp_logout(app: &mut App, arg: &str) {
-    let name = arg.trim();
-    if name.is_empty() {
-        app.notify(ToastLevel::Fail, "usage: /mcp-logout <server-name>");
-        return;
-    }
-    // Remove from auth store.
-    let auth = crate::mcp::auth::McpAuthStore::load_or_default();
-    auth.remove(name);
-    app.notify(ToastLevel::Ok, format!("OAuth tokens removed for `{name}`"));
 }
 
 pub fn retry_last_prompt(app: &mut App) {
@@ -398,7 +120,7 @@ pub fn compact_now(app: &mut App, _arg: &str) {
     let Some(active_id) = app.config.active.clone() else {
         app.notify(
             ToastLevel::Fail,
-            "no active provider; configure one via /settings",
+            "no active provider; configure one in settings",
         );
         open_settings(app);
         return;
@@ -980,7 +702,7 @@ fn system_prompt_core(agent: crate::permission::Agent, agents_content: &str) -> 
   - webfetch（禁止抓取网页）
   - websearch（禁止搜索网络）
 
-若某个任务确实需要运行命令或修改文件，请交还给用户——他们可以用 `/yolo` 切换到 yolo 模式并重新发送。不要假装调用这些工具；除非看到结果，否则绝不声称某工具已运行。
+若某个任务确实需要运行命令或修改文件，请交还给用户——他们可以用 yolo 模式（命令面板切换）并重新发送。不要假装调用这些工具；除非看到结果，否则绝不声称某工具已运行。
 
 ## 重要
 

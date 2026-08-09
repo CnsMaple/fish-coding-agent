@@ -80,6 +80,33 @@ async fn main() -> Result<()> {
         }
     };
 
+    // Headless mode: run a single autonomous task and print the final
+    // reply to stdout, skipping the TUI entirely. Used for benchmark
+    // / HLR harness comparison.
+    if let Some(headless) = parse_headless_args()? {
+        let cwd = headless
+            .cwd
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        let opts = fish_coding_agent::commands::HeadlessOptions {
+            cwd,
+            max_rounds: headless.max_rounds,
+        };
+        match fish_coding_agent::commands::run_headless_task(headless.prompt, opts).await {
+            Ok(res) => {
+                println!("{}", res.text);
+                eprintln!(
+                    "[headless] done: input={} output={} tokens, tool_rounds={}",
+                    res.input_tokens, res.output_tokens, res.tool_rounds
+                );
+            }
+            Err(e) => {
+                eprintln!("[headless] error: {e:#}");
+                std::process::exit(1);
+            }
+        }
+        return Ok(());
+    }
+
     let _guard = TerminalGuard::enter()?;
 
     let backend = CursorTrackingBackend::new(CrosstermBackend::new(std::io::stdout()));
@@ -116,6 +143,94 @@ async fn main() -> Result<()> {
         eprintln!("error: {e:#}");
     }
     Ok(())
+}
+
+/// Headless CLI arguments (parsed from `--headless` mode).
+struct HeadlessArgs {
+    prompt: String,
+    cwd: Option<PathBuf>,
+    max_rounds: usize,
+}
+
+/// Parse CLI args for `--headless` mode. Returns `None` when not in
+/// headless mode. Hand-written parser (no new dependency).
+fn parse_headless_args() -> Result<Option<HeadlessArgs>> {
+    let mut args = std::env::args().skip(1);
+    let mut headless = false;
+    let mut prompt: Option<String> = None;
+    let mut cwd: Option<PathBuf> = None;
+    let mut max_rounds = 0usize;
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--help" | "-h" => {
+                print_help();
+                std::process::exit(0);
+            }
+            "--headless" => headless = true,
+            "--cwd" => {
+                cwd = Some(PathBuf::from(
+                    args.next()
+                        .ok_or_else(|| anyhow::anyhow!("--cwd requires a path"))?,
+                ));
+            }
+            "--max-rounds" => {
+                let v = args
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("--max-rounds requires a number"))?;
+                max_rounds = v
+                    .parse()
+                    .map_err(|_| anyhow::anyhow!("invalid --max-rounds value: {v}"))?;
+            }
+            other => {
+                // First positional argument is the prompt; the rest are
+                // joined so multi-word prompts work without quotes.
+                if prompt.is_none() {
+                    prompt = Some(other.to_string());
+                } else if let Some(p) = prompt.as_mut() {
+                    p.push(' ');
+                    p.push_str(other);
+                }
+            }
+        }
+    }
+
+    if !headless {
+        return Ok(None);
+    }
+    let prompt = prompt.ok_or_else(|| anyhow::anyhow!("--headless requires a prompt argument"))?;
+    Ok(Some(HeadlessArgs {
+        prompt,
+        cwd,
+        max_rounds,
+    }))
+}
+
+/// Print the CLI usage/help text to stdout.
+fn print_help() {
+    println!(
+        "\
+fish-coding-agent — terminal coding agent
+
+USAGE:
+    fish-coding-agent [OPTIONS]
+
+OPTIONS:
+    --headless <prompt...>   Run a single autonomous task with no TUI and
+                             print the final reply to stdout. Used for
+                             benchmark / HLR harness comparison.
+    --cwd <dir>              Working directory for headless tools (default: cwd).
+    --max-rounds <N>         Cap the number of LLM tool-call round-trips in
+                             headless mode (0 = unlimited, default).
+    -h, --help               Print this help and exit.
+
+With no options, the interactive TUI is launched.
+
+EXAMPLES:
+    fish-coding-agent --headless \"list 当前目录文件\"
+    fish-coding-agent --headless \"fix the failing test\" --cwd D:\\repo --max-rounds 20
+"
+    );
 }
 
 /// Install a panic hook so that, instead of flashing a backtrace to stderr

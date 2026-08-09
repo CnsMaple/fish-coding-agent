@@ -224,7 +224,9 @@ pub fn skills_for_system_prompt() -> String {
     }
     let mut out = String::new();
     out.push_str("\n## Available Skills\n\n");
-    out.push_str("The user can invoke skills via `/skill:<name>`. Available skills:\n\n");
+    out.push_str(
+        "The user can invoke skills via the command palette (Ctrl+P). Available skills:\n\n",
+    );
     for skill in &skills {
         out.push_str(&format!("- **{}**: {}\n", skill.name, skill.description));
     }

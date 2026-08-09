@@ -134,6 +134,10 @@ pub trait FilterablePicker {
 pub enum AppMode {
     Plan,
     Yolo,
+    /// Autonomous loop: like the headless driver, the interaction
+    /// tools `plan`/`ask` are hidden from the model so it keeps going
+    /// until done, but the output still renders into the session.
+    Loop,
     Shell,
     ShellContext,
     Python,
@@ -145,6 +149,7 @@ impl AppMode {
         match self {
             AppMode::Plan => "plan",
             AppMode::Yolo => "yolo",
+            AppMode::Loop => "loop",
             AppMode::Shell => "shell",
             AppMode::ShellContext => "shell_context",
             AppMode::Python => "python",
@@ -276,6 +281,14 @@ impl CommandPaletteState {
             PaletteEntry::Command {
                 name: "yolo",
                 description: "Switch to yolo mode",
+            },
+            PaletteEntry::Command {
+                name: "loop",
+                description: "Switch to loop mode (autonomous)",
+            },
+            PaletteEntry::Command {
+                name: "mcp",
+                description: "Authenticate first MCP server (OAuth)",
             },
             PaletteEntry::Command {
                 name: "clear",
