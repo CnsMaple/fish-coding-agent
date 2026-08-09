@@ -8,8 +8,8 @@ use serde_json::json;
 use std::time::Duration;
 
 use super::utils::{
-    detect_repeated_snippet, is_doom_loop, parse_text_tool_calls, parse_tool_result_display,
-    tool_result_title,
+    detect_repeated_snippet, detect_within_turn_repetition, is_doom_loop, parse_text_tool_calls,
+    parse_tool_result_display, tool_result_title,
 };
 use super::{
     build_agents_content, compact_now, open_settings, system_prompt, system_prompt_dynamic,
@@ -616,6 +616,26 @@ pub async fn run_chat_stream(
                 };
                 send_msg(crate::event::AppMsg::ChatWarn(format!(
                     "repeated assistant text detected ({:?}): `{}`. Pausing for user review.",
+                    snippet.len(),
+                    display
+                )));
+                send_msg(crate::event::AppMsg::ChatDone { seq });
+                return;
+            }
+            // Within-turn check: the model may echo the same sentence many
+            // times inside a single message (e.g. repeatedly announcing it
+            // will rebuild files) without ever crossing the across-turn
+            // threshold. Catch that too.
+            if let Some(snippet) = detect_within_turn_repetition(&assistant_content) {
+                let display = if snippet.chars().count() > 60 {
+                    let mut it = snippet.chars();
+                    let head: String = it.by_ref().take(60).collect();
+                    format!("{head}…")
+                } else {
+                    snippet.clone()
+                };
+                send_msg(crate::event::AppMsg::ChatWarn(format!(
+                    "repeated text within a single response detected ({:?}): `{}`. Pausing for user review.",
                     snippet.len(),
                     display
                 )));

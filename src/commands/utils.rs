@@ -30,6 +30,95 @@ const SNIPPET_WINDOW: usize = 8;
 /// single responses; past this we skip the check.
 const SNIPPET_MAX_TOTAL_BYTES: usize = 512 * 1024;
 
+/// Minimum byte length of a within-turn repeated substring to count as a
+/// stuck text loop. Short prefixes shared by legit templated output (e.g.
+/// "现在实现登录。现在实现注册。…") never reach this length, while a model
+/// echoing the same full sentence repeatedly does.
+const WITHIN_MIN_BYTES: usize = 24;
+/// A substring must appear this many times within a single assistant text
+/// to count as a stuck within-text loop.
+const WITHIN_MIN_COUNT: usize = 4;
+/// Upper bound on the single assistant text analyzed. Mirrors the across-turn
+/// guard: past this we skip the check.
+const WITHIN_MAX_BYTES: usize = 512 * 1024;
+
+/// Within-turn text repetition detector.
+///
+/// `detect_repeated_snippet` only catches a snippet repeated across multiple
+/// distinct assistant messages (it counts distinct source texts). A model can
+/// instead loop by repeating the same sentence *within a single message* many
+/// times — e.g. emitting "现在重建文件。" over and over before acting. This
+/// detector builds a suffix array + LCP over that one text and reports a
+/// long-enough substring that appears WITHIN_MIN_COUNT or more times. The
+/// caller breaks the loop and pauses for user review when it fires.
+pub(super) fn detect_within_turn_repetition(text: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    if bytes.is_empty() || bytes.len() > WITHIN_MAX_BYTES {
+        return None;
+    }
+    let n = bytes.len();
+    let s: Vec<usize> = bytes.iter().map(|&b| b as usize + 1).collect();
+    let sa = suffix_array(&s);
+    let lcp = lcp_array(&s, &sa);
+
+    // Binary search for the longest length L such that some set of
+    // WITHIN_MIN_COUNT consecutive suffixes shares a common prefix of
+    // length >= L.
+    let mut lo = WITHIN_MIN_BYTES;
+    let mut hi = n;
+    let mut best: Option<usize> = None;
+    while lo <= hi {
+        let mid = (lo + hi) / 2;
+        if longest_lcp_run(&lcp, mid) >= WITHIN_MIN_COUNT {
+            best = Some(mid);
+            lo = mid + 1;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    let len = best?;
+
+    // Find the start of the first qualifying group of consecutive suffixes
+    // sharing a prefix of length >= `len`.
+    let mut run = 1usize;
+    let mut run_start = 0usize;
+    for (i, &v) in lcp.iter().enumerate() {
+        if v >= len {
+            if run == 1 {
+                run_start = i;
+            }
+            run += 1;
+            if run >= WITHIN_MIN_COUNT {
+                let pos = sa[run_start];
+                let sub = &bytes[pos..pos + len];
+                return String::from_utf8(sub.to_vec()).ok();
+            }
+        } else {
+            run = 1;
+        }
+    }
+    None
+}
+
+/// Longest run of consecutive LCP entries that are each >= `min_len`. That
+/// run length equals the maximum number of times a `min_len`-long substring
+/// can appear consecutively in the suffix-array ordering.
+fn longest_lcp_run(lcp: &[usize], min_len: usize) -> usize {
+    let mut best = 1usize;
+    let mut run = 1usize;
+    for &v in lcp {
+        if v >= min_len {
+            run += 1;
+            if run > best {
+                best = run;
+            }
+        } else {
+            run = 1;
+        }
+    }
+    best
+}
+
 /// Text-snippet repetition detector for assistant prose.
 ///
 /// The doom-loop detector (`is_doom_loop`) only catches identical tool
