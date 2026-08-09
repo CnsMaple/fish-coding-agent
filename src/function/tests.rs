@@ -30,6 +30,7 @@ fn make_test_app() -> App {
         session: Session::default(),
         session_id: crate::session::store::new_session_id(),
         session_title: "test".to_string(),
+        title_ai_generated: false,
         initial_title_pending: false,
         mode: AppMode::Yolo,
         previous_mode: AppMode::Yolo,
@@ -182,4 +183,49 @@ fn thinking_picker_no_scroll_when_fits() {
     s.cursor = 1;
     crate::ui::function_panel::ensure_cursor_visible(s.cursor, &mut s.scroll, 3);
     assert_eq!(s.scroll, 0, "no scroll needed when total fits visible");
+}
+
+/// Prompt-derived titles (set via `maybe_title_from_first_prompt`) must
+/// NOT appear in the input area; only AI/user-generated titles are
+/// rendered there.
+#[test]
+fn prompt_title_is_not_rendered_in_input_area() {
+    let mut app = make_test_app();
+    app.session_title = "\u{4fee}\u{590d}\u{804a}\u{5929}\u{6807}\u{9898}".to_string();
+    app.status.session_title = app.session_title.clone();
+    app.title_ai_generated = false;
+    app.status.title_ai_generated = false;
+
+    let line = app.status.render_line_with_mode("yolo");
+    let text = line
+        .spans
+        .iter()
+        .map(|s| s.content.as_ref())
+        .collect::<String>();
+    assert!(
+        !text.contains("\u{4fee}\u{590d}\u{804a}\u{5929}\u{6807}\u{9898}"),
+        "prompt-derived title must be hidden from the input area: {text}"
+    );
+}
+
+/// AI/user-generated titles (via `update_title` / `/rename`) must be
+/// rendered in the input area.
+#[test]
+fn ai_generated_title_is_rendered_in_input_area() {
+    let mut app = make_test_app();
+    app.session_title = "\u{91cd}\u{6784}\u{4f1a}\u{8bdd}\u{6807}\u{9898}".to_string();
+    app.status.session_title = app.session_title.clone();
+    app.title_ai_generated = true;
+    app.status.title_ai_generated = true;
+
+    let line = app.status.render_line_with_mode("yolo");
+    let text = line
+        .spans
+        .iter()
+        .map(|s| s.content.as_ref())
+        .collect::<String>();
+    assert!(
+        text.contains("\u{91cd}\u{6784}\u{4f1a}\u{8bdd}\u{6807}\u{9898}"),
+        "AI-generated title must be shown in the input area: {text}"
+    );
 }
