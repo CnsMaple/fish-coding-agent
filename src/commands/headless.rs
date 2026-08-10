@@ -81,7 +81,7 @@ pub async fn run_headless_task(prompt: String, opts: HeadlessOptions) -> Result<
     let (system, messages) = if cfg.prefix_cache {
         let mut msgs = vec![ChatMessage {
             role: "user".to_string(),
-            content: super::system_prompt_dynamic(),
+            content: super::system_prompt_dynamic(crate::function::AppMode::Loop),
             content_parts: Vec::new(),
             tool_call_id: None,
             tool_calls: Vec::new(),
@@ -95,7 +95,7 @@ pub async fn run_headless_task(prompt: String, opts: HeadlessOptions) -> Result<
         });
         (core_sp, msgs)
     } else {
-        let dynamic = super::system_prompt_dynamic();
+        let dynamic = super::system_prompt_dynamic(crate::function::AppMode::Loop);
         let msgs = vec![ChatMessage {
             role: "user".to_string(),
             content: prompt,

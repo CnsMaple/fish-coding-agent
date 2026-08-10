@@ -548,8 +548,8 @@ pub(super) fn build_agents_content(app: &App) -> String {
 /// and workspace path. These change between or even during sessions,
 /// so keeping them separate from the static core avoids invalidating
 /// the prefix cache on every request.
-pub(super) fn system_prompt_dynamic() -> String {
-    system_prompt_dynamic_full("", &[], false)
+pub(super) fn system_prompt_dynamic(mode: crate::function::AppMode) -> String {
+    system_prompt_dynamic_full("", &[], false, mode)
 }
 
 /// Build the dynamic suffix for the system prompt. On top of the
@@ -563,6 +563,7 @@ pub(crate) fn system_prompt_dynamic_full(
     session_title: &str,
     todos: &[crate::session::TodoItem],
     first_prompt: bool,
+    mode: crate::function::AppMode,
 ) -> String {
     let now = chrono::Local::now();
     let date = now.format("%Y-%m-%d %A").to_string();
@@ -597,12 +598,13 @@ pub(crate) fn system_prompt_dynamic_full(
     } else {
         ""
     };
+    let mode_block = mode_tool_guidance(mode);
     format!(
         "\
 Current date: {date}
 OS: {os}
 Shell: {shell} ({shell_details})
-Workspace: {workspace}{title_line}{todos_block}{first_prompt_hint}
+Workspace: {workspace}{title_line}{todos_block}{first_prompt_hint}{mode_block}
 
 All file paths are relative to the workspace unless noted otherwise. \
 Use `list`, `grep`, and `glob` to discover files — never invent or guess paths.",
@@ -614,7 +616,35 @@ Use `list`, `grep`, and `glob` to discover files — never invent or guess paths
         title_line = title_line,
         todos_block = todos_block,
         first_prompt_hint = first_prompt_hint,
+        mode_block = mode_block,
     )
+}
+
+/// Build the mode block injected into every dynamic prompt: the current
+/// mode name plus the tools that are disabled by default in that mode.
+/// A disabled tool is rejected at runtime (see `permission::check`), so
+/// this tells the model which calls will fail with a permission error.
+fn mode_tool_guidance(mode: crate::function::AppMode) -> String {
+    let (name, disabled, note) = match mode {
+        crate::function::AppMode::Plan => (
+            "plan（只读计划模式）",
+            "edit, write, shell_command, python_command, webfetch, websearch, sub_agent, update_title",
+            "请仅使用只读工具收集信息并调用 `plan`/`ask` 与用户交互。不要调用上述工具；调用会被运行时拒绝。",
+        ),
+        crate::function::AppMode::Loop => (
+            "loop（自治循环模式）",
+            "plan, ask",
+            "请自主推进任务直到完成，不要调用 `plan`/`ask` 暂停等待用户；它们已被移除。",
+        ),
+        crate::function::AppMode::Yolo => ("yolo（全权模式）", "（无默认禁用工具）", ""),
+        _ => (mode.as_str(), "（无默认禁用工具）", ""),
+    };
+    let note_line = if note.is_empty() {
+        String::new()
+    } else {
+        format!("\n{note}")
+    };
+    format!("\n\n当前模式：{name}\n默认禁用工具：{disabled}{note_line}")
 }
 
 /// Return only the static core of the system prompt (never changes
@@ -630,9 +660,8 @@ pub(super) fn system_prompt(agent: crate::permission::Agent, agents_content: &st
 /// The dynamic parts (date, CWD, shell) are sent separately via
 /// `system_prompt_dynamic()` as a user message at the end of the
 /// prefix, so the cacheable prefix stays stable.
-fn system_prompt_core(agent: crate::permission::Agent, agents_content: &str) -> String {
-    match agent {
-        crate::permission::Agent::Build => format!(
+fn system_prompt_core(_agent: crate::permission::Agent, agents_content: &str) -> String {
+    format!(
             "\
 ## 角色定位
 
@@ -757,53 +786,5 @@ fn system_prompt_core(agent: crate::permission::Agent, agents_content: &str) -> 
             shell_details = crate::tools::shell_guidance(),
             skills = crate::skill::skills_for_system_prompt(),
             agents = agents_content,
-        ),
-        crate::permission::Agent::Plan => format!(
-            "\
-## 职责
-
-你正运行在**计划模式**下，这是一个只读的研究与规划角色。你的任务是理解用户的任务，仅收集必要的证据，并在写任何代码之前，向用户呈现一份可批准的具体计划。
-
-## 你可以做什么
-
-只读探索：
-
-  - read(path, start_line?, end_line?)
-  - grep(pattern, path?) — 在文件中搜索文本
-  - glob(pattern, path?) — 按名称模式查找文件
-  - list(path?) — 列出目录下的文件
-
-与用户沟通：
-
-  - ask(question, options?) — 提出澄清问题。当需要权衡取舍、请求含糊，或某个决定阻碍了计划时使用。问题会显示在会话中；用户在主输入框输入答案，对话自动继续。不要过度使用——将独立问题合并。
-  - plan(title?, content, steps?) — 呈现计划供批准。计划正文渲染在会话中；用户在计划标签页中批准/拒绝/关闭。当信息足够时，恰好调用一次。
-  - skill(name) — 加载某条技能的说明与资源
-
-## 你绝不能做什么
-
-运行时会对以下任何尝试返回错误：
-
-  - edit（禁止编辑文件）
-  - write（禁止创建文件）
-  - shell_command（禁止任意 shell）
-  - python_command（禁止执行代码）
-  - webfetch（禁止抓取网页）
-  - websearch（禁止搜索网络）
-
-若某个任务确实需要运行命令或修改文件，请交还给用户——他们可以用 yolo 模式（命令面板切换）并重新发送。不要假装调用这些工具；除非看到结果，否则绝不声称某工具已运行。
-
-## 重要
-
-1. **始终使用结构化 tool_calls API**（或 `>>> {{\"name\":...}} <<<` 文本回退）。不要只用文字描述计划却不实际调用 `plan` 工具——只有当工具结果被渲染时，用户才能看到你的计划。
-2. **先探索再计划。** 若请求涉及你尚未读过的代码，用 read/grep/list 将计划建立在实际代码库上。不要编造文件路径、函数名或行为。
-3. **保持简洁。** 计划正文应可执行：改什么、在哪改、为什么。编号步骤是好的。跳过开场白和道歉。
-4. **优先提问而非猜测。** 当存在两种合理解释且选择会显著改变计划时，调用 `ask`。当选择仅影响外观时，选一个并在计划中注明。
-5. **调用 plan 工具后停止。** 不要在 `plan` 之后调用其他工具；等待用户的决定。
-6. **直接处理打断。** 若用户打断你并提出跟进问题（如翻译、澄清、总结），用已有信息回答。不要重新探索代码库或再次调用 `plan`。
-{skills}
-{agents}",
-            skills = crate::skill::skills_for_system_prompt(),
-            agents = agents_content,
-        ),
-    }
+        )
 }

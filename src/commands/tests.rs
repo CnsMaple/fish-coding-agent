@@ -129,7 +129,12 @@ mod tests {
                 status: "completed".to_string(),
             },
         ];
-        let s = crate::commands::system_prompt_dynamic_full("", &todos, false);
+        let s = crate::commands::system_prompt_dynamic_full(
+            "",
+            &todos,
+            false,
+            crate::function::AppMode::Yolo,
+        );
         assert!(s.contains("Current todos:"), "missing todos header: {s}");
         assert!(
             s.contains("- [>] 实现登录"),
@@ -145,7 +150,12 @@ mod tests {
 
     #[test]
     fn dynamic_prompt_omits_todos_when_empty() {
-        let s = crate::commands::system_prompt_dynamic_full("", &[], false);
+        let s = crate::commands::system_prompt_dynamic_full(
+            "",
+            &[],
+            false,
+            crate::function::AppMode::Yolo,
+        );
         assert!(
             !s.contains("Current todos:"),
             "empty todos must be omitted: {s}"
@@ -154,19 +164,76 @@ mod tests {
 
     #[test]
     fn dynamic_prompt_first_turn_hint_only_when_flag_set() {
-        let s = crate::commands::system_prompt_dynamic_full("", &[], true);
+        let s = crate::commands::system_prompt_dynamic_full(
+            "",
+            &[],
+            true,
+            crate::function::AppMode::Yolo,
+        );
         assert!(s.contains("update_title"), "first-turn hint missing: {s}");
         assert!(s.contains("首次请求"), "first-turn hint missing: {s}");
-        let s2 = crate::commands::system_prompt_dynamic_full("", &[], false);
+        let s2 = crate::commands::system_prompt_dynamic_full(
+            "",
+            &[],
+            false,
+            crate::function::AppMode::Yolo,
+        );
         assert!(!s2.contains("首次请求"), "hint must be gated by flag: {s2}");
     }
 
     #[test]
     fn dynamic_prompt_includes_session_title() {
-        let s = crate::commands::system_prompt_dynamic_full("修复聊天标题", &[], false);
+        let s = crate::commands::system_prompt_dynamic_full(
+            "修复聊天标题",
+            &[],
+            false,
+            crate::function::AppMode::Yolo,
+        );
         assert!(
             s.contains("Current session title: 修复聊天标题"),
             "title missing: {s}"
+        );
+    }
+
+    #[test]
+    fn dynamic_prompt_injects_current_mode() {
+        let plan = crate::commands::system_prompt_dynamic_full(
+            "",
+            &[],
+            false,
+            crate::function::AppMode::Plan,
+        );
+        assert!(plan.contains("当前模式：plan"), "plan mode missing: {plan}");
+        assert!(
+            plan.contains("默认禁用工具：edit, write, shell_command, python_command, webfetch, websearch, sub_agent, update_title"),
+            "plan disabled tools missing: {plan}"
+        );
+
+        let yolo = crate::commands::system_prompt_dynamic_full(
+            "",
+            &[],
+            false,
+            crate::function::AppMode::Yolo,
+        );
+        assert!(yolo.contains("当前模式：yolo"), "yolo mode missing: {yolo}");
+        assert!(
+            yolo.contains("无默认禁用工具"),
+            "yolo should have no disabled tools: {yolo}"
+        );
+
+        let loopd = crate::commands::system_prompt_dynamic_full(
+            "",
+            &[],
+            false,
+            crate::function::AppMode::Loop,
+        );
+        assert!(
+            loopd.contains("当前模式：loop"),
+            "loop mode missing: {loopd}"
+        );
+        assert!(
+            loopd.contains("默认禁用工具：plan, ask"),
+            "loop disabled plan/ask missing: {loopd}"
         );
     }
 }

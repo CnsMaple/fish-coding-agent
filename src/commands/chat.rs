@@ -315,7 +315,7 @@ pub fn send_message(app: &mut App, user_msg: Message) {
             0,
             ChatMessage {
                 role: "user".to_string(),
-                content: system_prompt_dynamic_full("", todos, first_prompt),
+                content: system_prompt_dynamic_full("", todos, first_prompt, app.mode),
                 content_parts: Vec::new(),
                 tool_call_id: None,
                 tool_calls: Vec::new(),
@@ -331,7 +331,7 @@ pub fn send_message(app: &mut App, user_msg: Message) {
         format!(
             "{}\n\n{}",
             core_sp,
-            system_prompt_dynamic_full(&app.session_title, todos, first_prompt)
+            system_prompt_dynamic_full(&app.session_title, todos, first_prompt, app.mode)
         )
     };
     // Loop mode advertises the full tool set minus `plan`/`ask` so the
