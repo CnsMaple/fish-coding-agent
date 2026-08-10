@@ -140,7 +140,7 @@ Hot-switchable options:
 - **Tool result display** — `show` / `hide` / `while streaming`
 - **Enter behavior** — `enter_sends` (Enter sends, Shift+Enter newline) / `enter_newline` (Enter newline, Shift+Enter sends)
 - **Border type** — `ascii` / `rounded`
-- **Theme** — `default` (terminal defaults) / `light-eucalyptus` / `dark-eucalyptus`
+- **Theme** — `default` (terminal defaults) / `light-eucalyptus` / `dark-eucalyptus` / `auto-eucalyptus` (follows the terminal's light/dark background)
 - **Tool preview lines** — 3–50 (default 10): collapsed tool block lines before the `Ctrl+O` expand hint
 - **Auto-compact** — on/off
 - **Cache retention** — `normal` / `aggressive` (controls prompt cache TTL markers)

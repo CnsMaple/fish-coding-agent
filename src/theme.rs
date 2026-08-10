@@ -49,6 +49,9 @@ pub enum ThemeVariant {
     LightEucalyptus,
     #[serde(rename = "dark-eucalyptus")]
     DarkEucalyptus,
+    /// Auto-detect the terminal background and pick light or dark.
+    #[serde(rename = "auto-eucalyptus")]
+    AutoEucalyptus,
 }
 
 impl ThemeVariant {
@@ -57,6 +60,7 @@ impl ThemeVariant {
             ThemeVariant::Default => "default",
             ThemeVariant::LightEucalyptus => "light-eucalyptus",
             ThemeVariant::DarkEucalyptus => "dark-eucalyptus",
+            ThemeVariant::AutoEucalyptus => "auto-eucalyptus",
         }
     }
 
@@ -65,6 +69,7 @@ impl ThemeVariant {
             ThemeVariant::Default,
             ThemeVariant::LightEucalyptus,
             ThemeVariant::DarkEucalyptus,
+            ThemeVariant::AutoEucalyptus,
         ]
     }
 }
@@ -161,12 +166,31 @@ impl ThemeColors {
         }
     }
 
+    /// Pick light or dark based on the detected terminal background theme.
+    fn auto_eucalyptus() -> Self {
+        match resolve_auto_variant() {
+            ThemeVariant::LightEucalyptus => Self::light_eucalyptus(),
+            _ => Self::dark_eucalyptus(),
+        }
+    }
+
     pub fn from_variant(variant: ThemeVariant) -> Self {
         match variant {
             ThemeVariant::Default => Self::default_theme(),
             ThemeVariant::LightEucalyptus => Self::light_eucalyptus(),
             ThemeVariant::DarkEucalyptus => Self::dark_eucalyptus(),
+            ThemeVariant::AutoEucalyptus => Self::auto_eucalyptus(),
         }
+    }
+}
+
+/// Resolve the concrete eucalyptus variant backing `auto-eucalyptus` by
+/// detecting the terminal background theme. Falls back to dark on failure.
+pub fn resolve_auto_variant() -> ThemeVariant {
+    let timeout = std::time::Duration::from_millis(100);
+    match termbg::theme(timeout) {
+        Ok(termbg::Theme::Light) => ThemeVariant::LightEucalyptus,
+        _ => ThemeVariant::DarkEucalyptus,
     }
 }
 
