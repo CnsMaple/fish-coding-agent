@@ -20,7 +20,7 @@ static ACTIVE_COLORS: RwLock<ThemeColors> = RwLock::new(ThemeColors {
 });
 
 /// Active theme variant, readable at any time.
-static ACTIVE_VARIANT: RwLock<ThemeVariant> = RwLock::new(ThemeVariant::Default);
+static ACTIVE_VARIANT: RwLock<ThemeVariant> = RwLock::new(ThemeVariant::AutoEucalyptus);
 
 /// Get the currently active theme colors.
 pub fn active_colors() -> ThemeColors {
@@ -42,22 +42,24 @@ pub fn init_theme(variant: ThemeVariant) {
 /// Available theme variants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum ThemeVariant {
-    #[serde(rename = "default")]
-    #[default]
-    Default,
+    /// Follow the terminal's default colors; use modifiers for emphasis only.
+    #[serde(rename = "terminal-color")]
+    System,
     #[serde(rename = "light-eucalyptus")]
     LightEucalyptus,
     #[serde(rename = "dark-eucalyptus")]
     DarkEucalyptus,
     /// Auto-detect the terminal background and pick light or dark.
+    /// This is the default theme.
     #[serde(rename = "auto-eucalyptus")]
+    #[default]
     AutoEucalyptus,
 }
 
 impl ThemeVariant {
     pub fn as_str(&self) -> &'static str {
         match self {
-            ThemeVariant::Default => "default",
+            ThemeVariant::System => "terminal-color",
             ThemeVariant::LightEucalyptus => "light-eucalyptus",
             ThemeVariant::DarkEucalyptus => "dark-eucalyptus",
             ThemeVariant::AutoEucalyptus => "auto-eucalyptus",
@@ -66,7 +68,7 @@ impl ThemeVariant {
 
     pub fn all() -> &'static [ThemeVariant] {
         &[
-            ThemeVariant::Default,
+            ThemeVariant::System,
             ThemeVariant::LightEucalyptus,
             ThemeVariant::DarkEucalyptus,
             ThemeVariant::AutoEucalyptus,
@@ -105,12 +107,13 @@ pub struct ThemeColors {
 
 impl Default for ThemeColors {
     fn default() -> Self {
-        Self::default_theme()
+        Self::auto_eucalyptus()
     }
 }
 
 impl ThemeColors {
-    fn default_theme() -> Self {
+    /// Terminal-color theme: defer to the system palette.
+    fn system_theme() -> Self {
         Self {
             tool_pending_bg: Color::Yellow,
             tool_success_bg: Color::Green,
@@ -176,7 +179,7 @@ impl ThemeColors {
 
     pub fn from_variant(variant: ThemeVariant) -> Self {
         match variant {
-            ThemeVariant::Default => Self::default_theme(),
+            ThemeVariant::System => Self::system_theme(),
             ThemeVariant::LightEucalyptus => Self::light_eucalyptus(),
             ThemeVariant::DarkEucalyptus => Self::dark_eucalyptus(),
             ThemeVariant::AutoEucalyptus => Self::auto_eucalyptus(),

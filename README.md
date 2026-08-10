@@ -70,7 +70,7 @@ Config schema (new format; the loader auto-migrates the old one):
   "enter_behavior": "enter_sends",
   "tool_preview_lines": 10,
   "border_type": "ascii",
-  "theme": "default",
+  "theme": "auto-eucalyptus",
   "auto_compact": true,
   "compact_reserved": null,
   "cache_retention": "normal",
