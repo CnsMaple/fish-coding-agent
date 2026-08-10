@@ -1356,6 +1356,7 @@ async fn handle_key(k: crossterm::event::KeyEvent, app: &mut App) {
                 }
             }
             app.tui_selection = None;
+            app.region_selection = None;
             app.input.clear_selection();
             return;
         }
@@ -1811,6 +1812,30 @@ fn screen_col_to_byte(buffer: &str, screen_col: u16, prefix_width: u16) -> usize
     buffer.len()
 }
 
+/// Translate a click inside the input area to a buffer byte offset, using
+/// the visual-row map recorded during the last render. Returns `None` if
+/// the row is not a rendered text row.
+fn input_click_to_byte(
+    app: &App,
+    row: u16,
+    col: u16,
+    prefix_width: u16,
+    inner_x: u16,
+) -> Option<usize> {
+    let (byte_start, byte_end) = app
+        .input_visual_rows
+        .iter()
+        .find(|&&(r, _, _)| r == row)
+        .map(|&(_, s, e)| (s, e))?;
+    let text = &app.input.buffer[byte_start..byte_end];
+    // Column relative to the inner content area (offset from the region's
+    // left edge), minus the prompt prefix, then to a byte offset within
+    // the row's text.
+    let rel = col.saturating_sub(inner_x).saturating_sub(prefix_width);
+    let row_byte = screen_col_to_byte(text, rel, 0);
+    Some(byte_start + row_byte)
+}
+
 /// Track the start of an in-progress drag selection.
 #[derive(Default)]
 struct DragState {
@@ -1996,8 +2021,18 @@ fn session_max_scroll(app: &mut App) -> u32 {
 
 fn handle_mouse(m: MouseEvent, app: &mut App) {
     let prompt = app.input_prompt_area;
-    let prefix_width = unicode_width::UnicodeWidthStr::width(" > ") as u16;
-    let in_prompt_row = prompt.map(|r| m.row == r.y).unwrap_or(false);
+    // The input area's prompt prefix is a single space (see input::render),
+    // so text starts 1 column in from the inner area's left edge.
+    let prefix_width: u16 = 1;
+    // The click is inside the input area if it lands on any rendered
+    // visual row (not just the first line). `input_visual_rows` lists the
+    // screen rows that actually carry text, so a click on a wrapped
+    // continuation row is recognized as well.
+    let in_input_area = app
+        .input_visual_rows
+        .iter()
+        .any(|&(row, _, _)| row == m.row);
+    let in_prompt_row = in_input_area;
 
     // Mouse wheel scroll — instant jump by the OS step.
     //
@@ -2282,56 +2317,121 @@ fn handle_mouse(m: MouseEvent, app: &mut App) {
                 app.focus_target = crate::function::FocusTarget::Input;
             }
 
+            // Determine which selection region (if any) the Down landed
+            // in. Region selections use pure screen coordinates.
+            let region = if in_agents {
+                Some(crate::function::SelectionRegion::Agents)
+            } else if in_panel {
+                Some(crate::function::SelectionRegion::FunctionPanel)
+            } else {
+                None
+            };
+
             // Clear any prior selection but DO NOT create a new one yet.
-            // We only commit a TUI selection when the user actually drags,
+            // We only commit a selection when the user actually drags,
             // so a plain click leaves the screen untouched.
             app.tui_selection = None;
             app.selected_text = None;
-            app.tui_drag_start = Some((m.column, m.row));
+            app.region_selection = None;
+            app.tui_drag_start = None;
+            app.region_drag_start = None;
             app.input.clear_selection();
+            if region.is_some() {
+                app.region_drag_start = Some((m.column, m.row));
+            } else {
+                app.tui_drag_start = Some((m.column, m.row));
+            }
             if let Ok(mut d) = DRAG.lock() {
                 d.active = false;
             }
             if in_prompt_row {
-                let byte = screen_col_to_byte(&app.input.buffer, m.column, prefix_width);
-                app.input.cursor = byte;
-                if let Some(p) = prompt {
+                if let Some(byte) = input_click_to_byte(
+                    app,
+                    m.row,
+                    m.column,
+                    prefix_width,
+                    prompt.map(|r| r.x).unwrap_or(0),
+                ) {
+                    app.input.cursor = byte;
                     if let Ok(mut d) = DRAG.lock() {
                         d.active = true;
                         d.prefix_width = prefix_width;
                         d.start_byte = byte;
-                        d.prompt_row = p.y as i32;
+                        d.prompt_row = m.row as i32;
                     }
                 }
             }
         }
         MouseEventKind::Drag(MouseButton::Left) => {
-            // The first Drag after a Down materializes the selection. Any
-            // prior click that did not move never created one, so this is
-            // also how a click-only event stays invisible.
-            if let Some(start) = app.tui_drag_start {
-                if app.tui_selection.is_none() {
-                    if let Some(area) = app.session_area {
-                        let width = area.width as usize;
-                        let total = app.session.count_all_lines_with_width(width);
-                        let doc_start =
-                            screen_y_to_doc_line(start.1, &area, app.session.scroll, total);
-                        let col_start = start.0.saturating_sub(area.x);
-                        app.tui_selection = Some(crate::function::Selection {
-                            doc_start,
-                            doc_end: doc_start,
-                            col_start: Some(col_start),
-                            col_end: Some(col_start),
-                            active: true,
-                        });
-                    }
+            // Region drag (agents area / function panel). Mutually
+            // exclusive with the session drag below: only one drag start
+            // can be set at a time.
+            if let Some(start) = app.region_drag_start {
+                let drag_in_agents = app
+                    .agents_area
+                    .map(|a| m.row >= a.y && m.row < a.y + a.height)
+                    .unwrap_or(false);
+                let drag_in_panel = app
+                    .function_panel_area
+                    .map(|a| m.row >= a.y && m.row < a.y + a.height)
+                    .unwrap_or(false);
+                let region = if drag_in_agents {
+                    crate::function::SelectionRegion::Agents
+                } else if drag_in_panel {
+                    crate::function::SelectionRegion::FunctionPanel
+                } else {
+                    // Drag left the region — keep the region it started in.
+                    app.region_selection.map(|s| s.region).unwrap_or_else(|| {
+                        // Fall back by checking which area `start` is in.
+                        if app
+                            .agents_area
+                            .map(|a| start.1 >= a.y && start.1 < a.y + a.height)
+                            .unwrap_or(false)
+                        {
+                            crate::function::SelectionRegion::Agents
+                        } else {
+                            crate::function::SelectionRegion::FunctionPanel
+                        }
+                    })
+                };
+                if app.region_selection.is_none() {
+                    app.region_selection =
+                        Some(crate::function::RegionSelection::new(region, start));
                 }
-                if let Some(sel) = app.tui_selection.as_mut() {
-                    if let Some(area) = app.session_area {
-                        let width = area.width as usize;
-                        let total = app.session.count_all_lines_with_width(width);
-                        sel.doc_end = screen_y_to_doc_line(m.row, &area, app.session.scroll, total);
-                        sel.col_end = Some(m.column.saturating_sub(area.x));
+                if let Some(sel) = app.region_selection.as_mut() {
+                    sel.region = region;
+                    sel.end = (m.column, m.row);
+                }
+            } else {
+                // The first Drag after a Down materializes the session
+                // selection. Any prior click that did not move never
+                // created one, so this is also how a click-only event
+                // stays invisible.
+                if let Some(start) = app.tui_drag_start {
+                    if app.tui_selection.is_none() {
+                        if let Some(area) = app.session_area {
+                            let width = area.width as usize;
+                            let total = app.session.count_all_lines_with_width(width);
+                            let doc_start =
+                                screen_y_to_doc_line(start.1, &area, app.session.scroll, total);
+                            let col_start = start.0.saturating_sub(area.x);
+                            app.tui_selection = Some(crate::function::Selection {
+                                doc_start,
+                                doc_end: doc_start,
+                                col_start: Some(col_start),
+                                col_end: Some(col_start),
+                                active: true,
+                            });
+                        }
+                    }
+                    if let Some(sel) = app.tui_selection.as_mut() {
+                        if let Some(area) = app.session_area {
+                            let width = area.width as usize;
+                            let total = app.session.count_all_lines_with_width(width);
+                            sel.doc_end =
+                                screen_y_to_doc_line(m.row, &area, app.session.scroll, total);
+                            sel.col_end = Some(m.column.saturating_sub(area.x));
+                        }
                     }
                 }
             }
@@ -2344,7 +2444,14 @@ fn handle_mouse(m: MouseEvent, app: &mut App) {
                     }
                 });
                 if let Some((_pw, start_byte)) = drag {
-                    let end_byte = screen_col_to_byte(&app.input.buffer, m.column, prefix_width);
+                    let end_byte = input_click_to_byte(
+                        app,
+                        m.row,
+                        m.column,
+                        prefix_width,
+                        prompt.map(|r| r.x).unwrap_or(0),
+                    )
+                    .unwrap_or(start_byte);
                     app.input.cursor = end_byte;
                     if start_byte == end_byte {
                         app.input.clear_selection();
@@ -2363,8 +2470,12 @@ fn handle_mouse(m: MouseEvent, app: &mut App) {
             // A click (Down + Up with no Drag) ends here: no selection
             // was ever created, so nothing to finalize.
             app.tui_drag_start = None;
+            app.region_drag_start = None;
             app.pending_tool_toggle = None;
             if let Some(sel) = app.tui_selection.as_mut() {
+                sel.active = false;
+            }
+            if let Some(sel) = app.region_selection.as_mut() {
                 sel.active = false;
             }
             if let Ok(mut d) = DRAG.lock() {
@@ -2372,9 +2483,9 @@ fn handle_mouse(m: MouseEvent, app: &mut App) {
             }
         }
         MouseEventKind::Moved => {
-            // Do not cancel a TUI selection or in-progress drag on
-            // Moved. A finalized selection persists; an in-progress
-            // drag continues. Only the input-area drag lock is released.
+            // Do not cancel a selection or in-progress drag on Moved.
+            // A finalized selection persists; an in-progress drag
+            // continues. Only the input-area drag lock is released.
             if let Ok(mut d) = DRAG.lock() {
                 d.active = false;
             }

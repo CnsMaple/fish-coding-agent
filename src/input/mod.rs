@@ -828,6 +828,44 @@ pub fn render(area: Rect, buf: &mut Buffer, app: &mut crate::app::App) {
     let p = Paragraph::new(visual_lines);
     p.render(inner, buf);
     app.input_prompt_area = Some(inner);
+    // Record the visual-row → byte-range map so mouse clicks anywhere in
+    // the input area (including wrapped continuation rows) can be mapped
+    // back to a buffer byte offset. Each rendered visual line occupies one
+    // screen row starting at `inner.y`.
+    {
+        app.input_visual_rows.clear();
+        let mut byte_pos = 0usize;
+        let mut screen_row = inner.y;
+        for (idx, text) in all_lines.iter().enumerate() {
+            let line_start = byte_pos;
+            let line_end = line_start + text.len();
+            byte_pos = line_end + 1;
+            let n_vis = seg_vis[idx];
+            if idx < start_line || idx >= end_line {
+                continue;
+            }
+            let mut text_byte_offset = 0usize;
+            for _vi in 0..n_vis {
+                let remaining = &text[text_byte_offset..];
+                let mut chunk_w = 0usize;
+                let mut split_at = 0usize;
+                for (bi, ch) in remaining.char_indices() {
+                    let cw = char_width(ch);
+                    if chunk_w + cw > inner_w.saturating_sub(prompt_width) {
+                        break;
+                    }
+                    chunk_w += cw;
+                    split_at = bi + ch.len_utf8();
+                }
+                let chunk_abs_start = line_start + text_byte_offset;
+                text_byte_offset += split_at;
+                let chunk_abs_end = line_start + text_byte_offset;
+                app.input_visual_rows
+                    .push((screen_row, chunk_abs_start, chunk_abs_end));
+                screen_row += 1;
+            }
+        }
+    }
 
     // Render input scrollbar when scrolled away from cursor.
     if app.input_scroll_decoupled {

@@ -129,6 +129,13 @@ pub struct App {
     /// Cached screen rect of the input prompt line, updated on each render.
     pub input_prompt_area: Option<ratatui::layout::Rect>,
 
+    /// Visual-row → byte-range map of the input buffer, updated on each
+    /// render. Each entry is `(screen_row, byte_start, byte_end)` for the
+    /// text rendered on that row (continuation/wrapped rows included), so
+    /// a mouse click anywhere in the input area can be translated back to
+    /// a buffer byte offset — not just the first line.
+    pub input_visual_rows: Vec<(u16, usize, usize)>,
+
     /// Snapshots of the most recently removed turn (user prompt + its
     /// assistant response + tool blocks) taken by `/undo`. Each entry
     /// is the full `Vec<Message>` of the undone turn, so `/redo` can
@@ -154,6 +161,14 @@ pub struct App {
     /// Lets us avoid creating a single-cell "selection" for an
     /// ordinary click with no drag movement.
     pub tui_drag_start: Option<(u16, u16)>,
+    /// A rectangular mouse selection over the agents area / function
+    /// panel. `Some` while the user is dragging or has a finished
+    /// selection. `None` when no region selection is active.
+    pub region_selection: Option<RegionSelection>,
+    /// Where a region drag started, if any. Only set when the Down
+    /// landed inside the agents area or the function panel. Consumed
+    /// on the first Drag to create `region_selection`, cleared on Up.
+    pub region_drag_start: Option<(u16, u16)>,
     /// `(msg_idx, tool_idx)` captured on Mouse Down when the click
     /// lands inside a tool block. The toggle is deferred to Mouse Up
     /// so a drag (text selection) inside the block cancels the toggle.
@@ -329,6 +344,45 @@ impl Selection {
     }
 }
 
+/// Which non-session, non-input region a block-selection belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectionRegion {
+    Agents,
+    FunctionPanel,
+}
+
+/// A rectangular, screen-cell selection inside the agents area or the
+/// function panel. Unlike `Selection` (document lines), these regions
+/// are pure screen coordinates: the user drags a rectangle over the
+/// rendered cells and `ui::render` highlights the rectangle and copies
+/// the visible cell text on Ctrl+C.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RegionSelection {
+    pub region: SelectionRegion,
+    /// Inclusive start cell (left/top) of the selection rectangle.
+    pub start: (u16, u16),
+    /// Inclusive end cell (right/bottom) of the selection rectangle.
+    pub end: (u16, u16),
+    pub active: bool,
+}
+
+impl RegionSelection {
+    pub fn new(region: SelectionRegion, cell: (u16, u16)) -> Self {
+        Self {
+            region,
+            start: cell,
+            end: cell,
+            active: true,
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.start = (0, 0);
+        self.end = (0, 0);
+        self.active = false;
+    }
+}
+
 #[derive(Debug)]
 pub struct InflightHandle {
     pub cancel: tokio::sync::watch::Sender<bool>,
@@ -415,11 +469,14 @@ impl App {
             mcp_tools_dirty: true,
             disabled_tools: std::collections::HashSet::new(),
             input_prompt_area: None,
+            input_visual_rows: Vec::new(),
             undo_turn_stack: VecDeque::new(),
             redo_turn_stack: VecDeque::new(),
             tui_selection: None,
             selected_text: None,
             tui_drag_start: None,
+            region_selection: None,
+            region_drag_start: None,
             pending_tool_toggle: None,
             last_mouse_event: None,
             input_cursor_screen: None,

@@ -81,11 +81,14 @@ fn make_app() -> App {
         mcp_tools_dirty: true,
         disabled_tools: std::collections::HashSet::new(),
         input_prompt_area: None,
+        input_visual_rows: Vec::new(),
         undo_turn_stack: VecDeque::new(),
         redo_turn_stack: VecDeque::new(),
         tui_selection: None,
         selected_text: None,
         tui_drag_start: None,
+        region_selection: None,
+        region_drag_start: None,
         pending_tool_toggle: None,
         model_cache_path: cache_file,
         thinking_toggle_rows: Vec::new(),
@@ -1968,6 +1971,241 @@ fn drag_creates_tui_selection_after_real_movement() {
     assert!(!sel.active, "Up must finalize the selection");
     assert_eq!(sel.doc_start, 2);
     assert_eq!(sel.doc_end, 5);
+}
+
+#[test]
+fn region_drag_creates_agents_selection() {
+    // Dragging inside the agents area must create a rectangular region
+    // selection (screen coordinates), mutually exclusive with the
+    // session selection.
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    use ratatui::layout::Rect;
+
+    let mut app = make_app();
+    app.agents_area = Some(Rect::new(0, 0, 80, 5));
+    let down = MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 5,
+        row: 1,
+        modifiers: crossterm::event::KeyModifiers::NONE,
+    };
+    let drag = MouseEvent {
+        kind: MouseEventKind::Drag(MouseButton::Left),
+        column: 20,
+        row: 3,
+        modifiers: crossterm::event::KeyModifiers::NONE,
+    };
+    let up = MouseEvent {
+        kind: MouseEventKind::Up(MouseButton::Left),
+        column: 20,
+        row: 3,
+        modifiers: crossterm::event::KeyModifiers::NONE,
+    };
+    handle_mouse(down, &mut app);
+    // Down must not commit a selection yet.
+    assert!(
+        app.region_selection.is_none(),
+        "Down must only record the region drag start"
+    );
+    assert!(app.region_drag_start.is_some());
+    handle_mouse(drag, &mut app);
+    handle_mouse(up, &mut app);
+
+    let sel = app
+        .region_selection
+        .expect("a region drag must create a selection");
+    assert!(!sel.active, "Up must finalize the region selection");
+    assert_eq!(sel.region, crate::function::SelectionRegion::Agents);
+    assert_eq!(sel.start, (5, 1));
+    assert_eq!(sel.end, (20, 3));
+    // The session selection must not be created.
+    assert!(app.tui_selection.is_none());
+}
+
+#[test]
+fn region_click_does_not_create_selection() {
+    // A plain click (Down + Up, no drag) in the agents area must leave
+    // no region selection behind.
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    use ratatui::layout::Rect;
+
+    let mut app = make_app();
+    app.agents_area = Some(Rect::new(0, 0, 80, 5));
+    let down = MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 5,
+        row: 1,
+        modifiers: crossterm::event::KeyModifiers::NONE,
+    };
+    let up = MouseEvent {
+        kind: MouseEventKind::Up(MouseButton::Left),
+        column: 5,
+        row: 1,
+        modifiers: crossterm::event::KeyModifiers::NONE,
+    };
+    handle_mouse(down, &mut app);
+    handle_mouse(up, &mut app);
+    assert!(
+        app.region_selection.is_none(),
+        "click with no drag must leave no region selection"
+    );
+    assert!(app.region_drag_start.is_none());
+}
+
+#[test]
+fn region_selections_are_mutually_exclusive_with_session() {
+    // Selecting in the agents area must clear any session selection,
+    // and selecting in the session must clear any region selection.
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    use ratatui::layout::Rect;
+
+    let mut app = make_app();
+    app.agents_area = Some(Rect::new(0, 0, 80, 5));
+    app.session_area = Some(Rect::new(0, 5, 80, 19));
+    for i in 0..10 {
+        app.session.push(crate::session::Message::new(
+            crate::session::Role::Assistant,
+            format!("line {i}"),
+        ));
+    }
+    app.session.count_all_lines_with_width(80);
+
+    // First: session drag creates a session selection.
+    let down = MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 2,
+        row: 6,
+        modifiers: crossterm::event::KeyModifiers::NONE,
+    };
+    let drag = MouseEvent {
+        kind: MouseEventKind::Drag(MouseButton::Left),
+        column: 10,
+        row: 8,
+        modifiers: crossterm::event::KeyModifiers::NONE,
+    };
+    let up = MouseEvent {
+        kind: MouseEventKind::Up(MouseButton::Left),
+        column: 10,
+        row: 8,
+        modifiers: crossterm::event::KeyModifiers::NONE,
+    };
+    handle_mouse(down, &mut app);
+    handle_mouse(drag, &mut app);
+    handle_mouse(up, &mut app);
+    assert!(app.tui_selection.is_some());
+
+    // Then: agents drag must clear the session selection and create a
+    // region selection instead.
+    let down = MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 5,
+        row: 1,
+        modifiers: crossterm::event::KeyModifiers::NONE,
+    };
+    let drag = MouseEvent {
+        kind: MouseEventKind::Drag(MouseButton::Left),
+        column: 20,
+        row: 3,
+        modifiers: crossterm::event::KeyModifiers::NONE,
+    };
+    let up = MouseEvent {
+        kind: MouseEventKind::Up(MouseButton::Left),
+        column: 20,
+        row: 3,
+        modifiers: crossterm::event::KeyModifiers::NONE,
+    };
+    handle_mouse(down, &mut app);
+    handle_mouse(drag, &mut app);
+    handle_mouse(up, &mut app);
+    assert!(
+        app.tui_selection.is_none(),
+        "agents drag must clear the session selection"
+    );
+    assert!(app.region_selection.is_some());
+}
+
+#[test]
+fn input_click_on_wrapped_row_positions_cursor() {
+    // A click on a non-first (wrapped/continuation) visual row of the
+    // input area must move the cursor to the correct byte offset — not
+    // just the first line. We simulate the visual-row map that `render`
+    // would have produced: buffer `"abc\ndefgh"` rendered with prompt
+    // prefix at inner.x=0, first line `abc` on screen row 2, second
+    // line `defgh` on screen row 3.
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    use ratatui::layout::Rect;
+
+    let mut app = make_app();
+    app.input.buffer = "abc\ndefgh".to_string();
+    app.input.cursor = 0;
+    app.input_prompt_area = Some(Rect::new(0, 2, 40, 5));
+    // Row 2 -> "abc" (bytes 0..3), row 3 -> "defgh" (bytes 4..9).
+    app.input_visual_rows.push((2, 0, 3));
+    app.input_visual_rows.push((3, 4, 9));
+
+    // Click on the second visual line (row 3), on its 3rd char 'f'
+    // (index 2). Column = prefix(1) + col(2) = 3, cursor at byte 4+2=6.
+    let down = MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 1 + 2,
+        row: 3,
+        modifiers: crossterm::event::KeyModifiers::NONE,
+    };
+    handle_mouse(down, &mut app);
+    assert_eq!(
+        app.input.cursor, 6,
+        "click on wrapped row must map to the correct byte offset"
+    );
+    assert_eq!(
+        app.focus_target,
+        crate::function::FocusTarget::Input,
+        "clicking input must focus the input area"
+    );
+    // Release the mouse so the global `DRAG` state does not leak into
+    // other tests (they share the static).
+    let up = MouseEvent {
+        kind: MouseEventKind::Up(MouseButton::Left),
+        column: 1 + 2,
+        row: 3,
+        modifiers: crossterm::event::KeyModifiers::NONE,
+    };
+    handle_mouse(up, &mut app);
+}
+
+#[test]
+fn input_click_on_multiline_selects_across_lines() {
+    // Dragging across two visual rows of the input area must produce a
+    // selection spanning both lines (start on the first row, end on the
+    // wrapped row), using the visual-row byte map.
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    use ratatui::layout::Rect;
+
+    let mut app = make_app();
+    app.input.buffer = "abc\ndefgh".to_string();
+    app.input.cursor = 0;
+    app.input_prompt_area = Some(Rect::new(0, 2, 40, 5));
+    app.input_visual_rows.push((2, 0, 3));
+    app.input_visual_rows.push((3, 4, 9));
+
+    // Down on first line's 2nd char ("b", byte 1): column = prefix(1)+1.
+    let down = MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 2,
+        row: 2,
+        modifiers: crossterm::event::KeyModifiers::NONE,
+    };
+    handle_mouse(down, &mut app);
+    // Drag to second line's 4th char ("h", byte 4+3=7): column = prefix(1)+3.
+    let drag = MouseEvent {
+        kind: MouseEventKind::Drag(MouseButton::Left),
+        column: 4,
+        row: 3,
+        modifiers: crossterm::event::KeyModifiers::NONE,
+    };
+    handle_mouse(drag, &mut app);
+    let sel = app.input.selection.expect("drag must create a selection");
+    assert_eq!(sel.0, 1, "selection must start at byte 1");
+    assert_eq!(sel.1, 7, "selection must end at byte 7");
 }
 
 fn esc_key() -> KeyEvent {

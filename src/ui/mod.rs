@@ -155,6 +155,38 @@ pub fn render(f: &mut Frame, app: &mut App) {
         app.selected_text = None;
     }
 
+    // Region selection (agents area / function panel): highlight the
+    // rectangle and extract the visible cell text into `selected_text`
+    // so Ctrl+C copies it with the same path as the session selection.
+    if let Some(sel) = app.region_selection {
+        let buf = f.buffer_mut();
+        // Clip the selection to the region's inner content box (excluding
+        // its 1-cell border) so the border is never selected and the
+        // selection never spills past the region edge.
+        let clip = match sel.region {
+            crate::function::SelectionRegion::Agents => app.agents_area.map(|a| {
+                ratatui::layout::Rect::new(
+                    a.x + 1,
+                    a.y + 1,
+                    a.width.saturating_sub(2),
+                    a.height.saturating_sub(2),
+                )
+            }),
+            crate::function::SelectionRegion::FunctionPanel => app.function_panel_area.map(|a| {
+                ratatui::layout::Rect::new(
+                    a.x + 1,
+                    a.y + 1,
+                    a.width.saturating_sub(2),
+                    a.height.saturating_sub(2),
+                )
+            }),
+        };
+        if let Some(clip) = clip {
+            apply_region_selection_style(buf, &sel, &clip);
+            app.selected_text = Some(extract_region_selection_text(buf, &sel, &clip));
+        }
+    }
+
     if app.force_full_repaint && app.inflight.is_none() {
         let buf = f.buffer_mut();
         let area = app.session_area.unwrap_or(*buf.area());
@@ -847,6 +879,136 @@ pub fn extract_selection_text(sel: &Selection, session: &Session, width: usize) 
     lines.join("\n")
 }
 
+/// Apply a REVERSED style to the text cells selected by the region drag,
+/// using line-wise logic (like the session area): the first row spans from
+/// the drag-start column to the end of the line, the last row spans from
+/// the start of the line to the drag-end column, and any middle rows span
+/// the full width. Only cells that actually hold a symbol are reversed, so
+/// the highlight runs through the text rather than filling a box.
+///
+/// `clip` is the region's inner content box (its bordered area minus the
+/// border). Everything is clamped to it so the border is never selected
+/// and the highlight never spills past the region edge.
+fn apply_region_selection_style(
+    buf: &mut Buffer,
+    sel: &crate::function::RegionSelection,
+    clip: &Rect,
+) {
+    let y0 = sel.start.1.min(sel.end.1).max(clip.y);
+    let y1 = sel
+        .start
+        .1
+        .max(sel.end.1)
+        .min(clip.y.saturating_add(clip.height.saturating_sub(1)));
+    if y0 > y1 {
+        return;
+    }
+    // The top row (y0) is anchored at the column of the drag's top-most
+    // row and the bottom row (y1) at the column of its bottom-most row.
+    // When dragging upward the roles swap, mirroring `apply_selection_style`
+    // in the session area.
+    let (top_col, bot_col) = if sel.start.1 <= sel.end.1 {
+        (sel.start.0, sel.end.0)
+    } else {
+        (sel.end.0, sel.start.0)
+    };
+    let clip_x0 = clip.x;
+    let clip_x1 = clip.x.saturating_add(clip.width.saturating_sub(1));
+    for y in y0..=y1 {
+        // First row: from the anchor column to the end of the line. Last
+        // row: from the start of the line to the endpoint column. Middle
+        // rows span the full content width.
+        let (row_x0, row_x1) = if y0 == y1 {
+            (top_col.min(bot_col), top_col.max(bot_col))
+        } else if y == y0 {
+            (top_col, clip_x1)
+        } else if y == y1 {
+            (clip_x0, bot_col)
+        } else {
+            (clip_x0, clip_x1)
+        };
+        let row_x0 = row_x0.max(clip_x0);
+        let row_x1 = row_x1.min(clip_x1);
+        if row_x0 > row_x1 {
+            continue;
+        }
+        for x in row_x0..=row_x1 {
+            if let Some(cell) = buf.cell_mut((x, y)) {
+                // Only reverse cells that contain visible text. Wide (CJK)
+                // chars occupy two cells; the second cell has an empty
+                // symbol, so it is naturally skipped here. Blank padding
+                // (the default " " fill) is also skipped so the highlight
+                // runs through the text rather than filling the box.
+                let sym = cell.symbol();
+                if sym.is_empty() || sym == " " {
+                    continue;
+                }
+                let new_style = cell.style().add_modifier(Modifier::REVERSED);
+                cell.set_style(new_style);
+            }
+        }
+    }
+}
+
+/// Read the visible symbols selected by the region drag and return them as
+/// plain text, using the same line-wise column logic as the highlight (see
+/// `apply_region_selection_style`). `clip` is the region's inner content
+/// box; everything is clamped to it so border characters and cells outside
+/// the region are never included. Trailing whitespace is trimmed and empty
+/// trailing rows are dropped.
+fn extract_region_selection_text(
+    buf: &Buffer,
+    sel: &crate::function::RegionSelection,
+    clip: &Rect,
+) -> String {
+    let y0 = sel.start.1.min(sel.end.1).max(clip.y);
+    let y1 = sel
+        .start
+        .1
+        .max(sel.end.1)
+        .min(clip.y.saturating_add(clip.height.saturating_sub(1)));
+    if y0 > y1 {
+        return String::new();
+    }
+    let (top_col, bot_col) = if sel.start.1 <= sel.end.1 {
+        (sel.start.0, sel.end.0)
+    } else {
+        (sel.end.0, sel.start.0)
+    };
+    let clip_x0 = clip.x;
+    let clip_x1 = clip.x.saturating_add(clip.width.saturating_sub(1));
+    let mut lines: Vec<String> = Vec::new();
+    for y in y0..=y1 {
+        // Same line-wise column logic as `apply_region_selection_style`.
+        let (row_x0, row_x1) = if y0 == y1 {
+            (top_col.min(bot_col), top_col.max(bot_col))
+        } else if y == y0 {
+            (top_col, clip_x1)
+        } else if y == y1 {
+            (clip_x0, bot_col)
+        } else {
+            (clip_x0, clip_x1)
+        };
+        let row_x0 = row_x0.max(clip_x0);
+        let row_x1 = row_x1.min(clip_x1);
+        let mut row = String::new();
+        for x in row_x0..=row_x1 {
+            if let Some(cell) = buf.cell((x, y)) {
+                // A wide (CJK) char occupies two cells; the second cell's
+                // symbol is empty, so skip it to avoid a spurious space.
+                if !cell.symbol().is_empty() {
+                    row.push_str(cell.symbol());
+                }
+            }
+        }
+        lines.push(row.trim_end().to_string());
+    }
+    while lines.len() > 1 && lines.last().unwrap().is_empty() {
+        lines.pop();
+    }
+    lines.join("\n")
+}
+
 /// Slice a string by visual (terminal cell) column range [start, end),
 /// respecting wide (CJK) characters that occupy 2 cells.
 fn slice_by_visual_width(s: &str, start_col: usize, end_col: usize) -> String {
@@ -1000,6 +1162,8 @@ pub fn render_agents_area(
 mod tests {
     use super::*;
     use crate::config::ThinkingDisplay;
+    use crate::function::RegionSelection;
+    use crate::function::SelectionRegion;
     use crate::session::{Message, Role, ThinkingSegment, ToolResultBlock};
 
     fn shell_tool() -> ToolResultBlock {
@@ -1167,6 +1331,143 @@ mod tests {
         assert!(
             thinking[0].top > 0,
             "thinking block should be offset past leading content"
+        );
+    }
+
+    #[test]
+    fn extract_region_selection_text_reads_cells() {
+        // Build a small buffer with explicit symbols and confirm the
+        // region extractor returns the selected rows as plain text,
+        // trimming trailing whitespace and dropping empty trailing rows.
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+
+        let mut buf = Buffer::empty(Rect::new(0, 0, 10, 4));
+        let set = |buf: &mut Buffer, x, y, s: &str| {
+            buf.cell_mut((x, y)).unwrap().set_symbol(s);
+        };
+        set(&mut buf, 0, 0, "h");
+        set(&mut buf, 1, 0, "e");
+        set(&mut buf, 2, 0, "l");
+        set(&mut buf, 3, 0, "l");
+        set(&mut buf, 4, 0, "o");
+        set(&mut buf, 0, 1, "w");
+        set(&mut buf, 1, 1, "o");
+        set(&mut buf, 2, 1, "r");
+        set(&mut buf, 3, 1, "l");
+        set(&mut buf, 4, 1, "d");
+        set(&mut buf, 0, 2, "x");
+        set(&mut buf, 1, 2, "y");
+        // Row 3 left empty.
+
+        let sel = RegionSelection::new(SelectionRegion::FunctionPanel, (0, 0));
+        let mut sel = sel;
+        sel.end = (4, 2);
+        let clip = Rect::new(0, 0, 10, 4);
+        let text = extract_region_selection_text(&buf, &sel, &clip);
+        assert_eq!(text, "hello\nworld\nxy");
+    }
+
+    #[test]
+    fn apply_region_selection_style_reverses_cells() {
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+
+        let mut buf = Buffer::empty(Rect::new(0, 0, 10, 4));
+        // Populate a two-row selection: row 0 has text on cols 0..5, row 1
+        // has one char at col 0 (the rest blank). The rectangle spans
+        // cols 0..5 across both rows.
+        for (x, ch) in "hello".chars().enumerate() {
+            buf.cell_mut((x as u16, 0))
+                .unwrap()
+                .set_symbol(&ch.to_string());
+        }
+        buf.cell_mut((0, 1)).unwrap().set_symbol("w");
+        let mut sel = RegionSelection::new(SelectionRegion::Agents, (0, 0));
+        sel.end = (5, 1);
+        let clip = Rect::new(0, 0, 10, 4);
+        apply_region_selection_style(&mut buf, &sel, &clip);
+        // Every text cell in the rectangle is reversed...
+        for x in 0..5 {
+            let cell = buf.cell((x, 0)).unwrap();
+            assert!(
+                cell.style().add_modifier.contains(Modifier::REVERSED),
+                "text cell ({x},0) must be reversed"
+            );
+        }
+        let cell = buf.cell((0, 1)).unwrap();
+        assert!(
+            cell.style().add_modifier.contains(Modifier::REVERSED),
+            "text cell (0,1) must be reversed"
+        );
+        // ...but blank cells inside the rectangle are NOT reversed, so the
+        // highlight is line-wise rather than a filled box.
+        for x in 1..6 {
+            let cell = buf.cell((x, 1)).unwrap();
+            assert!(
+                !cell.style().add_modifier.contains(Modifier::REVERSED),
+                "blank cell ({x},1) inside the rectangle must stay un-reversed"
+            );
+        }
+        // Out-of-rectangle cell untouched.
+        let outside = buf.cell((0, 2)).unwrap();
+        assert!(!outside.style().add_modifier.contains(Modifier::REVERSED));
+    }
+
+    #[test]
+    fn region_selection_is_line_wise_not_box() {
+        // Selecting from "2" on row 0 to "5" on row 1 must highlight and
+        // copy "2345" (line-wise), not a column box "25".
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+
+        let mut buf = Buffer::empty(Rect::new(0, 0, 10, 3));
+        for (x, ch) in "123".chars().enumerate() {
+            buf.cell_mut((x as u16, 0))
+                .unwrap()
+                .set_symbol(&ch.to_string());
+        }
+        for (x, ch) in "456".chars().enumerate() {
+            buf.cell_mut((x as u16, 1))
+                .unwrap()
+                .set_symbol(&ch.to_string());
+        }
+        let clip = Rect::new(0, 0, 10, 3);
+        let mut sel = RegionSelection::new(SelectionRegion::Agents, (1, 0));
+        sel.end = (1, 1);
+        // Copy result must be line-wise.
+        let text = extract_region_selection_text(&buf, &sel, &clip);
+        assert_eq!(text, "23\n45");
+        // Highlight must reverse row 0 cols 1..end and row 1 cols start..1.
+        apply_region_selection_style(&mut buf, &sel, &clip);
+        for x in 1..3 {
+            assert!(
+                buf.cell((x, 0))
+                    .unwrap()
+                    .style()
+                    .add_modifier
+                    .contains(Modifier::REVERSED),
+                "row0 col {x} must be reversed"
+            );
+        }
+        for x in 0..2 {
+            assert!(
+                buf.cell((x, 1))
+                    .unwrap()
+                    .style()
+                    .add_modifier
+                    .contains(Modifier::REVERSED),
+                "row1 col {x} must be reversed"
+            );
+        }
+        // Column 0 of row 0 (the "1") must NOT be reversed.
+        assert!(
+            !buf.cell((0, 0))
+                .unwrap()
+                .style()
+                .add_modifier
+                .contains(Modifier::REVERSED),
+            "row0 col0 (the '1') must stay un-reversed"
         );
     }
 }
