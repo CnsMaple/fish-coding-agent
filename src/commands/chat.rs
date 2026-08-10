@@ -8,8 +8,8 @@ use serde_json::json;
 use std::time::Duration;
 
 use super::utils::{
-    detect_repeated_snippet, detect_within_turn_repetition, is_doom_loop, parse_text_tool_calls,
-    parse_tool_result_display, tool_result_title,
+    detect_within_turn_repetition, is_doom_loop, parse_text_tool_calls, parse_tool_result_display,
+    tool_result_title,
 };
 use super::{
     build_agents_content, compact_now, open_settings, system_prompt, system_prompt_dynamic_full,
@@ -426,16 +426,6 @@ pub async fn run_chat_stream(
     // user is asked to intervene. Matches opencode's
     // `DOOM_LOOP_THRESHOLD`.
     let mut doom_history: Vec<(String, String)> = Vec::new();
-    // Rolling record of recent assistant *text* (the prose emitted before
-    // tool calls). The argument-based doom-loop detector misses a model
-    // that loops by repeating the same sentence every turn while varying
-    // tool args; this detects the repeated text snippet instead.
-    let mut text_history: Vec<String> = Vec::new();
-    // Rolling record of recent assistant *thinking* text. A model can also
-    // get stuck reasoning in circles (repeating the same sentence in its
-    // invisible chain-of-thought) without ever emitting a stuck tool call
-    // or visible prose; the same snippet detectors catch that here.
-    let mut thinking_history: Vec<String> = Vec::new();
     loop {
         if *cancel_rx.borrow() {
             // Silent exit. We do NOT send `ChatDone` / `ChatError`
@@ -614,31 +604,11 @@ pub async fn run_chat_stream(
             return;
         }
 
-        // Text-snippet repetition guard: if the assistant has emitted the
-        // same long text snippet across SNIPPET_MIN_COUNT distinct recent
-        // turns, it is stuck in a prose loop (the argument-based doom-loop
-        // detector below cannot catch it because the tool args vary).
+        // Repetition guard: the model may echo the same sentence many times
+        // inside a single response (e.g. repeatedly announcing it will
+        // rebuild files, or reasoning in circles). Only the current response
+        // is inspected; repeated content is genuine stuck-loop behaviour.
         if !assistant_content.trim().is_empty() {
-            if let Some(snippet) = detect_repeated_snippet(&text_history, &assistant_content) {
-                let display = if snippet.chars().count() > 60 {
-                    let mut it = snippet.chars();
-                    let head: String = it.by_ref().take(60).collect();
-                    format!("{head}…")
-                } else {
-                    snippet.clone()
-                };
-                send_msg(crate::event::AppMsg::ChatWarn(format!(
-                    "repeated assistant text detected ({:?}): `{}`. Pausing for user review.",
-                    snippet.len(),
-                    display
-                )));
-                send_msg(crate::event::AppMsg::ChatDone { seq });
-                return;
-            }
-            // Within-turn check: the model may echo the same sentence many
-            // times inside a single message (e.g. repeatedly announcing it
-            // will rebuild files) without ever crossing the across-turn
-            // threshold. Catch that too.
             if let Some(snippet) = detect_within_turn_repetition(&assistant_content) {
                 let display = if snippet.chars().count() > 60 {
                     let mut it = snippet.chars();
@@ -655,31 +625,13 @@ pub async fn run_chat_stream(
                 send_msg(crate::event::AppMsg::ChatDone { seq });
                 return;
             }
-            text_history.push(assistant_content.clone());
         }
 
         // Thinking repetition guard: the model can get stuck reasoning in
         // circles even when its visible prose and tool calls look healthy.
-        // Apply the same across-turn and within-turn detectors to the
-        // accumulated thinking text so an invisible chain-of-thought loop
-        // is broken instead of burning tokens.
+        // Inspect the current response's accumulated thinking text so an
+        // invisible chain-of-thought loop is broken instead of burning tokens.
         if !thinking_text.trim().is_empty() {
-            if let Some(snippet) = detect_repeated_snippet(&thinking_history, &thinking_text) {
-                let display = if snippet.chars().count() > 60 {
-                    let mut it = snippet.chars();
-                    let head: String = it.by_ref().take(60).collect();
-                    format!("{head}…")
-                } else {
-                    snippet.clone()
-                };
-                send_msg(crate::event::AppMsg::ChatWarn(format!(
-                    "repeated thinking text detected ({:?}): `{}`. Pausing for user review.",
-                    snippet.len(),
-                    display
-                )));
-                send_msg(crate::event::AppMsg::ChatDone { seq });
-                return;
-            }
             if let Some(snippet) = detect_within_turn_repetition(&thinking_text) {
                 let display = if snippet.chars().count() > 60 {
                     let mut it = snippet.chars();
@@ -696,7 +648,6 @@ pub async fn run_chat_stream(
                 send_msg(crate::event::AppMsg::ChatDone { seq });
                 return;
             }
-            thinking_history.push(thinking_text);
         }
 
         req.messages.push(ChatMessage {

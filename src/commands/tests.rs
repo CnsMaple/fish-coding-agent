@@ -1,4 +1,4 @@
-use super::utils::{detect_repeated_snippet, detect_within_turn_repetition, is_doom_loop};
+use super::utils::{detect_within_turn_repetition, is_doom_loop};
 #[cfg(test)]
 #[allow(clippy::module_inception)]
 mod tests {
@@ -38,56 +38,6 @@ mod tests {
     }
 
     #[test]
-    fn repeated_snippet_triggers_on_three_identical_texts() {
-        let snippet = "现在实现 AppMode::Loop 变体。";
-        let h: Vec<String> = vec![snippet.to_string(), snippet.to_string()];
-        let found = detect_repeated_snippet(&h, &format!("{snippet} 现在执行。"));
-        assert!(found.is_some(), "3rd identical text must trigger");
-        let found = found.unwrap();
-        assert!(found.contains(snippet), "found snippet: {found:?}");
-    }
-
-    #[test]
-    fn repeated_snippet_ignores_identifier_like_snippets_across_turns() {
-        // A model focused on implementing one function naturally mentions
-        // its name (a pure code identifier) across many turns. That is
-        // legitimate reuse, not a stuck loop, so it must not trigger even
-        // when the identifier exceeds the byte threshold.
-        let h: Vec<String> = vec![
-            "让我实现 system_prompt_dynamic_full。".to_string(),
-            "system_prompt_dynamic_full 需要新参数。".to_string(),
-        ];
-        assert_eq!(
-            detect_repeated_snippet(&h, "system_prompt_dynamic_full 的调用点要更新。"),
-            None,
-            "pure identifier reuse across turns must not trigger"
-        );
-    }
-
-    #[test]
-    fn repeated_snippet_ignores_distinct_texts() {
-        let h: Vec<String> = vec![
-            "现在读取 AppMode 定义。".to_string(),
-            "现在实现 set_mode 逻辑。".to_string(),
-        ];
-        assert_eq!(detect_repeated_snippet(&h, "现在测试工具规格。"), None);
-    }
-
-    #[test]
-    fn repeated_snippet_detects_non_contiguous_repeats() {
-        // The snippet appears in turns 1, 3 and 5 but not 2 or 4; the
-        // detector counts distinct source texts, so non-contiguous repeats
-        // still fire once the 3rd distinct occurrence lands.
-        let h: Vec<String> = vec![
-            "前缀AAAA现在实现变体。".to_string(),
-            "完全不同的中间内容。".to_string(),
-            "前缀AAAA现在实现变体。".to_string(),
-            "又是一段不同的内容。".to_string(),
-        ];
-        assert!(detect_repeated_snippet(&h, "前缀AAAA现在实现变体。").is_some());
-    }
-
-    #[test]
     fn within_turn_triggers_on_back_to_back_repeats() {
         // The model echoes the same sentence many times within one message.
         // This is invisible to the across-turn detector (which counts
@@ -95,6 +45,8 @@ mod tests {
         let text = "现在重建。现在重建文件。现在重建。现在重建文件。现在重建 run_bench.py "
             .to_string()
             + "和 verifier.sh。现在重建文件。现在重建。现在重建文件。现在重建两个文件。"
+            + "现在重建。现在重建文件。现在重建。现在重建文件。现在重建。现在重建文件。"
+            + "现在重建。现在重建文件。现在重建。现在重建文件。现在重建。现在重建文件。"
             + "现在重建。现在重建文件。现在重建。现在重建文件。现在重建。现在重建文件。"
             + "现在重建。";
         let found = detect_within_turn_repetition(&text);
@@ -105,7 +57,7 @@ mod tests {
 
     #[test]
     fn within_turn_triggers_on_exact_clone_loop() {
-        let text = "现在改造 run_bench.py 跨平台。先读全文。".repeat(6);
+        let text = "现在改造 run_bench.py 跨平台。先读全文。".repeat(10);
         assert!(detect_within_turn_repetition(&text).is_some());
     }
 
@@ -120,6 +72,21 @@ mod tests {
 
         let imports = "import os\nimport sys\nimport json\nimport time\nimport re\nimport math\n";
         assert_eq!(detect_within_turn_repetition(imports), None);
+    }
+
+    #[test]
+    fn within_turn_ignores_repeated_code_fragments() {
+        // A model enumerating N interception sites naturally repeats the
+        // same code statement (`ChatWarn + ChatDone + return`) many times
+        // within one message. That is legitimate reasoning, not a stuck
+        // text loop, so it must not trigger even though the code fragment
+        // is long and appears far more than the count threshold.
+        let text = "interception 1: send ChatWarn + ChatDone + return\n".to_string()
+            + "interception 2: send ChatWarn + ChatDone + return\n"
+            + "interception 3: send ChatWarn + ChatDone + return\n"
+            + "interception 4: send ChatWarn + ChatDone + return\n"
+            + "interception 5: send ChatWarn + ChatDone + return\n";
+        assert_eq!(detect_within_turn_repetition(&text), None);
     }
 
     #[test]
