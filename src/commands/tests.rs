@@ -48,6 +48,23 @@ mod tests {
     }
 
     #[test]
+    fn repeated_snippet_ignores_identifier_like_snippets_across_turns() {
+        // A model focused on implementing one function naturally mentions
+        // its name (a pure code identifier) across many turns. That is
+        // legitimate reuse, not a stuck loop, so it must not trigger even
+        // when the identifier exceeds the byte threshold.
+        let h: Vec<String> = vec![
+            "让我实现 system_prompt_dynamic_full。".to_string(),
+            "system_prompt_dynamic_full 需要新参数。".to_string(),
+        ];
+        assert_eq!(
+            detect_repeated_snippet(&h, "system_prompt_dynamic_full 的调用点要更新。"),
+            None,
+            "pure identifier reuse across turns must not trigger"
+        );
+    }
+
+    #[test]
     fn repeated_snippet_ignores_distinct_texts() {
         let h: Vec<String> = vec![
             "现在读取 AppMode 定义。".to_string(),

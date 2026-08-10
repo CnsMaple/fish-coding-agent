@@ -138,7 +138,23 @@ pub(super) fn detect_repeated_snippet(history: &[String], new: &str) -> Option<S
     if texts.len() < SNIPPET_MIN_COUNT {
         return None;
     }
-    repeated_snippet_in(&texts)
+    let found = repeated_snippet_in(&texts);
+    match found {
+        Some(s) if !is_identifier_like_snippet(&s) => Some(s),
+        _ => None,
+    }
+}
+
+/// A repeated snippet that is purely a code identifier / path (ASCII
+/// letters, digits, `_`, `.`, `/`, `-`, `:`) is legitimate reuse — a
+/// model focused on implementing one function naturally mentions its
+/// name across many turns. Such a repeat is not a stuck prose loop, so
+/// it must not trigger the repetition guard. Real loops always carry
+/// whitespace, CJK, or punctuation.
+fn is_identifier_like_snippet(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '/' | '-' | ':'))
 }
 
 /// Core routine: concatenate `texts` with separator bytes, build a suffix
