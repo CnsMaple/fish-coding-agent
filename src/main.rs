@@ -115,8 +115,11 @@ async fn main() -> Result<()> {
     terminal.hide_cursor()?;
 
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    // Initialize theme from config
-    fish_coding_agent::theme::init_theme(cfg.theme);
+    // Initialize theme from config without blocking startup on the
+    // terminal-background probe (auto-eucalyptus uses a dark fallback
+    // now; the real resolution happens in the background once the TUI
+    // is up and adjusts colors via `AppMsg::ThemeAutoResolved`).
+    fish_coding_agent::theme::init_theme_deferred(cfg.theme);
     // Initialize the MCP service. This reads the config's `mcp`
     // section, spawns supervisor tasks for each enabled server,
     // and installs itself into `McpRegistry` so the rest of the

@@ -608,13 +608,11 @@ fn theme_set() -> &'static ThemeSet {
 
 /// Pick the syntect highlight theme matching the active TUI theme variant.
 /// Dark variants use a dark syntax theme; light/default use InspiredGitHub.
+/// Uses the non-blocking resolved variant so rendering never waits on the
+/// terminal-background probe.
 fn syntect_theme_name() -> &'static str {
-    use crate::theme::{active_variant, resolve_auto_variant, ThemeVariant};
-    let variant = match active_variant() {
-        ThemeVariant::AutoEucalyptus => resolve_auto_variant(),
-        v => v,
-    };
-    match variant {
+    use crate::theme::{effective_variant, ThemeVariant};
+    match effective_variant() {
         ThemeVariant::DarkEucalyptus => "base16-ocean.dark",
         _ => "InspiredGitHub",
     }

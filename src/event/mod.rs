@@ -204,6 +204,11 @@ pub enum AppMsg {
     CompactionFailed {
         error: String,
     },
+    /// Background auto-theme resolution finished. The theme colors /
+    /// variant have already been updated by `theme::init_theme`; the
+    /// handler only refreshes render caches and forces a repaint so the
+    /// newly resolved light/dark palette takes effect.
+    ThemeAutoResolved,
 }
 
 pub struct EventChannels {
@@ -255,6 +260,19 @@ where
             if let Err(e) = crate::model_data::fetch_models_dev(&client, &model_data_path).await {
                 tracing::debug!("background models.dev fetch: {e}");
             }
+        });
+    }
+
+    // If the theme is set to auto-eucalyptus, start the blocking
+    // terminal-background probe in the background now that the TUI is
+    // up. When it resolves it applies the real light/dark palette and
+    // notifies the loop so the render caches are refreshed.
+    if crate::theme::active_variant() == crate::theme::ThemeVariant::AutoEucalyptus {
+        let resolved_tx = channels.tx.clone();
+        tokio::spawn(async move {
+            let variant = crate::theme::resolve_auto_variant_async().await;
+            crate::theme::init_theme(variant);
+            let _ = resolved_tx.send(AppMsg::ThemeAutoResolved);
         });
     }
 
@@ -1207,6 +1225,13 @@ fn handle_msg(msg: AppMsg, app: &mut App) {
             // token_total reflects the actual session size.
             app.status
                 .update_token_usage(estimate_session_tokens(&app.session.messages));
+        }
+        AppMsg::ThemeAutoResolved => {
+            // The resolved light/dark palette changed the active colors.
+            // Drop all render caches and force a full repaint so the
+            // already-rendered blocks adopt the new palette immediately.
+            app.session.invalidate_all_render_caches();
+            app.force_full_repaint = true;
         }
     }
 }
