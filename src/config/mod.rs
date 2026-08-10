@@ -494,8 +494,6 @@ pub const TOOL_PREVIEW_LINES_MAX: usize = 50;
 pub struct AgentsConfig {
     #[serde(default)]
     pub entries: HashMap<String, bool>,
-    #[serde(default)]
-    pub visible: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
