@@ -12,8 +12,7 @@ use super::utils::{
     parse_tool_result_display, tool_result_title,
 };
 use super::{
-    build_agents_content, compact_now, open_settings, system_prompt, system_prompt_dynamic,
-    system_prompt_dynamic_with_title,
+    build_agents_content, compact_now, open_settings, system_prompt, system_prompt_dynamic_full,
 };
 use super::{MSG_PROVIDER_INVALID, MSG_REQUEST_IN_FLIGHT};
 pub fn send_chat(app: &mut App, user_text: String, image_parts: Vec<crate::session::ContentPart>) {
@@ -307,12 +306,16 @@ pub fn send_message(app: &mut App, user_msg: Message) {
     //   [dynamic_msg + actual_working_msgs...]
     //   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
     //   computed fresh every request — does NOT affect cache key
+    // The current todos and the first-turn title hint are folded into
+    // this dynamic block so they never touch the cacheable prefix.
+    let first_prompt = app.initial_title_pending;
+    let todos = &app.session.todo_items;
     if app.config.prefix_cache {
         messages.insert(
             0,
             ChatMessage {
                 role: "user".to_string(),
-                content: system_prompt_dynamic(),
+                content: system_prompt_dynamic_full("", todos, first_prompt),
                 content_parts: Vec::new(),
                 tool_call_id: None,
                 tool_calls: Vec::new(),
@@ -328,7 +331,7 @@ pub fn send_message(app: &mut App, user_msg: Message) {
         format!(
             "{}\n\n{}",
             core_sp,
-            system_prompt_dynamic_with_title(&app.session_title)
+            system_prompt_dynamic_full(&app.session_title, todos, first_prompt)
         )
     };
     // Loop mode advertises the full tool set minus `plan`/`ask` so the

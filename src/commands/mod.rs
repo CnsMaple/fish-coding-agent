@@ -549,10 +549,21 @@ pub(super) fn build_agents_content(app: &App) -> String {
 /// so keeping them separate from the static core avoids invalidating
 /// the prefix cache on every request.
 pub(super) fn system_prompt_dynamic() -> String {
-    system_prompt_dynamic_with_title("")
+    system_prompt_dynamic_full("", &[], false)
 }
 
-pub(super) fn system_prompt_dynamic_with_title(session_title: &str) -> String {
+/// Build the dynamic suffix for the system prompt. On top of the
+/// date/OS/shell/workspace block it optionally carries:
+///   - `todos`: the current task list, injected on every request so the
+///     model always sees the latest state even if the user edited it in
+///     the picker (the placeholder tool-result message may lag behind);
+///   - `first_prompt`: a one-shot hint on the first turn of a fresh
+///     session asking the model to call `update_title` up front.
+pub(crate) fn system_prompt_dynamic_full(
+    session_title: &str,
+    todos: &[crate::session::TodoItem],
+    first_prompt: bool,
+) -> String {
     let now = chrono::Local::now();
     let date = now.format("%Y-%m-%d %A").to_string();
     let cwd = std::env::current_dir()
@@ -565,12 +576,33 @@ pub(super) fn system_prompt_dynamic_with_title(session_title: &str) -> String {
     } else {
         format!("\nCurrent session title: {session_title}\n")
     };
+    let todos_block = if todos.is_empty() {
+        String::new()
+    } else {
+        let items: Vec<String> = todos
+            .iter()
+            .map(|t| {
+                let mark = match t.status.as_str() {
+                    "completed" => "x",
+                    "in_progress" => ">",
+                    _ => " ",
+                };
+                format!("- [{mark}] {}", t.content)
+            })
+            .collect();
+        format!("\nCurrent todos:\n{}\n", items.join("\n"))
+    };
+    let first_prompt_hint = if first_prompt {
+        "\n\n[首次请求] 这是一次新会话的第一次请求。请在第一次响应中（第一次工具调用之前）调用 update_title，给出一个简洁、贴合本次任务意图的会话标题（≤40 字符，中文优先）。"
+    } else {
+        ""
+    };
     format!(
         "\
 Current date: {date}
 OS: {os}
 Shell: {shell} ({shell_details})
-Workspace: {workspace}{title_line}
+Workspace: {workspace}{title_line}{todos_block}{first_prompt_hint}
 
 All file paths are relative to the workspace unless noted otherwise. \
 Use `list`, `grep`, and `glob` to discover files — never invent or guess paths.",
@@ -580,6 +612,8 @@ Use `list`, `grep`, and `glob` to discover files — never invent or guess paths
         shell_details = crate::tools::shell_guidance(),
         workspace = cwd,
         title_line = title_line,
+        todos_block = todos_block,
+        first_prompt_hint = first_prompt_hint,
     )
 }
 

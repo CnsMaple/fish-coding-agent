@@ -112,4 +112,61 @@ mod tests {
         let three_short = "现在重建。现在重建。现在重建。";
         assert_eq!(detect_within_turn_repetition(three_short), None);
     }
+
+    #[test]
+    fn dynamic_prompt_includes_todos_when_present() {
+        let todos = vec![
+            crate::session::TodoItem {
+                content: "实现登录".to_string(),
+                status: "in_progress".to_string(),
+            },
+            crate::session::TodoItem {
+                content: "写测试".to_string(),
+                status: "pending".to_string(),
+            },
+            crate::session::TodoItem {
+                content: "收尾".to_string(),
+                status: "completed".to_string(),
+            },
+        ];
+        let s = crate::commands::system_prompt_dynamic_full("", &todos, false);
+        assert!(s.contains("Current todos:"), "missing todos header: {s}");
+        assert!(
+            s.contains("- [>] 实现登录"),
+            "missing in_progress item: {s}"
+        );
+        assert!(s.contains("- [ ] 写测试"), "missing pending item: {s}");
+        assert!(s.contains("- [x] 收尾"), "missing completed item: {s}");
+        assert!(
+            !s.contains("首次请求"),
+            "hint must not show when not first: {s}"
+        );
+    }
+
+    #[test]
+    fn dynamic_prompt_omits_todos_when_empty() {
+        let s = crate::commands::system_prompt_dynamic_full("", &[], false);
+        assert!(
+            !s.contains("Current todos:"),
+            "empty todos must be omitted: {s}"
+        );
+    }
+
+    #[test]
+    fn dynamic_prompt_first_turn_hint_only_when_flag_set() {
+        let s = crate::commands::system_prompt_dynamic_full("", &[], true);
+        assert!(s.contains("update_title"), "first-turn hint missing: {s}");
+        assert!(s.contains("首次请求"), "first-turn hint missing: {s}");
+        let s2 = crate::commands::system_prompt_dynamic_full("", &[], false);
+        assert!(!s2.contains("首次请求"), "hint must be gated by flag: {s2}");
+    }
+
+    #[test]
+    fn dynamic_prompt_includes_session_title() {
+        let s = crate::commands::system_prompt_dynamic_full("修复聊天标题", &[], false);
+        assert!(
+            s.contains("Current session title: 修复聊天标题"),
+            "title missing: {s}"
+        );
+    }
 }
