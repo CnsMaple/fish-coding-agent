@@ -285,15 +285,7 @@ pub(super) fn build_tool_block_rows(
             // the arguments. Using the title guarantees the command
             // text stays visible once the tool starts running, even
             // when parallel streaming deltas are interleaved.
-            let cmd = if !tool.title.is_empty() {
-                tool.title
-                    .strip_prefix("$ ")
-                    .unwrap_or(&tool.title)
-                    .to_string()
-            } else {
-                crate::commands::extract_partial_json_field(&tool.streaming_input, "command")
-                    .unwrap_or_default()
-            };
+            let cmd = shell_command_title(tool);
             let timeout =
                 crate::commands::extract_partial_json_u64(&tool.streaming_input, "timeout_secs")
                     .unwrap_or(300);
@@ -365,8 +357,13 @@ pub(super) fn build_tool_block_rows(
             footer
         };
         if title_highlighted {
+            let shell_title = if tool.title.is_empty() {
+                shell_command_title(tool)
+            } else {
+                tool.title.clone()
+            };
             build_shell_command_rows(
-                &tool.title,
+                &shell_title,
                 &output,
                 &footer,
                 visible,
@@ -639,6 +636,51 @@ pub(super) fn build_shell_command_rows(
     rows
 }
 
+/// Resolve the command text to show for a shell tool block. Prefer the
+/// full command from the block title (set by `ToolStarted` via
+/// `tool_result_title`); fall back to the partial streaming JSON while
+/// the LLM is still assembling the arguments. Used both while the block
+/// is streaming (`tool.content` empty) and once output has arrived, so
+/// the command stays visible across the whole run even when parallel
+/// streaming deltas are interleaved.
+fn shell_command_title(tool: &ToolResultBlock) -> String {
+    if !tool.title.is_empty() {
+        tool.title
+            .strip_prefix("$ ")
+            .unwrap_or(&tool.title)
+            .to_string()
+    } else {
+        crate::commands::extract_partial_json_field(&tool.streaming_input, "command")
+            .unwrap_or_default()
+    }
+}
+
+/// Derive a `read [path start:end]` title from the raw streaming JSON
+/// arguments when the block has no title yet (e.g. a placeholder block
+/// created by `ToolInputDelta` before `ToolStarted` lands). Keeps the
+/// block header labelled even during the streaming window.
+fn read_title_from_input(args: &str) -> String {
+    let path = crate::commands::extract_partial_json_field(args, "path")
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let start = crate::commands::extract_partial_json_u64(args, "start_line");
+    let end = crate::commands::extract_partial_json_u64(args, "end_line");
+    let range = match (start, end) {
+        (Some(s), Some(e)) => format!("{}:{}", s, e),
+        (Some(s), None) => format!("{}:", s),
+        (None, Some(e)) => format!(":{}", e),
+        (None, None) => String::new(),
+    };
+    if path.is_empty() {
+        "read".to_string()
+    } else if range.is_empty() {
+        format!("read [{}]", path)
+    } else {
+        format!("read [{} {}]", path, range)
+    }
+}
+
 /// Render a `read` tool result with syntax highlighting based on the
 /// file extension extracted from the title (`read [path ...]`).
 #[allow(clippy::too_many_arguments)]
@@ -656,10 +698,15 @@ fn build_read_rows(
 
     // Extract file path from the title to determine the syntax language.
     // Title format: "read [path]" or "read [path start:end]".
-    let lang = extract_read_lang(&tool.title);
+    let title = if tool.title.is_empty() {
+        read_title_from_input(&tool.streaming_input)
+    } else {
+        tool.title.clone()
+    };
+    let lang = extract_read_lang(&title);
 
     let mut rows = Vec::new();
-    rows.push(border_with_label_line(width, &tool.title, bg));
+    rows.push(border_with_label_line(width, &title, bg));
 
     let body_lines: Vec<&str> = output.lines().collect();
     let (skip, show) = if visible || body_lines.len() <= preview_lines {
@@ -1220,7 +1267,12 @@ fn border_with_label_str(width: usize, label: &str) -> String {
     if width <= 4 {
         return border_str(width);
     }
-    let label_width = visible_width(label);
+    // Normalise top-left box labels: trim, lowercase (all block headers
+    // are displayed lowercase), then pad with a single space on each
+    // side so the border reads `+--- label ---+` with consistent
+    // spacing regardless of what each caller passed in.
+    let label = format!(" {} ", label.trim().to_ascii_lowercase());
+    let label_width = visible_width(&label);
     let left = 3.min(width.saturating_sub(2));
     let used = 2 + left + label_width;
     if used >= width {

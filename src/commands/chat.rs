@@ -689,8 +689,18 @@ pub async fn run_chat_stream(
         // Spawn a task per parallel tool call. Each task owns its own
         // `tx`/`cancel_rx` clones and routes `ToolStarted`/`ToolDelta`/
         // `ChatToolResult` to the correct block via `call_id`.
+        //
+        // A shared "turn" gate (a counter guarded by a mutex + a notify)
+        // makes the tools *start* in declaration order (top-to-bottom):
+        // each task waits for its turn, anchors its block via
+        // `ToolStarted`, launches the underlying process, and only then
+        // releases the next task. Once started, the tasks keep streaming
+        // their output concurrently, so later tools aren't serialized.
+        let gate =
+            std::sync::Arc::new((tokio::sync::Mutex::new(0usize), tokio::sync::Notify::new()));
         let mut parallel_handles: Vec<tokio::task::JoinHandle<(usize, String, String)>> =
             Vec::new();
+        let mut parallel_seq = 0usize;
         for (i, call) in tool_calls.iter().enumerate() {
             if is_serial(&call.name) {
                 continue;
@@ -699,7 +709,23 @@ pub async fn run_chat_stream(
             let tx = tx.clone();
             let cancel_rx = cancel_rx.clone();
             let cwd = cwd.clone();
+            let gate = gate.clone();
+            let turn = parallel_seq;
+            parallel_seq += 1;
             let handle = tokio::spawn(async move {
+                // Wait for our turn so blocks anchor top-to-bottom.
+                {
+                    let mut guard = gate.0.lock().await;
+                    loop {
+                        if *guard == turn {
+                            break;
+                        }
+                        let notified = gate.1.notified();
+                        drop(guard);
+                        notified.await;
+                        guard = gate.0.lock().await;
+                    }
+                }
                 let send = |msg: crate::event::AppMsg| {
                     if !*cancel_rx.borrow() {
                         let _ = tx.send(msg);
@@ -711,6 +737,16 @@ pub async fn run_chat_stream(
                     name: call.name.clone(),
                     title: title.clone(),
                 });
+                // Release the next parallel task now that our block is
+                // anchored, so every tool starts its process in
+                // declaration order while the actual execution still
+                // runs concurrently (shell tools keep streaming their
+                // output in parallel).
+                {
+                    let mut guard = gate.0.lock().await;
+                    *guard += 1;
+                }
+                gate.1.notify_waiters();
                 let result = crate::tools::execute_tool_streaming_with_agent(
                     agent,
                     &call.name,

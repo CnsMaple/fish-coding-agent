@@ -553,7 +553,7 @@ mod tool_block_count_tests {
         let width = 80;
         let rendered = build_message_lines(&s, 1, width);
         let text = lines_to_text(&rendered);
-        let thinking_count = text.matches("Thinking").count();
+        let thinking_count = text.matches(" thinking").count();
         assert_eq!(
             thinking_count, 1,
             "expected exactly 1 Thinking box, got {thinking_count}. Rendered:\n{text}"
@@ -626,8 +626,8 @@ mod tool_block_count_tests {
         let width = 80;
         let rendered = build_message_lines(&s, 1, width);
         let text = lines_to_text(&rendered);
-        let tool_idx = text.find("Edit [").expect("tool block missing");
-        let think_idx = text.find("Thinking").expect("Thinking block missing");
+        let tool_idx = text.find("edit [").expect("tool block missing");
+        let think_idx = text.find("thinking").expect("thinking block missing");
         assert!(
             tool_idx < think_idx,
             "Tool block must appear before the thinking block at the same offset, but tool at {tool_idx} came after thinking at {think_idx}.\nRendered:\n{text}"
@@ -780,18 +780,18 @@ mod tool_block_count_tests {
         s.tool_preview_lines = 10;
 
         let text = lines_to_text(&build_message_lines(&s, 1, 80));
-        let label_count = text.matches("+--- Thinking").count();
+        let label_count = text.matches("+--- thinking").count();
         assert_eq!(
             label_count, 2,
-            "expected two Thinking boxes (one per reasoning burst), got {label_count}.\nRendered:\n{text}"
+            "expected two thinking boxes (one per reasoning burst), got {label_count}.\nRendered:\n{text}"
         );
 
         // The pre-tool thinking box must come BEFORE the tool block
         // in the rendered output, and the post-tool thinking box
         // must come AFTER it.
-        let first_thinking = text.find("+--- Thinking").expect("first Thinking box");
-        let tool_marker = text.find("Bash").expect("tool block");
-        let second_thinking = text.rfind("+--- Thinking").expect("second Thinking box");
+        let first_thinking = text.find("+--- thinking").expect("first thinking box");
+        let tool_marker = text.find("bash").expect("tool block");
+        let second_thinking = text.rfind("+--- thinking").expect("second thinking box");
         assert!(
             first_thinking < tool_marker,
             "pre-tool thinking must render before the tool block, but thinking at {first_thinking} came after tool at {tool_marker}.\nRendered:\n{text}"
@@ -799,6 +799,59 @@ mod tool_block_count_tests {
         assert!(
             tool_marker < second_thinking,
             "post-tool thinking must render after the tool block, but tool at {tool_marker} came after thinking at {second_thinking}.\nRendered:\n{text}"
+        );
+    }
+
+    /// A `read` block whose title is empty (e.g. a placeholder created
+    /// by `ToolInputDelta` before `ToolStarted` lands) must still
+    /// derive a `read [path start:end]` header from its streaming args.
+    #[test]
+    fn read_block_derives_title_from_streaming_input() {
+        let tool = ToolResultBlock {
+            name: "read".to_string(),
+            title: String::new(),
+            content: "line one\nline two\n".to_string(),
+            metadata: serde_json::json!({
+                "ok": true,
+                "result": "line one\nline two\n"
+            })
+            .to_string(),
+            content_offset: 0,
+            visible: true,
+            running: false,
+            failed: false,
+            call_id: String::new(),
+            pruned: false,
+            streaming_input: r#"{"path":"src/event/mod.rs","start_line":1218,"end_line":1228}"#
+                .to_string(),
+            cached_line_count_visible: None,
+            cached_line_count_collapsed: None,
+            started_at: None,
+        };
+        let rows = build_tool_block_rows(&tool, true, 10, 80);
+        let text = lines_to_text(&rows);
+        assert!(
+            text.contains(" read [src/event/mod.rs 1218:1228] "),
+            "derived read header missing:\n{text}"
+        );
+    }
+
+    /// `border_with_label_str` must normalise every top-left label to
+    /// lowercase and pad it with a single space on each side, so
+    /// `+--- label ---+` is uniform for all block types.
+    #[test]
+    fn border_label_is_lowercased_and_padded() {
+        // Ask snapshot header goes through `border_with_label_line`
+        // (the same normalization used by every block type).
+        let body = "---ask---\nq: theme?\n   - dark\n";
+        let text = lines_to_text(&render_ask_snapshot_message(body, 20, false, 0));
+        assert!(
+            text.starts_with("+--- ask -"),
+            "ask label must be lowercase and padded:\n{text}"
+        );
+        assert!(
+            text.contains("--- ask "),
+            "ask label must be space-padded:\n{text}"
         );
     }
 }
@@ -1595,7 +1648,7 @@ mod tests {
         );
         let lines = render_ask_snapshot_message(body, 60, false, 0);
         let text = lines_to_text(&lines);
-        assert!(text.contains("Ask"), "missing header:\n{text}");
+        assert!(text.contains(" ask "), "missing header:\n{text}");
         assert!(text.contains("q1:"), "missing q1:\n{text}");
         assert!(text.contains("深色"), "missing option:\n{text}");
         assert!(text.contains("q2:"), "missing q2:\n{text}");
@@ -1666,7 +1719,7 @@ mod tests {
         let rows = build_tool_block_rows(&tool, true, 10, 80);
         let text = lines_to_text(&rows);
         assert!(
-            text.contains("Edit [src/demo.py +1/-1]"),
+            text.contains("edit [src/demo.py +1/-1]"),
             "title missing:\n{text}"
         );
         assert!(
