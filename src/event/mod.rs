@@ -267,16 +267,31 @@ where
     // terminal-background probe in the background now that the TUI is
     // up. When it resolves it applies the real light/dark palette and
     // notifies the loop so the render caches are refreshed.
+    //
+    // The probe reads the terminal's OSC 11 reply from the same shared
+    // crossterm reader as the event stream, so we must NOT poll the
+    // event stream until the probe finishes (see `theme_probe_pending`).
+    // Otherwise both compete for the reply and the `rgb:...` characters
+    // can leak into the event stream (and the input area) as stray keys.
+    let (probe_done_tx, probe_done_rx) = tokio::sync::oneshot::channel();
+    let mut probe_done_rx = Some(probe_done_rx);
     if crate::theme::active_variant() == crate::theme::ThemeVariant::AutoEucalyptus {
         let resolved_tx = channels.tx.clone();
+        let probe_done_tx = probe_done_tx;
         tokio::spawn(async move {
             let variant = crate::theme::resolve_auto_variant_async().await;
             crate::theme::init_theme(variant);
             let _ = resolved_tx.send(AppMsg::ThemeAutoResolved);
+            let _ = probe_done_tx.send(());
         });
     }
 
     let mut events = EventStream::new();
+    // While the background theme probe is running, it owns the reader for
+    // the OSC 11 reply; the event stream is held pending so it never races
+    // for stdin and cannot swallow the `rgb:...` reply as input text.
+    let mut theme_probe_pending =
+        crate::theme::active_variant() == crate::theme::ThemeVariant::AutoEucalyptus;
     let mut tick = interval(Duration::from_millis(100));
     // Faster tick dedicated to scrolling momentum. ~60fps so the
     // motion looks smooth.
@@ -316,6 +331,19 @@ where
             drain_post_compaction_prompt(app);
 
             prev_scroll = Some(app.session.scroll);
+        }
+
+        // While the background theme probe is running it owns the shared
+        // crossterm reader for the OSC 11 reply. Hold the event stream
+        // pending (and wait for the probe) so both never race for stdin;
+        // otherwise the `rgb:...` reply can leak into the input area as
+        // stray key characters. The first frame has already rendered with
+        // the dark fallback, so this only delays *input*, never startup.
+        if theme_probe_pending {
+            if let Some(rx) = probe_done_rx.take() {
+                let _ = rx.await;
+            }
+            theme_probe_pending = false;
         }
 
         tokio::select! {

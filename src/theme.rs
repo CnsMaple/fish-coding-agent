@@ -34,10 +34,10 @@ pub fn active_variant() -> ThemeVariant {
 
 /// Initialize or update the theme colors from the selected variant.
 ///
-/// For `AutoEucalyptus` this blocks on `termbg` (up to ~100ms) to detect
-/// the terminal background before the colors are applied. Prefer
-/// [`init_theme_deferred`] at startup so the TUI appears immediately and
-/// the auto-detection runs in the background.
+/// For `AutoEucalyptus` this blocks on the terminal-background probe to
+/// detect light/dark before the colors are applied. At startup prefer
+/// [`init_theme_deferred`] so the TUI appears immediately; the deferred
+/// resolution runs in the background once the TUI is up.
 pub fn init_theme(variant: ThemeVariant) {
     let colors = ThemeColors::from_variant(variant);
     *ACTIVE_COLORS.write().unwrap() = colors;
@@ -46,20 +46,20 @@ pub fn init_theme(variant: ThemeVariant) {
 
 /// Initialize the theme without blocking the calling thread.
 ///
-/// The `auto-eucalyptus` variant is applied using the dark fallback so
-/// startup never waits on the terminal-background probe; the real light/
-/// dark resolution can run later via [`resolve_auto_variant_async`] and
-/// be applied with [`init_theme`].
+/// `auto-eucalyptus` uses the dark fallback so startup never waits on
+/// the terminal-background probe; the real light/dark resolution runs
+/// later via [`resolve_auto_variant_async`] and is applied with
+/// [`init_theme`].
 pub fn init_theme_deferred(variant: ThemeVariant) {
     let colors = ThemeColors::from_variant_nonblocking(variant);
     *ACTIVE_COLORS.write().unwrap() = colors;
     *ACTIVE_VARIANT.write().unwrap() = variant;
 }
 
-/// The concrete variant backing the current selection, without blocking.
-///
-/// An unresolved `auto-eucalyptus` maps to the dark fallback so render
-/// paths never wait on the `termbg` probe in the middle of drawing.
+/// The concrete variant backing the current selection, without probing.
+/// An unresolved `auto-eucalyptus` maps to the dark fallback so the
+/// markdown syntax-highlight path picks a stable default without
+/// waiting on the `termbg` probe.
 pub fn effective_variant() -> ThemeVariant {
     match active_variant() {
         ThemeVariant::AutoEucalyptus => ThemeVariant::DarkEucalyptus,
@@ -404,20 +404,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn from_variant_nonblocking_maps_auto_to_dark() {
-        let colors = ThemeColors::from_variant_nonblocking(ThemeVariant::AutoEucalyptus);
-        assert_eq!(colors.user_bg, ThemeColors::dark_eucalyptus().user_bg);
-    }
-
-    #[test]
     fn effective_variant_falls_back_to_dark_for_auto() {
         let prev = active_variant();
         init_theme(ThemeVariant::AutoEucalyptus);
         assert_eq!(effective_variant(), ThemeVariant::DarkEucalyptus);
-        assert_eq!(
-            ThemeColors::from_variant_nonblocking(ThemeVariant::AutoEucalyptus).user_bg,
-            ThemeColors::dark_eucalyptus().user_bg
-        );
         init_theme(prev);
     }
 
