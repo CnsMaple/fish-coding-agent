@@ -2468,6 +2468,81 @@ fn inline_tool_result_flushes_pending_text_before_anchoring() {
 }
 
 #[test]
+fn tool_block_creation_flushes_pending_text_before_anchoring() {
+    // Regression for the Cursor inline-exec path: a tool block can be
+    // created via `ToolStarted` / `ToolInputDelta` (the streaming
+    // placeholder path) while the model's preceding text is still
+    // buffered in `pending_chat_content`. The handlers must flush that
+    // text into the session BEFORE creating the block, so
+    // `content_offset` points past the text — otherwise the tool box
+    // lands mid-line instead of after the text it should follow.
+    // Mirrors the existing `ChatToolResult` flush regression test.
+    let mut app = chat_app();
+    app.session.push(crate::session::Message::new(
+        crate::session::Role::User,
+        "run the checks",
+    ));
+    app.session.push(crate::session::Message::new(
+        crate::session::Role::Assistant,
+        "",
+    ));
+    app.session.streaming_id = Some(1);
+
+    // Model streams text, but it's still buffered (approx. mid-frame).
+    handle_msg(AppMsg::ChatDelta("先格式化再测试。".to_string()), &mut app);
+    assert!(
+        app.pending_chat_content.contains("先格式化"),
+        "text should still be pending before ToolStarted arrives"
+    );
+
+    // A streaming tool placeholder is created (ToolStarted path).
+    handle_msg(
+        AppMsg::ToolStarted {
+            call_id: "callA".to_string(),
+            name: "shell_command".to_string(),
+            title: "$ cargo fmt".to_string(),
+        },
+        &mut app,
+    );
+
+    let asst = &app.session.messages[1];
+    // The pending text must have been flushed before the block anchored.
+    assert!(
+        asst.content.contains("先格式化"),
+        "pending text must be flushed before ToolStarted anchors the block"
+    );
+    assert_eq!(asst.tool_results.len(), 1, "one tool block expected");
+    let tool = &asst.tool_results[0];
+    assert_eq!(
+        tool.content_offset,
+        asst.content.len(),
+        "ToolStarted block must anchor past the preceding text"
+    );
+    assert!(
+        asst.content.ends_with('\n'),
+        "tool block must be separated from preceding text by a newline, got {:?}",
+        asst.content
+    );
+
+    // Parallel safe: a second interleaved ToolInputDelta for a distinct
+    // call_id must still route to its own block (flush is a no-op once
+    // the pending buffer is empty).
+    handle_msg(
+        AppMsg::ToolInputDelta {
+            index: 1,
+            call_id: "callB".to_string(),
+            name: "shell_command".to_string(),
+            args: r#"{"command":"cargo clippy"}"#.to_string(),
+        },
+        &mut app,
+    );
+    let asst = &app.session.messages[1];
+    assert_eq!(asst.tool_results.len(), 2, "two parallel blocks expected");
+    assert_eq!(asst.tool_results[0].call_id, "callA");
+    assert_eq!(asst.tool_results[1].call_id, "callB");
+}
+
+#[test]
 fn flush_pending_request_is_noop_when_empty() {
     // Sanity: calling `flush_pending_request` with nothing
     // staged must be a cheap no-op and must not crash.

@@ -1113,6 +1113,13 @@ fn handle_msg(msg: AppMsg, app: &mut App) {
             name,
             title,
         } => {
+            // Flush buffered text deltas before creating/anchoring the
+            // tool block so `content_offset` points past the preceding
+            // text. Mirrors the `ChatToolResult` flush: without it, a
+            // tool block created while the model's preceding text still
+            // sits in `pending_chat_content` anchors at the old (shorter)
+            // content length and lands mid-line instead of after the text.
+            flush_pending_chat(app, true);
             app.session.start_tool_in_last(call_id, name, title);
         }
         AppMsg::ToolDelta { call_id, content } => {
@@ -1124,6 +1131,11 @@ fn handle_msg(msg: AppMsg, app: &mut App) {
             name,
             args,
         } => {
+            // Flush buffered text deltas before creating/anchoring the
+            // tool block (parallel-safe: flush is a no-op once the
+            // pending buffer is empty, so interleaved deltas for parallel
+            // tools still route to their own blocks by `call_id`).
+            flush_pending_chat(app, true);
             app.session
                 .update_tool_input_delta(index, &call_id, &name, &args);
         }
