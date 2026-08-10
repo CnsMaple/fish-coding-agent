@@ -263,6 +263,14 @@ impl CommandPaletteState {
                 description: "Retry last prompt",
             },
             PaletteEntry::Command {
+                name: "undo",
+                description: "Undo last response",
+            },
+            PaletteEntry::Command {
+                name: "redo",
+                description: "Redo last undone response",
+            },
+            PaletteEntry::Command {
                 name: "continue",
                 description: "Continue response",
             },

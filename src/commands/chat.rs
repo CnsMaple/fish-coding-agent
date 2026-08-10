@@ -17,6 +17,9 @@ use super::{
 };
 use super::{MSG_PROVIDER_INVALID, MSG_REQUEST_IN_FLIGHT};
 pub fn send_chat(app: &mut App, user_text: String, image_parts: Vec<crate::session::ContentPart>) {
+    // A fresh prompt invalidates any pending redo state: turned-back
+    // turns must not be re-applied on top of newer context.
+    app.redo_turn_stack.clear();
     let mut msg = Message::new(Role::User, user_text);
     // Extract ImageAttachment from ContentPart to store on the Message.
     for part in &image_parts {

@@ -66,6 +66,60 @@ pub fn retry_last_prompt(app: &mut App) {
     crate::commands::send_chat(app, prompt, Vec::new());
 }
 
+/// `/undo` — remove the most recently answered prompt (its user
+/// message plus the assistant reply and any tool blocks) from the
+/// session and archive it so `/redo` can restore it. Walks back to the
+/// last real user prompt that is not a synthetic context marker.
+/// Index of the last real user prompt (skips synthetic `Context from `
+/// markers like the dynamic system-prompt suffix), or `None` if there
+/// is no such prompt.
+fn last_user_prompt_index(app: &App) -> Option<usize> {
+    app.session
+        .messages
+        .iter()
+        .rposition(|m| matches!(m.role, Role::User) && !m.content.starts_with("Context from "))
+}
+
+pub fn undo_last_response(app: &mut App) {
+    if app.inflight.is_some() {
+        app.notify(ToastLevel::Warn, MSG_REQUEST_IN_FLIGHT);
+        return;
+    }
+    let Some(idx) = last_user_prompt_index(app) else {
+        app.notify(ToastLevel::Warn, "nothing to undo");
+        return;
+    };
+    // Archive everything from the prompt onward (indices are relative
+    // to the current messages vec before truncation).
+    let snapshot: Vec<_> = app.session.messages[idx..].to_vec();
+    app.session.messages.truncate(idx);
+    app.session.invalidate_message_cache_from(idx);
+    app.session.invalidate_layout_cache();
+    app.redo_turn_stack.clear();
+    app.undo_turn_stack.push_back(snapshot);
+    app.notify(ToastLevel::Info, "undo: last response removed");
+}
+
+/// `/redo` — restore the most recently undone prompt+response. Only
+/// works immediately after an `/undo` (the stack is cleared the moment
+/// a new prompt is sent, so stale turns cannot be re-applied).
+pub fn redo_last_response(app: &mut App) {
+    if app.inflight.is_some() {
+        app.notify(ToastLevel::Warn, MSG_REQUEST_IN_FLIGHT);
+        return;
+    }
+    let Some(snapshot) = app.undo_turn_stack.pop_back() else {
+        app.notify(ToastLevel::Warn, "nothing to redo");
+        return;
+    };
+    let start = app.session.messages.len();
+    app.session.messages.extend(snapshot.clone());
+    app.session.invalidate_message_cache_from(start);
+    app.session.invalidate_layout_cache();
+    app.redo_turn_stack.push_back(snapshot);
+    app.notify(ToastLevel::Info, "redo: response restored");
+}
+
 pub fn continue_response(app: &mut App, arg: &str) {
     if app.inflight.is_some() {
         app.notify(ToastLevel::Warn, MSG_REQUEST_IN_FLIGHT);

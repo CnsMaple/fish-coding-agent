@@ -68,6 +68,8 @@ fn make_test_app() -> App {
         mcp_tools_dirty: true,
         disabled_tools: std::collections::HashSet::new(),
         input_prompt_area: None,
+        undo_turn_stack: VecDeque::new(),
+        redo_turn_stack: VecDeque::new(),
         tui_selection: None,
         selected_text: None,
         tui_drag_start: None,

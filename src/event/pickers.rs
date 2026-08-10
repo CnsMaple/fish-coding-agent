@@ -107,6 +107,8 @@ pub(super) fn handle_command_palette_key(
                         "tool" => crate::commands::open_tool_picker(app),
                         "hotkey" => crate::commands::open_hotkey(app),
                         "retry" => crate::commands::retry_last_prompt(app),
+                        "undo" => crate::commands::undo_last_response(app),
+                        "redo" => crate::commands::redo_last_response(app),
                         "continue" => crate::commands::continue_response(app, ""),
                         "compact" => crate::commands::compact_now(app, ""),
                         "new" => {

@@ -129,6 +129,18 @@ pub struct App {
     /// Cached screen rect of the input prompt line, updated on each render.
     pub input_prompt_area: Option<ratatui::layout::Rect>,
 
+    /// Snapshots of the most recently removed turn (user prompt + its
+    /// assistant response + tool blocks) taken by `/undo`. Each entry
+    /// is the full `Vec<Message>` of the undone turn, so `/redo` can
+    /// restore it verbatim. Undo repeatedly pops the last real user
+    /// prompt and archives everything from it onward.
+    pub undo_turn_stack: VecDeque<Vec<crate::session::Message>>,
+    /// Reversed counterpart of `undo_turn_stack`: turns archived by
+    /// `/undo` wait here so `/redo` can bring them back. Cleared when
+    /// a new prompt is sent after an undo, so stale turns are not
+    /// re-applied on top of newer context.
+    pub redo_turn_stack: VecDeque<Vec<crate::session::Message>>,
+
     /// Full-screen text selection driven by the mouse. `Some` while the
     /// user is dragging or has a finished selection. `None` when no
     /// selection is active.
@@ -403,6 +415,8 @@ impl App {
             mcp_tools_dirty: true,
             disabled_tools: std::collections::HashSet::new(),
             input_prompt_area: None,
+            undo_turn_stack: VecDeque::new(),
+            redo_turn_stack: VecDeque::new(),
             tui_selection: None,
             selected_text: None,
             tui_drag_start: None,
