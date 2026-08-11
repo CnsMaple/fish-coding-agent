@@ -15,162 +15,91 @@ pub(super) fn is_doom_loop(history: &[(String, String)], name: &str, args: &str)
         && history[n - 2].1 == args
 }
 
-/// Minimum byte length of a within-turn repeated substring to count as a
-/// stuck text loop. Short prefixes shared by legit templated output (e.g.
-/// "现在实现登录。现在实现注册。…") never reach this length, while a model
-/// echoing the same full sentence repeatedly does.
-const WITHIN_MIN_BYTES: usize = 24;
-/// A substring must appear this many times within a single assistant text
-/// to count as a stuck within-text loop.
-const WITHIN_MIN_COUNT: usize = 10;
+/// A periodic pattern must repeat this many times consecutively within a
+/// single assistant text to count as a stuck within-text loop. The model's
+/// idea: once the same text recurs, treat the text between occurrences as the
+/// pattern and match it forward; five consecutive repeats is enough to call
+/// it a loop and interrupt.
+const WITHIN_MIN_COUNT: usize = 5;
 /// Upper bound on the single assistant text analyzed. Mirrors the across-turn
 /// guard: past this we skip the check.
 const WITHIN_MAX_BYTES: usize = 512 * 1024;
+/// Minimum byte length of a repeated period pattern to count as a stuck
+/// loop. Short repeated fragments (e.g. a bare "现在重建。") reachable from
+/// legitimately templated output never reach this length.
+const MIN_REPEAT_BYTES: usize = 24;
 
 /// Within-turn text repetition detector.
 ///
 /// A model can loop by repeating the same sentence *within a single message*
 /// many times — e.g. emitting "现在重建文件。" over and over before acting.
-/// This detector builds a suffix array + LCP over that one text and reports a
-/// long-enough substring that appears WITHIN_MIN_COUNT or more times. The
-/// caller breaks the loop and pauses for user review when it fires.
+/// This detector hunts for a *periodic* line sequence: a pattern of `p`
+/// consecutive lines that repeats WITHIN_MIN_COUNT times back-to-back. One
+/// check therefore covers every stuck-loop shape:
+///
+/// - single-line loop (p = 1): "A A A A …"
+/// - multi-line block loop (p >= 2): "A B C A B C …"
+/// - alternating / oscillating loop (p = 2): "A B A B A B …"
+///
+/// Blank lines are dropped first (they carry no signal and would otherwise
+/// fragment a repeated block). Progressive reasoning — where each line is
+/// distinct even when sharing phrasing — never matches a period and so never
+/// fires. The caller breaks the loop and pauses for user review when it fires.
 pub(super) fn detect_within_turn_repetition(text: &str) -> Option<String> {
-    let bytes = text.as_bytes();
-    if bytes.is_empty() || bytes.len() > WITHIN_MAX_BYTES {
+    if text.is_empty() || text.len() > WITHIN_MAX_BYTES {
         return None;
     }
-    let n = bytes.len();
-    let s: Vec<usize> = bytes.iter().map(|&b| b as usize + 1).collect();
-    let sa = suffix_array(&s);
-    let lcp = lcp_array(&s, &sa);
 
-    // Binary search for the longest length L such that some set of
-    // WITHIN_MIN_COUNT consecutive suffixes shares a common prefix of
-    // length >= L.
-    let mut lo = WITHIN_MIN_BYTES;
-    let mut hi = n;
-    let mut best: Option<usize> = None;
-    while lo <= hi {
-        let mid = (lo + hi) / 2;
-        if longest_lcp_run(&lcp, mid) >= WITHIN_MIN_COUNT {
-            best = Some(mid);
-            lo = mid + 1;
-        } else {
-            hi = mid - 1;
-        }
+    // Collapse to non-empty trimmed lines, preserving order.
+    let lines: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+
+    detect_periodic_repeat(&lines)
+}
+
+/// Detect a periodic run in the line sequence: a pattern of `p` consecutive
+/// lines that repeats WITHIN_MIN_COUNT times back-to-back. Returns the
+/// repeated pattern (joined with newlines) when found.
+fn detect_periodic_repeat(lines: &[&str]) -> Option<String> {
+    let n = lines.len();
+    if n < WITHIN_MIN_COUNT {
+        return None;
     }
-    let len = best?;
-
-    // Find a qualifying group of consecutive suffixes sharing a prefix of
-    // length >= `len`. A group whose repeated snippet is purely code (no
-    // natural-language prose) is legitimate — a model enumerating code
-    // sites naturally repeats the same identifiers/statements within one
-    // message. Only snippets carrying prose (CJK characters) count as a
-    // stuck text loop; skip any code-only group and keep scanning.
-    let mut run = 1usize;
-    let mut run_start = 0usize;
-    for (i, &v) in lcp.iter().enumerate() {
-        if v >= len {
-            if run == 1 {
-                run_start = i;
+    let max_p = n / WITHIN_MIN_COUNT;
+    for p in 1..=max_p {
+        // Longest consecutive chain of period-p matches ending at each index.
+        let mut run = 0usize;
+        let mut best_run = 0usize;
+        let mut best_end = 0usize;
+        for i in 0..n {
+            run = if i >= p && lines[i] == lines[i - p] {
+                run + 1
+            } else {
+                0
+            };
+            if run > best_run {
+                best_run = run;
+                best_end = i;
             }
-            run += 1;
-            if run >= WITHIN_MIN_COUNT {
-                let pos = sa[run_start];
-                let sub = &bytes[pos..pos + len];
-                if let Ok(s) = String::from_utf8(sub.to_vec()) {
-                    if contains_cjk(&s) {
-                        return Some(s);
-                    }
-                }
-            }
-        } else {
-            run = 1;
         }
+        // `best_run` matches span [best_end - best_run + 1, best_end]; the
+        // full periodic region begins one period earlier. Full periods k =
+        // best_run / p + 1.
+        let periods = best_run / p + 1;
+        if periods < WITHIN_MIN_COUNT {
+            continue;
+        }
+        let block_start = best_end - best_run + 1 - p;
+        let pattern = lines[block_start..block_start + p].join("\n");
+        if pattern.len() < MIN_REPEAT_BYTES {
+            continue;
+        }
+        return Some(pattern);
     }
     None
-}
-
-/// True when `s` contains at least one CJK character. The within-turn
-/// detector only fires on prose snippets (repeated sentences), never on
-/// code-only fragments (identifiers, paths, statements) that a model
-/// legitimately reuses while enumerating code sites.
-fn contains_cjk(s: &str) -> bool {
-    s.chars().any(|c| {
-        matches!(c,
-            '\u{4E00}'..='\u{9FFF}'   // CJK Unified Ideographs
-            | '\u{3400}'..='\u{4DBF}' // CJK Extension A
-            | '\u{F900}'..='\u{FAFF}' // CJK Compatibility Ideographs
-        )
-    })
-}
-
-/// Longest run of consecutive LCP entries that are each >= `min_len`. That
-/// run length equals the maximum number of times a `min_len`-long substring
-/// can appear consecutively in the suffix-array ordering.
-fn longest_lcp_run(lcp: &[usize], min_len: usize) -> usize {
-    let mut best = 1usize;
-    let mut run = 1usize;
-    for &v in lcp {
-        if v >= min_len {
-            run += 1;
-            if run > best {
-                best = run;
-            }
-        } else {
-            run = 1;
-        }
-    }
-    best
-}
-
-/// Build a suffix array over an integer sequence using the doubling
-/// algorithm (Manber–Myers). Values are >= 0; separators use 0.
-fn suffix_array(s: &[usize]) -> Vec<usize> {
-    let n = s.len();
-    let mut sa: Vec<usize> = (0..n).collect();
-    let mut rank: Vec<usize> = s.to_vec();
-    let mut tmp = vec![0usize; n];
-    let mut k = 1usize;
-    while k < n {
-        let key = |i: usize| -> (usize, usize) {
-            let r2 = if i + k < n { rank[i + k] + 1 } else { 0 };
-            (rank[i] + 1, r2)
-        };
-        sa.sort_by_key(|&i| key(i));
-        tmp[sa[0]] = 0;
-        for i in 1..n {
-            tmp[sa[i]] = tmp[sa[i - 1]] + usize::from(key(sa[i - 1]) != key(sa[i]));
-        }
-        rank.copy_from_slice(&tmp);
-        if rank[sa[n - 1]] == n - 1 {
-            break;
-        }
-        k <<= 1;
-    }
-    sa
-}
-
-/// Kasai's algorithm: LCP array where lcp[i] = LCP(sa[i], sa[i+1]).
-fn lcp_array(s: &[usize], sa: &[usize]) -> Vec<usize> {
-    let n = s.len();
-    let mut rank = vec![0usize; n];
-    for (i, &v) in sa.iter().enumerate() {
-        rank[v] = i;
-    }
-    let mut lcp = vec![0usize; n.saturating_sub(1)];
-    let mut h = 0usize;
-    for i in 0..n {
-        if rank[i] > 0 {
-            let j = sa[rank[i] - 1];
-            while i + h < n && j + h < n && s[i + h] == s[j + h] {
-                h += 1;
-            }
-            lcp[rank[i] - 1] = h;
-            h = h.saturating_sub(1);
-        }
-    }
-    lcp
 }
 
 /// Extract the human-readable display content from a tool result JSON string.

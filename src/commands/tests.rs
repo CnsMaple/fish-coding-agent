@@ -38,27 +38,37 @@ mod tests {
     }
 
     #[test]
-    fn within_turn_triggers_on_back_to_back_repeats() {
-        // The model echoes the same sentence many times within one message.
+    fn within_turn_triggers_on_repeated_lines() {
+        // The model echoes the same line many times within one message.
         // This is invisible to the across-turn detector (which counts
-        // distinct source texts), so it must be caught here.
-        let text = "现在重建。现在重建文件。现在重建。现在重建文件。现在重建 run_bench.py "
-            .to_string()
-            + "和 verifier.sh。现在重建文件。现在重建。现在重建文件。现在重建两个文件。"
-            + "现在重建。现在重建文件。现在重建。现在重建文件。现在重建。现在重建文件。"
-            + "现在重建。现在重建文件。现在重建。现在重建文件。现在重建。现在重建文件。"
-            + "现在重建。现在重建文件。现在重建。现在重建文件。现在重建。现在重建文件。"
-            + "现在重建。";
+        // distinct source texts), so it must be caught here. Line-level
+        // detection fires when an identical line appears 10+ times.
+        let text = "现在重建文件，并确认改动正确。\n".repeat(10)
+            + "现在重建两个文件。\n"
+            + "现在重建 run_bench.py 和 verifier.sh。\n";
         let found = detect_within_turn_repetition(&text);
         assert!(found.is_some(), "within-turn repeats must trigger");
         let found = found.unwrap();
-        assert!(found.contains("现在重建"), "found snippet: {found:?}");
+        assert!(found.contains("现在重建文件"), "found snippet: {found:?}");
     }
 
     #[test]
     fn within_turn_triggers_on_exact_clone_loop() {
-        let text = "现在改造 run_bench.py 跨平台。先读全文。".repeat(10);
-        assert!(detect_within_turn_repetition(&text).is_some());
+        // Ten identical multi-line blocks repeat back to back.
+        let block = "现在改造 run_bench.py 跨平台。\n先读全文。\n";
+        assert!(detect_within_turn_repetition(&block.repeat(10)).is_some());
+    }
+
+    #[test]
+    fn within_turn_triggers_on_alternating_loop() {
+        // The model oscillates between two short phrases (周期 p = 2). Each
+        // line alone is too short / too few to trigger, but the alternating
+        // pair looping back-to-back is a clear stuck loop and must fire.
+        let text = "现在重建。\n现在重建文件。\n".repeat(10);
+        assert!(
+            detect_within_turn_repetition(&text).is_some(),
+            "alternating loop must trigger"
+        );
     }
 
     #[test]

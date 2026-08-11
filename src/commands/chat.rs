@@ -464,6 +464,14 @@ pub async fn run_chat_stream(
         let mut thinking_text = String::new();
         let mut tool_calls: Vec<crate::providers::ToolCall> = Vec::new();
         let mut stream_done = false;
+        // Set when a stuck-repeat loop is detected mid-stream so we abort
+        // cleanly (no retry) instead of dumping the whole repeated burst.
+        let mut repeat_flagged = false;
+        // Throttle the streaming repeat check: re-running the detector on
+        // every token is wasteful, so only re-check once the accumulated
+        // text has grown by this many bytes since the last check.
+        const REPEAT_CHECK_GROWTH: usize = 512;
+        let mut last_repeat_check = 0usize;
         while let Some(ev) = chat_rx.recv().await {
             if *cancel_rx.borrow() {
                 // Drop the event we just received and exit. The next
@@ -476,6 +484,31 @@ pub async fn run_chat_stream(
                 crate::providers::ChatEvent::Delta(s) => {
                     assistant_content.push_str(&s);
                     send_msg(crate::event::AppMsg::ChatDelta(s));
+                    // Break a stuck text loop as soon as it is recognizable,
+                    // so the user sees a pause instead of a full burst of
+                    // repeated lines. Only the accumulated visible text is
+                    // inspected (thinking loops are handled post-stream).
+                    if assistant_content.len().saturating_sub(last_repeat_check)
+                        >= REPEAT_CHECK_GROWTH
+                    {
+                        last_repeat_check = assistant_content.len();
+                        if let Some(snippet) = detect_within_turn_repetition(&assistant_content) {
+                            let display = if snippet.chars().count() > 60 {
+                                let mut it = snippet.chars();
+                                let head: String = it.by_ref().take(60).collect();
+                                format!("{head}…")
+                            } else {
+                                snippet.clone()
+                            };
+                            send_msg(crate::event::AppMsg::ChatWarn(format!(
+                                "repeated text within a single response detected ({:?}): `{}`. Pausing for user review.",
+                                snippet.len(),
+                                display
+                            )));
+                            repeat_flagged = true;
+                            break;
+                        }
+                    }
                 }
                 crate::providers::ChatEvent::ThinkingDelta(s) => {
                     thinking_text.push_str(&s);
@@ -535,6 +568,14 @@ pub async fn run_chat_stream(
                     });
                 }
             }
+        }
+
+        if repeat_flagged {
+            // A stuck text loop was detected mid-stream and the stream was
+            // aborted. Send a final Done (the warning already went out) so
+            // the UI releases the streaming slot, then stop without retrying.
+            send_msg(crate::event::AppMsg::ChatDone { seq });
+            return;
         }
 
         if !stream_done {
@@ -599,15 +640,12 @@ pub async fn run_chat_stream(
             return;
         }
 
-        if tool_calls.is_empty() {
-            send_msg(crate::event::AppMsg::ChatDone { seq });
-            return;
-        }
-
         // Repetition guard: the model may echo the same sentence many times
         // inside a single response (e.g. repeatedly announcing it will
         // rebuild files, or reasoning in circles). Only the current response
         // is inspected; repeated content is genuine stuck-loop behaviour.
+        // This must run before the `tool_calls.is_empty()` early return so a
+        // pure-text stuck loop (no tool calls) is still caught.
         if !assistant_content.trim().is_empty() {
             if let Some(snippet) = detect_within_turn_repetition(&assistant_content) {
                 let display = if snippet.chars().count() > 60 {
@@ -648,6 +686,11 @@ pub async fn run_chat_stream(
                 send_msg(crate::event::AppMsg::ChatDone { seq });
                 return;
             }
+        }
+
+        if tool_calls.is_empty() {
+            send_msg(crate::event::AppMsg::ChatDone { seq });
+            return;
         }
 
         req.messages.push(ChatMessage {
