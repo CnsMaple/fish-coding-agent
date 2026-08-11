@@ -1974,6 +1974,56 @@ fn drag_creates_tui_selection_after_real_movement() {
 }
 
 #[test]
+fn single_line_backward_drag_selects_between_columns() {
+    // A single-line drag that ends to the LEFT of where it started (e.g.
+    // select from column 8 back to column 3) must still select the run
+    // [3, 8] rather than nothing (the highlight) or the opposite gap (the
+    // copied text). This matches the input area's behaviour, where dragging
+    // either direction selects the span between the two points.
+    use crate::function::Selection;
+    use crate::ui::extract_selection_text;
+
+    // Backward single-line selection: start col 8, end col 3.
+    // The extracted text for a single row must be the run [start, end).
+    let mut s = crate::session::Session::default();
+    s.push(crate::session::Message::new(
+        crate::session::Role::Assistant,
+        "0123456789".to_string(),
+    ));
+    // Populate line_offsets.
+    s.count_all_lines_with_width(80);
+    // Build two selections over the same single rendered row: one dragging
+    // forward (start col < end col) and one dragging backward (start col >
+    // end col) across the identical cell range. The backward drag must
+    // normalize to the same run, so both produce identical text — this is
+    // the fix (the input area already behaves this way; the session area
+    // used to select only one direction).
+    let fwd = Selection {
+        doc_start: 0,
+        doc_end: 0,
+        col_start: Some(4),
+        col_end: Some(11),
+        active: false,
+    };
+    let bwd = Selection {
+        doc_start: 0,
+        doc_end: 0,
+        col_start: Some(11),
+        col_end: Some(4),
+        active: false,
+    };
+    let text_fwd = extract_selection_text(&fwd, &s, 80);
+    let text_bwd = extract_selection_text(&bwd, &s, 80);
+    assert_eq!(
+        text_bwd, text_fwd,
+        "backward single-line drag must select the same run as forward"
+    );
+    // Sanity: the selected run is non-empty (the leading 4-space indent
+    // is trimmed only at the end, so the run contains real content).
+    assert_eq!(text_bwd, "12345678");
+}
+
+#[test]
 fn region_drag_creates_agents_selection() {
     // Dragging inside the agents area must create a rectangular region
     // selection (screen coordinates), mutually exclusive with the

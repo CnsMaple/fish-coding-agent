@@ -2403,7 +2403,7 @@ fn handle_mouse(m: MouseEvent, app: &mut App) {
             app.input.clear_selection();
             if region.is_some() {
                 app.region_drag_start = Some((m.column, m.row));
-            } else {
+            } else if !in_prompt_row {
                 app.tui_drag_start = Some((m.column, m.row));
             }
             if let Ok(mut d) = DRAG.lock() {
@@ -2467,7 +2467,7 @@ fn handle_mouse(m: MouseEvent, app: &mut App) {
                     sel.region = region;
                     sel.end = (m.column, m.row);
                 }
-            } else {
+            } else if !in_prompt_row {
                 // The first Drag after a Down materializes the session
                 // selection. Any prior click that did not move never
                 // created one, so this is also how a click-only event

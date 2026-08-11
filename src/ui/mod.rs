@@ -747,17 +747,34 @@ pub(crate) fn doc_line_to_screen_y(
 
 /// Apply a REVERSED style to every cell inside the selection rectangle so
 /// the user can see what they have highlighted.
+/// Return the selection columns normalized as (lo, hi). For a multi-line
+/// selection the start column belongs to `doc_start`'s line and the end
+/// column to `doc_end`'s line, so the pair is swapped only when the drag
+/// went upward. For a single-line selection (doc_start == doc_end) the two
+/// columns are normalized purely by value, so a backward drag (start col >
+/// end col) still selects the run between them rather than the gap on the
+/// opposite side.
+fn selection_cols(sel: &Selection) -> (Option<u16>, Option<u16>) {
+    if sel.doc_start < sel.doc_end {
+        (sel.col_start, sel.col_end)
+    } else if sel.doc_start > sel.doc_end {
+        (sel.col_end, sel.col_start)
+    } else {
+        match (sel.col_start, sel.col_end) {
+            (Some(a), Some(b)) if a <= b => (Some(a), Some(b)),
+            (Some(a), Some(b)) => (Some(b), Some(a)),
+            (a, b) => (a, b),
+        }
+    }
+}
+
 fn apply_selection_style(buf: &mut Buffer, sel: &Selection, area: &Rect, scroll: u32, total: u32) {
     let y_start = sel.doc_start.min(sel.doc_end);
     let y_end = sel.doc_start.max(sel.doc_end);
-    // Determine column range. When the user drags upward (doc_end <
-    // doc_start), the visual start column belongs to the bottom-most
-    // original line, so normalize accordingly.
-    let (col_lo, col_hi) = if sel.doc_start <= sel.doc_end {
-        (sel.col_start, sel.col_end)
-    } else {
-        (sel.col_end, sel.col_start)
-    };
+    // Determine column range (lo, hi), normalizing for both drag direction
+    // and single-line backward drags so the highlight always spans the
+    // selected run.
+    let (col_lo, col_hi) = selection_cols(sel);
     // Columns are relative to the session area; convert to absolute x.
     let x_lo = col_lo.map(|c| area.x + c.min(area.width.saturating_sub(1)));
     let x_hi = col_hi.map(|c| area.x + c.min(area.width.saturating_sub(1)));
@@ -800,11 +817,9 @@ fn apply_selection_style(buf: &mut Buffer, sel: &Selection, area: &Rect, scroll:
 pub fn extract_selection_text(sel: &Selection, session: &Session, width: usize) -> String {
     let y_start = sel.doc_start.min(sel.doc_end);
     let y_end = sel.doc_start.max(sel.doc_end);
-    let (col_lo, col_hi) = if sel.doc_start <= sel.doc_end {
-        (sel.col_start, sel.col_end)
-    } else {
-        (sel.col_end, sel.col_start)
-    };
+    // Normalize columns for both drag direction and single-line backward
+    // drags (see `selection_cols`).
+    let (col_lo, col_hi) = selection_cols(sel);
     let col_lo = col_lo.unwrap_or(0) as usize;
     // `col_hi` is the exclusive end passed to `slice_by_visual_width`
     // ([start, end)). The highlight rect (apply_selection_style) uses an
