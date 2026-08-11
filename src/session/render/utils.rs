@@ -337,16 +337,24 @@ pub(super) fn wrap_line(line: &str, max_width: usize) -> Vec<String> {
 
     let mut rows = Vec::new();
     let mut current = String::new();
-    let mut current_width = 0;
     for ch in line.chars() {
-        let ch_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-        if current_width > 0 && current_width + ch_width > max_width {
-            rows.push(current);
-            current = String::new();
-            current_width = 0;
+        if !current.is_empty() {
+            current.push(ch);
+            // Measure the accumulated string with UnicodeWidthStr::width
+            // (context-aware, identical to ratatui's Line::width()) rather
+            // than summing per-char widths. Per-char sums diverge on emoji
+            // ZWJ sequences, variation selectors (FE0F/FE01) and combining
+            // marks, which made wrap_line pack too many chars per line and
+            // overflow the box width.
+            if UnicodeWidthStr::width(current.as_str()) > max_width {
+                current.pop();
+                rows.push(current);
+                current = String::new();
+                current.push(ch);
+            }
+        } else {
+            current.push(ch);
         }
-        current.push(ch);
-        current_width += ch_width;
     }
     rows.push(current);
     rows
@@ -357,14 +365,14 @@ pub(super) fn truncate_str_to_width(s: &str, max_width: usize) -> String {
         return s.to_string();
     }
     let mut result = String::new();
-    let mut current_width = 0;
     for ch in s.chars() {
-        let ch_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-        if current_width + ch_width > max_width {
+        result.push(ch);
+        // Context-aware width (matches ratatui's Line::width()) so we
+        // never include a grapheme that would overflow the target width.
+        if UnicodeWidthStr::width(result.as_str()) > max_width {
+            result.pop();
             break;
         }
-        result.push(ch);
-        current_width += ch_width;
     }
     result
 }

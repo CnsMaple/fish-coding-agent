@@ -2325,6 +2325,87 @@ mod tests {
     }
 }
 
+/// Regression test: `wrap_line`/`truncate_str_to_width` must measure
+/// width with UnicodeWidthStr::width (context-aware), the same as
+/// ratatui's Line::width(). Per-char UnicodeWidthChar::width sums
+/// diverge on emoji ZWJ sequences, variation selectors (FE0F/FE01)
+/// and combining marks, which made wrapped lines overflow the box
+/// width and trigger the `box_row_line` width-mismatch fallback.
+#[cfg(test)]
+mod width_divergence_probe {
+    use super::*;
+    use ratatui::style::Color;
+
+    #[test]
+    fn wrap_line_never_overflows_max_width() {
+        let sequences = [
+            "\u{2764}\u{FE0F}",           // ❤️ heart + variation selector
+            "\u{1F44B}\u{1F3FB}",         // 👋🏻 skin tone
+            "\u{1F468}\u{200D}\u{1F469}", // 👨‍👩 ZWJ
+            "\u{1F1E8}\u{1F1F3}",         // 🇨🇳 flag
+            "e\u{0301}",                  // e + combining acute
+            "\u{2018}\u{FE01}",           // curly quote + VS
+            "abc\u{1F600}def",            // emoji in the middle
+            "世界\u{2764}\u{FE0F}你好",   // CJK + heart VS
+        ];
+        for s in sequences {
+            // Use widths large enough that a single grapheme fits, so
+            // the only failure mode under test is wrap overflow.
+            for max_width in 4..=16 {
+                for w in wrap_line(s, max_width) {
+                    assert!(
+                        UnicodeWidthStr::width(w.as_str()) <= max_width,
+                        "wrap_line({s:?}, {max_width}) produced {w:?} width {} > {max_width}",
+                        UnicodeWidthStr::width(w.as_str())
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn truncate_never_exceeds_max_width() {
+        let sequences = [
+            "\u{2764}\u{FE0F}\u{2764}\u{FE0F}",
+            "\u{1F44B}\u{1F3FB}\u{1F44B}\u{1F3FB}",
+            "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F468}",
+            "\u{2018}\u{FE01}\u{2018}\u{FE01}",
+        ];
+        for s in sequences {
+            for max_width in 0..=8 {
+                let t = truncate_str_to_width(s, max_width);
+                assert!(
+                    UnicodeWidthStr::width(t.as_str()) <= max_width,
+                    "truncate({s:?}, {max_width}) = {t:?} width {} > {max_width}",
+                    UnicodeWidthStr::width(t.as_str())
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn box_row_line_exact_width_on_emoji() {
+        let bg = Color::Black;
+        let sequences = [
+            "hello \u{2764}\u{FE0F} world", // ❤️ VS16
+            "\u{1F44B}\u{1F3FB} \u{1F44B}", // skin tones
+            "\u{1F468}\u{200D}\u{1F469}",   // ZWJ family
+            "「\u{2018}\u{FE01}」",         // curly quote + VS
+        ];
+        for width in [20usize, 24, 40, 80] {
+            for s in sequences {
+                let line = box_row_line(s, width, bg);
+                assert_eq!(
+                    line.width(),
+                    width,
+                    "box_row_line({s:?}, {width}) width {} != {width}",
+                    line.width()
+                );
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod code_block_content_width_tests {
     use super::*;

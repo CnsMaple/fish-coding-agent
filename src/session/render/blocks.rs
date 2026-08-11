@@ -1039,7 +1039,7 @@ pub(super) fn box_row_line(text: &str, width: usize, bg: Color) -> Line<'static>
     if line.width() == width {
         line
     } else {
-        eprintln!(
+        tracing::warn!(
             "[box_row_line] width mismatch: Line::width()={} != width={}, pad={}, max_content={}",
             line.width(),
             width,
@@ -1083,7 +1083,7 @@ fn box_row_line_dim(text: &str, width: usize) -> Line<'static> {
     if line.width() == width {
         line
     } else {
-        eprintln!(
+        tracing::warn!(
             "[box_row_line_dim] width mismatch: Line::width()={} != width={}, pad={}, max_content={}, text_len={}",
             line.width(),
             width,
@@ -1163,7 +1163,7 @@ fn box_row_line_spans(spans: Vec<Span<'static>>, width: usize, bg: Color) -> Lin
     } else {
         // Fallback: flatten to a single span. We lose per-span styling
         // but guarantee the width is correct.
-        eprintln!(
+        tracing::warn!(
             "[box_row_line_spans] width mismatch: Line::width()={} != width={}, content_width={}, pad={}, max_content={}",
             line.width(), width, content_width, pad, max_content
         );

@@ -23,7 +23,7 @@ use blocks::{
     output_row_lines, DiffLineKind, DiffRow,
 };
 #[cfg(test)]
-use utils::wrap_line;
+use utils::{truncate_str_to_width, wrap_line};
 
 use super::{Role, Session};
 use crate::config::{ThinkingDisplay, ToolResultDisplay};

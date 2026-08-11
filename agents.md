@@ -37,3 +37,15 @@
 2. `cargo clippy -- -D warnings`
 3. `cargo fmt -- --check`
 4. `cargo test`（涉及逻辑/行为改动时，运行全部测试确认无回归）
+
+## 日志入侵 TUI 注意事项（重要）
+
+**TUI（含 ratatui 渲染）运行期间，绝对禁止任何日志直接写入 stdout/stderr 终端。** 任何调试输出、告警、错误信息一旦 `print!` / `println!` / `eprint!` / `eprintln!` 到终端，就会污染 TUI 的 alternate screen，导致界面错乱、布局被破坏、出现乱码（如 `[box_row_line] width mismatch` 刷屏）。
+
+硬性约束：
+- 所有日志/调试信息一律通过 `tracing::debug!` / `tracing::info!` / `tracing::warn!` / `tracing::error!` 输出——tracing 已全局配置为写入 `fish-coding-agent.log` 文件，不会污染终端。
+- 严禁在 `src/session/render/`、`src/ui/`、`src/event/` 等 TUI 渲染/事件路径中新增任何 `println!`/`eprintln!`/`eprint!`/`print!` 或直接写 `std::stdout/stderr` 的输出代码。
+- 如需在渲染路径中输出调试信息，改用 `tracing::warn!`（或按级别用 `debug!`）。
+- 修改前先 `git log`/`git blame` 检查：历史上一旦出现 `eprintln!` 混入渲染路径，就是本次这类「日志入侵 TUI」问题的复发，务必阻止。
+- 新增代码时，若不确定当前上下文是否在 TUI 渲染期间，一律走 `tracing`，绝不直接写终端。
+- 测试代码（`#[cfg(test)]` 内）中的 `eprintln!` 不受此限制，但不得影响生产渲染路径。
