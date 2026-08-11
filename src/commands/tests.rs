@@ -72,6 +72,23 @@ mod tests {
     }
 
     #[test]
+    fn within_turn_triggers_on_single_line_sentence_loop() {
+        // The model repeats the same sentence(s) back-to-back with NO
+        // newlines at all — the whole burst is one line. The line-level
+        // pass cannot see it (lines() collapses to a single line), so the
+        // sentence-level pass must catch it. The repeated block is
+        // "I'll do the edit now and run. Then interpret. Then fix
+        // assertion and remove debug. Let me go." (4 sentences).
+        let block = "I'll do the edit now and run. Then interpret. Then fix assertion and remove debug. Let me go. ";
+        let text = block.repeat(8);
+        assert_eq!(text.lines().count(), 1, "burst must be a single line");
+        let found = detect_within_turn_repetition(&text);
+        assert!(found.is_some(), "single-line sentence loop must trigger");
+        let found = found.unwrap();
+        assert!(found.contains("do the edit now and run") || found.contains("Let me go."));
+    }
+
+    #[test]
     fn within_turn_ignores_legit_templated_lists() {
         // A task list that reuses a short verb prefix with distinct nouns is
         // legitimate; the shared prefix never reaches the byte threshold.

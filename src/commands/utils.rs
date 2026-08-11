@@ -57,7 +57,48 @@ pub(super) fn detect_within_turn_repetition(text: &str) -> Option<String> {
         .filter(|l| !l.is_empty())
         .collect();
 
-    detect_periodic_repeat(&lines)
+    if let Some(found) = detect_periodic_repeat(&lines) {
+        return Some(found);
+    }
+
+    // The model may instead loop *within a single line*: repeating the same
+    // sentence (or the same multi-sentence block) back-to-back with no
+    // newlines at all. `lines()` above collapses such a burst to one line, so
+    // the line-level pass cannot see it. Split the text into sentences and
+    // re-run the same periodic detector on the sentence sequence to catch
+    // this shape too.
+    let sentences = split_sentences(text);
+    if sentences.len() < WITHIN_MIN_COUNT {
+        return None;
+    }
+    let refs: Vec<&str> = sentences.iter().map(String::as_str).collect();
+    detect_periodic_repeat(&refs)
+}
+
+/// Split text into sentence-sized units on sentence/phrase-ending
+/// punctuation. Each unit keeps its trailing marker so the sequence carries
+/// the same shape as the emitted text. Used to detect single-line stuck
+/// loops where the repeated period is a sentence (or a block of sentences)
+/// rather than a newline-delimited line.
+fn split_sentences(text: &str) -> Vec<String> {
+    const SEP: &[char] = &['.', '。', '!', '！', '?', '？', ';', '；'];
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    for ch in text.chars() {
+        cur.push(ch);
+        if SEP.contains(&ch) {
+            let t = cur.trim();
+            if !t.is_empty() {
+                out.push(t.to_string());
+            }
+            cur.clear();
+        }
+    }
+    let t = cur.trim();
+    if !t.is_empty() {
+        out.push(t.to_string());
+    }
+    out
 }
 
 /// Detect a periodic run in the line sequence: a pattern of `p` consecutive
