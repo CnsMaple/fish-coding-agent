@@ -292,7 +292,7 @@ impl StatusBar {
         ));
         if self.provider != "cursor" {
             spans.push(Span::raw(" | think:"));
-            spans.push(Span::styled(self.thinking.as_str(), Theme::bold()));
+            spans.push(Span::styled(self.thinking.as_str(), Theme::base()));
         }
         spans.push(Span::raw(" | ctx:"));
         if self.context_window_known {
