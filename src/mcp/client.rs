@@ -256,11 +256,28 @@ pub async fn connect_local(
         }
     }
 
-    let (transport, _stderr) = rmcp::transport::child_process::TokioChildProcess::builder(cmd)
+    let (transport, stderr) = rmcp::transport::child_process::TokioChildProcess::builder(cmd)
         .stderr(std::process::Stdio::piped())
         .spawn()
         .map_err(|e| ClientError::Spawn(format!("spawn {program_label}: {e}")))?;
     let pid = transport.id();
+
+    // Drain the child's stderr in the background. Some servers (e.g.
+    // chrome-devtools-mcp) write a lot of diagnostic noise to stderr;
+    // if nothing reads the pipe its OS buffer fills up and the child
+    // blocks on write, which stalls the whole MCP transport.
+    if let Some(mut stderr) = stderr {
+        tokio::spawn(async move {
+            use tokio::io::AsyncReadExt;
+            let mut buf = [0u8; 4096];
+            loop {
+                match stderr.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {} // discard; must not write to the TUI terminal
+                }
+            }
+        });
+    }
 
     let running = tokio::time::timeout(timeout, ().serve(transport))
         .await
