@@ -1539,13 +1539,19 @@ pub(super) enum DiffLineKind {
     Context,
     Removed,
     Added,
+    /// A line present on both sides but with different content.
+    Modified,
 }
 
+/// An aligned old/new row. Both sides present for `Context`/`Modified`;
+/// `Added`/`Removed` have one side `None`.
 #[derive(Debug, Clone)]
-pub(super) struct DiffLine {
+pub(super) struct DiffRow {
     pub(super) kind: DiffLineKind,
-    pub(super) line_no: usize,
-    pub(super) content: String,
+    pub(super) old_no: Option<usize>,
+    pub(super) old_content: String,
+    pub(super) new_no: Option<usize>,
+    pub(super) new_content: String,
 }
 
 fn build_edit_diff_rows(
@@ -1556,14 +1562,14 @@ fn build_edit_diff_rows(
     bg: Color,
 ) -> Option<Vec<Line<'static>>> {
     let (path, old, new) = parse_edit_diff(&tool.metadata)?;
-    let diff = unified_diff_rows(&old, &new);
-    let added = diff
+    let rows = aligned_diff_rows(&old, &new);
+    let added = rows
         .iter()
-        .filter(|line| matches!(line.kind, DiffLineKind::Added))
+        .filter(|r| matches!(r.kind, DiffLineKind::Added | DiffLineKind::Modified))
         .count();
-    let removed = diff
+    let removed = rows
         .iter()
-        .filter(|line| matches!(line.kind, DiffLineKind::Removed))
+        .filter(|r| matches!(r.kind, DiffLineKind::Removed | DiffLineKind::Modified))
         .count();
     let ext = std::path::Path::new(&path)
         .extension()
@@ -1573,114 +1579,431 @@ fn build_edit_diff_rows(
     let lang = ext;
 
     let width = width.max(4);
-    let max_line_width = diff
+    let nw = rows
         .iter()
-        .map(|l| l.line_no.to_string().len())
+        .filter_map(|r| r.old_no.or(r.new_no))
+        .map(|n| n.to_string().len())
         .max()
         .unwrap_or(0)
         .max(3);
-    let mut rows = vec![border_with_label_line(width, &title, bg)];
-    if visible {
-        if diff.is_empty() {
-            rows.extend(box_row_lines("[no changes]", width, bg));
-        } else {
-            for line in &diff {
-                rows.push(diff_box_row_line(line, max_line_width, width, bg, lang));
-            }
-        }
+    let body: Vec<Line<'static>> = rows
+        .iter()
+        .flat_map(|r| diff_box_row_line(r, nw, width, bg, lang))
+        .collect();
+    let mut out = vec![border_with_label_line(width, &title, bg)];
+    if body.is_empty() {
+        out.extend(box_row_lines("[no changes]", width, bg));
+    } else if visible {
+        out.extend(body);
     } else {
-        let shown = preview_lines.min(diff.len());
-        let skip = diff.len().saturating_sub(shown);
-        for line in diff.iter().skip(skip) {
-            rows.push(diff_box_row_line(line, max_line_width, width, bg, lang));
+        let shown = preview_lines.min(body.len());
+        let skip = body.len().saturating_sub(shown);
+        for l in body.iter().skip(skip) {
+            out.push(l.clone());
         }
         if skip > 0 {
-            rows.push(click_hint_line(skip, width, bg));
+            out.push(click_hint_line(skip, width, bg));
         }
     }
-    rows.push(border_line(width, bg));
-    Some(rows)
+    out.push(border_line(width, bg));
+    Some(out)
+}
+
+/// Render a unified (top/bottom) diff row as full-width lines.
+/// `Modified` rows produce a single `~` line with removed/new characters
+/// highlighted inline; `Added`/`Removed` rows produce a single whole-line
+/// highlighted `+`/`-` row. `Context` rows produce a single plain line.
+/// Unchanged characters use the plain background; changed characters are
+/// painted with the deeper `diff_*_fg` color as background.
+/// One side of a diff row to render in the unified layout.
+struct DiffSide<'a> {
+    sign: &'a str,
+    line_no: usize,
+    content: &'a str,
+    ranges: &'a [(usize, usize)],
 }
 
 pub(super) fn diff_box_row_line(
-    diff: &DiffLine,
+    row: &DiffRow,
     number_width: usize,
     width: usize,
     bg: Color,
     lang: &str,
+) -> Vec<Line<'static>> {
+    let colors = crate::theme::active_colors();
+
+    let sides: Vec<DiffSide<'_>> = match row.kind {
+        DiffLineKind::Removed => vec![DiffSide {
+            sign: "-",
+            line_no: row.old_no.unwrap_or(0),
+            content: &row.old_content,
+            ranges: &[],
+        }],
+        DiffLineKind::Added => vec![DiffSide {
+            sign: "+",
+            line_no: row.new_no.unwrap_or(0),
+            content: &row.new_content,
+            ranges: &[],
+        }],
+        DiffLineKind::Modified => {
+            let line_no = row.old_no.or(row.new_no).unwrap_or(0);
+            return vec![diff_box_line_modified(
+                line_no,
+                &row.old_content,
+                &row.new_content,
+                number_width,
+                width,
+                bg,
+                &colors,
+            )];
+        }
+        DiffLineKind::Context => {
+            let content = if !row.old_content.is_empty() {
+                &row.old_content
+            } else {
+                &row.new_content
+            };
+            vec![DiffSide {
+                sign: " ",
+                line_no: row.old_no.or(row.new_no).unwrap_or(0),
+                content,
+                ranges: &[],
+            }]
+        }
+    };
+
+    sides
+        .into_iter()
+        .map(|side| diff_box_line(&side, number_width, width, bg, lang, &colors))
+        .collect()
+}
+
+/// Render a single full-width diff line for one side of a diff row.
+fn diff_box_line(
+    side: &DiffSide<'_>,
+    number_width: usize,
+    width: usize,
+    bg: Color,
+    lang: &str,
+    colors: &crate::theme::ThemeColors,
 ) -> Line<'static> {
-    let (line_bg, sign) = match diff.kind {
-        DiffLineKind::Removed => (crate::theme::Theme::diff_removed_bg_color(), "-"),
-        DiffLineKind::Added => (crate::theme::Theme::diff_added_bg_color(), "+"),
-        DiffLineKind::Context => (bg, " "),
+    let (line_bg, hl_bg, hl_fg) = match side.sign {
+        "-" => (
+            colors.diff_removed_bg,
+            colors.diff_removed_fg,
+            colors.tool_error_fg,
+        ),
+        "+" => (
+            colors.diff_added_bg,
+            colors.diff_added_fg,
+            colors.tool_success_bg,
+        ),
+        _ => (bg, bg, Color::Reset),
     };
-
-    let sign_color = match diff.kind {
-        DiffLineKind::Removed => crate::theme::Theme::diff_removed_fg(),
-        DiffLineKind::Added => crate::theme::Theme::diff_added_fg(),
-        DiffLineKind::Context => Color::Reset,
-    };
-
-    let number_str = format!("{:>width$} ", diff.line_no, width = number_width);
-    let sign_str = sign.to_string();
-    let prefix = format!("{sign_str}{number_str}");
-
-    let content = &diff.content;
-    let content = strip_control_chars(content);
-    let content_spans = crate::session::markdown::highlight_line(&content, lang);
-    let content_spans = spans_with_bg(&content_spans, line_bg);
-
+    let number_str = format!("{:>width$} ", side.line_no, width = number_width);
+    let prefix = format!("{}{}", side.sign, number_str);
     let prefix_width = unicode_width::UnicodeWidthStr::width(prefix.as_str());
-    // Layout: "| " (2) + prefix + "│ " (2) + content + pad + " |" (2) = 6 + prefix + content + pad
-    // So inner_w (space for prefix+content+pad) = width - 6
+
     let inner_w = width.saturating_sub(6);
     let max_content = inner_w.saturating_sub(prefix_width);
 
-    // Truncate content_spans to max_content (mirrors box_row_line_spans logic)
-    let mut truncated_spans: Vec<Span<'static>> = Vec::new();
-    let mut content_width: usize = 0;
-    for span in content_spans {
-        let sw = unicode_width::UnicodeWidthStr::width(span.content.as_ref());
-        if content_width + sw <= max_content {
-            content_width += sw;
-            truncated_spans.push(span);
-        } else {
-            let remaining = max_content.saturating_sub(content_width);
-            if remaining > 0 {
-                let truncated = truncate_str_to_width(span.content.as_ref(), remaining);
-                if !truncated.is_empty() {
-                    truncated_spans.push(Span::styled(truncated, span.style));
-                    content_width += unicode_width::UnicodeWidthStr::width(
-                        truncated_spans.last().unwrap().content.as_ref(),
-                    );
-                }
-            }
-            break;
-        }
-    }
+    let content = strip_control_chars(side.content);
+    let content = truncate_str_to_width(&content, max_content);
 
+    // Constrain char ranges to the (possibly truncated) content length.
+    let eff_ranges: Vec<(usize, usize)> = if side.sign == "-" || side.sign == "+" {
+        side.ranges
+            .iter()
+            .filter(|(s, _)| *s < content.len())
+            .map(|(s, e)| (*s, (*e).min(content.len())))
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    let base_spans = crate::session::markdown::highlight_line(&content, lang);
+    let base_spans = spans_with_bg(&base_spans, line_bg);
+    let content_spans = content_spans_highlighted_ranges(base_spans, &eff_ranges, hl_bg, hl_fg);
+    let content_width: usize = content_spans
+        .iter()
+        .map(|s| unicode_width::UnicodeWidthStr::width(s.content.as_ref()))
+        .sum();
     let pad = max_content.saturating_sub(content_width);
 
-    let prefix_fg = match diff.kind {
-        DiffLineKind::Added | DiffLineKind::Removed => line_bg, // diff bg color (green/red)
-        DiffLineKind::Context => sign_color,                    // keep context visible
+    let sign_fg = match side.sign {
+        "-" => colors.diff_removed_fg,
+        "+" => colors.diff_added_fg,
+        _ => Color::Reset,
     };
     let mut spans = vec![Span::styled("| ", dim_bg_style(bg))];
     spans.push(Span::styled(
-        sign_str,
-        Style::default().fg(prefix_fg).bg(bg),
+        side.sign.to_string(),
+        Style::default().fg(sign_fg).bg(bg),
     ));
-    spans.push(Span::styled(
-        number_str,
-        Style::default().fg(prefix_fg).bg(bg),
-    ));
+    spans.push(Span::styled(number_str, Style::default().bg(bg)));
     spans.push(Span::styled("│ ", bg_style(line_bg)));
-    spans.extend(truncated_spans);
+    spans.extend(content_spans);
     if pad > 0 {
         spans.push(Span::styled(" ".repeat(pad), bg_style(line_bg)));
     }
     spans.push(Span::styled(" |", dim_bg_style(bg)));
     Line::from(spans)
+}
+
+/// Render a single `Modified` line: unchanged characters plain, deleted
+/// characters red and added characters green, all on one line prefixed
+/// with `~`. Pure additions/removals are handled by [`diff_box_line`].
+fn diff_box_line_modified(
+    line_no: usize,
+    old_content: &str,
+    new_content: &str,
+    number_width: usize,
+    width: usize,
+    bg: Color,
+    colors: &crate::theme::ThemeColors,
+) -> Line<'static> {
+    let number_str = format!("{:>width$} ", line_no, width = number_width);
+    let prefix = format!("~{number_str}");
+    let prefix_width = unicode_width::UnicodeWidthStr::width(prefix.as_str());
+
+    let inner_w = width.saturating_sub(6);
+    let max_content = inner_w.saturating_sub(prefix_width);
+
+    let old_content = strip_control_chars(old_content);
+    let new_content = strip_control_chars(new_content);
+
+    // Interleave unchanged, removed (red) and added (green) runs into a
+    // single inline line, truncating to max_content.
+    let spans = merge_inline_diff_spans(
+        &old_content,
+        &new_content,
+        max_content,
+        bg,
+        colors.diff_removed_bg,
+        colors.diff_removed_fg,
+        colors.diff_added_bg,
+        colors.diff_added_fg,
+    );
+    let content_w: usize = spans
+        .iter()
+        .map(|s| unicode_width::UnicodeWidthStr::width(s.content.as_ref()))
+        .sum();
+    let pad = max_content.saturating_sub(content_w);
+
+    let mut spans_out = vec![Span::styled("| ", dim_bg_style(bg))];
+    spans_out.push(Span::styled(
+        "~".to_string(),
+        Style::default().fg(colors.diff_removed_fg).bg(bg),
+    ));
+    spans_out.push(Span::styled(number_str, Style::default().bg(bg)));
+    spans_out.push(Span::styled("│ ", bg_style(bg)));
+    spans_out.extend(spans);
+    if pad > 0 {
+        spans_out.push(Span::styled(" ".repeat(pad), bg_style(bg)));
+    }
+    spans_out.push(Span::styled(" |", dim_bg_style(bg)));
+    Line::from(spans_out)
+}
+
+/// Merge unchanged / removed / added character runs into one inline span
+/// list (common chars plain, removed red, added green), truncated to
+/// `max_width` columns.
+#[allow(clippy::too_many_arguments)]
+fn merge_inline_diff_spans(
+    old_content: &str,
+    new_content: &str,
+    max_width: usize,
+    base_bg: Color,
+    rm_bg: Color,
+    rm_fg: Color,
+    add_bg: Color,
+    add_fg: Color,
+) -> Vec<Span<'static>> {
+    let old_chars: Vec<char> = old_content.chars().collect();
+    let new_chars: Vec<char> = new_content.chars().collect();
+
+    // LCS alignment table over char indices.
+    let (n, m) = (old_chars.len(), new_chars.len());
+    let mut dp = vec![vec![0usize; m + 1]; n + 1];
+    for i in (0..n).rev() {
+        for j in (0..m).rev() {
+            dp[i][j] = if old_chars[i] == new_chars[j] {
+                dp[i + 1][j + 1] + 1
+            } else {
+                dp[i + 1][j].max(dp[i][j + 1])
+            };
+        }
+    }
+
+    // Walk the table emitting styled segments, accumulating into `spans`.
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut width_used = 0usize;
+    let mut buf = String::new();
+    let mut buf_style = Style::default().bg(base_bg);
+
+    let push_char = |ch: char,
+                     style: Style,
+                     buf: &mut String,
+                     buf_style: &mut Style,
+                     spans: &mut Vec<Span<'static>>,
+                     width_used: &mut usize| {
+        if style != *buf_style {
+            flush_run(buf, *buf_style, spans, width_used, max_width);
+            *buf_style = style;
+        }
+        buf.push(ch);
+    };
+
+    let (mut i, mut j) = (0, 0);
+    while i < n && j < m {
+        if old_chars[i] == new_chars[j] {
+            push_char(
+                old_chars[i],
+                Style::default().bg(base_bg),
+                &mut buf,
+                &mut buf_style,
+                &mut spans,
+                &mut width_used,
+            );
+            i += 1;
+            j += 1;
+        } else if dp[i + 1][j] >= dp[i][j + 1] {
+            push_char(
+                old_chars[i],
+                Style::default()
+                    .bg(rm_bg)
+                    .fg(rm_fg)
+                    .add_modifier(Modifier::BOLD),
+                &mut buf,
+                &mut buf_style,
+                &mut spans,
+                &mut width_used,
+            );
+            i += 1;
+        } else {
+            push_char(
+                new_chars[j],
+                Style::default()
+                    .bg(add_bg)
+                    .fg(add_fg)
+                    .add_modifier(Modifier::BOLD),
+                &mut buf,
+                &mut buf_style,
+                &mut spans,
+                &mut width_used,
+            );
+            j += 1;
+        }
+    }
+    while i < n {
+        push_char(
+            old_chars[i],
+            Style::default()
+                .bg(rm_bg)
+                .fg(rm_fg)
+                .add_modifier(Modifier::BOLD),
+            &mut buf,
+            &mut buf_style,
+            &mut spans,
+            &mut width_used,
+        );
+        i += 1;
+    }
+    while j < m {
+        push_char(
+            new_chars[j],
+            Style::default()
+                .bg(add_bg)
+                .fg(add_fg)
+                .add_modifier(Modifier::BOLD),
+            &mut buf,
+            &mut buf_style,
+            &mut spans,
+            &mut width_used,
+        );
+        j += 1;
+    }
+    flush_run(&mut buf, buf_style, &mut spans, &mut width_used, max_width);
+    spans
+}
+
+/// Flush the buffered run into `spans`, truncating to `max_width`.
+fn flush_run(
+    buf: &mut String,
+    style: Style,
+    spans: &mut Vec<Span<'static>>,
+    width_used: &mut usize,
+    max_width: usize,
+) {
+    if buf.is_empty() || *width_used >= max_width {
+        buf.clear();
+        return;
+    }
+    let w = unicode_width::UnicodeWidthStr::width(buf.as_str());
+    if *width_used + w > max_width {
+        let room = max_width - *width_used;
+        let cut = truncate_str_to_width(buf, room);
+        if !cut.is_empty() {
+            spans.push(Span::styled(cut, style));
+        }
+        *width_used = max_width;
+    } else {
+        spans.push(Span::styled(buf.clone(), style));
+        *width_used += w;
+    }
+    buf.clear();
+}
+
+/// Overlay character-level highlight ranges on top of syntax-highlighted
+/// spans. Each span is split so that bytes inside a range get `hl_bg`
+/// (deeper color) with `hl_fg` text, while the rest keeps `line_bg`.
+fn content_spans_highlighted_ranges(
+    base_spans: Vec<Span<'static>>,
+    ranges: &[(usize, usize)],
+    hl_bg: Color,
+    hl_fg: Color,
+) -> Vec<Span<'static>> {
+    if ranges.is_empty() {
+        return base_spans;
+    }
+    let mut out: Vec<Span<'static>> = Vec::new();
+    let mut pos = 0usize;
+    for span in base_spans {
+        let text = span.content.as_ref();
+        let span_start = pos;
+        let span_end = pos + text.len();
+        pos = span_end;
+        // Walk byte-by-byte, splitting at range boundaries.
+        let mut cursor = span_start;
+        for &(rs, re) in ranges {
+            let rs = rs.max(span_start).min(span_end);
+            let re = re.max(span_start).min(span_end);
+            if rs >= re {
+                continue;
+            }
+            if rs > cursor {
+                out.push(Span::styled(
+                    text[cursor - span_start..rs - span_start].to_string(),
+                    span.style,
+                ));
+            }
+            out.push(Span::styled(
+                text[rs - span_start..re - span_start].to_string(),
+                Style::default()
+                    .bg(hl_bg)
+                    .fg(hl_fg)
+                    .add_modifier(Modifier::BOLD),
+            ));
+            cursor = re;
+        }
+        if cursor < span_end {
+            out.push(Span::styled(
+                text[cursor - span_start..].to_string(),
+                span.style,
+            ));
+        }
+    }
+    out
 }
 
 fn parse_edit_diff(content: &str) -> Option<(String, String, String)> {
@@ -1695,7 +2018,8 @@ fn parse_edit_diff(content: &str) -> Option<(String, String, String)> {
     ))
 }
 
-fn unified_diff_rows(old: &str, new: &str) -> Vec<DiffLine> {
+/// Align old/new lines into paired rows for the unified renderer.
+fn aligned_diff_rows(old: &str, new: &str) -> Vec<DiffRow> {
     let old_lines: Vec<&str> = old.lines().collect();
     let new_lines: Vec<&str> = new.lines().collect();
     if old_lines == new_lines {
@@ -1709,7 +2033,6 @@ fn unified_diff_rows(old: &str, new: &str) -> Vec<DiffLine> {
     {
         prefix += 1;
     }
-
     let mut suffix = 0usize;
     while suffix < old_lines.len().saturating_sub(prefix)
         && suffix < new_lines.len().saturating_sub(prefix)
@@ -1725,52 +2048,62 @@ fn unified_diff_rows(old: &str, new: &str) -> Vec<DiffLine> {
     let context_after = suffix.min(context);
 
     let mut rows = Vec::new();
-    for (idx, line) in old_lines
-        .iter()
-        .enumerate()
-        .take(prefix)
-        .skip(context_start)
-    {
-        rows.push(DiffLine {
+    for idx in context_start..prefix {
+        rows.push(DiffRow {
             kind: DiffLineKind::Context,
-            line_no: idx + 1,
-            content: line.to_string(),
+            old_no: Some(idx + 1),
+            old_content: old_lines[idx].to_string(),
+            new_no: Some(idx + 1),
+            new_content: new_lines[idx].to_string(),
         });
     }
-    for (idx, line) in old_lines
-        .iter()
-        .enumerate()
-        .take(old_change_end)
-        .skip(prefix)
-    {
-        rows.push(DiffLine {
-            kind: DiffLineKind::Removed,
-            line_no: idx + 1,
-            content: line.to_string(),
-        });
+    let pair_count = (old_change_end - prefix).max(new_change_end - prefix);
+    for k in 0..pair_count {
+        let o = (prefix + k < old_change_end).then(|| old_lines[prefix + k]);
+        let n = (prefix + k < new_change_end).then(|| new_lines[prefix + k]);
+        let no = (prefix + k + 1).to_string();
+        let nn = (prefix + k + 1).to_string();
+        match (o, n) {
+            (Some(o), Some(n)) => {
+                let kind = if o == n {
+                    DiffLineKind::Context
+                } else {
+                    DiffLineKind::Modified
+                };
+                rows.push(DiffRow {
+                    kind,
+                    old_no: no.parse().ok(),
+                    old_content: o.to_string(),
+                    new_no: nn.parse().ok(),
+                    new_content: n.to_string(),
+                });
+            }
+            (Some(o), None) => rows.push(DiffRow {
+                kind: DiffLineKind::Removed,
+                old_no: no.parse().ok(),
+                old_content: o.to_string(),
+                new_no: None,
+                new_content: String::new(),
+            }),
+            (None, Some(n)) => rows.push(DiffRow {
+                kind: DiffLineKind::Added,
+                old_no: None,
+                old_content: String::new(),
+                new_no: nn.parse().ok(),
+                new_content: n.to_string(),
+            }),
+            (None, None) => {}
+        }
     }
-    for (idx, line) in new_lines
-        .iter()
-        .enumerate()
-        .take(new_change_end)
-        .skip(prefix)
-    {
-        rows.push(DiffLine {
-            kind: DiffLineKind::Added,
-            line_no: idx + 1,
-            content: line.to_string(),
-        });
-    }
-    for (idx, line) in old_lines
-        .iter()
-        .enumerate()
-        .take(old_change_end.saturating_add(context_after))
-        .skip(old_change_end)
-    {
-        rows.push(DiffLine {
+    for k in 0..context_after {
+        let o_idx = old_change_end + k;
+        let n_idx = new_change_end + k;
+        rows.push(DiffRow {
             kind: DiffLineKind::Context,
-            line_no: idx + 1,
-            content: line.to_string(),
+            old_no: Some(o_idx + 1),
+            old_content: old_lines[o_idx].to_string(),
+            new_no: Some(n_idx + 1),
+            new_content: new_lines[n_idx].to_string(),
         });
     }
     rows

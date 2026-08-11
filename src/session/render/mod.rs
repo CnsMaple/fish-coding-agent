@@ -20,7 +20,7 @@ pub use utils::{
 #[cfg(test)]
 use blocks::{
     box_row_line, build_output_block_rows, build_shell_command_rows, diff_box_row_line,
-    output_row_lines, DiffLine, DiffLineKind,
+    output_row_lines, DiffLineKind, DiffRow,
 };
 #[cfg(test)]
 use utils::wrap_line;

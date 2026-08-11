@@ -1722,14 +1722,95 @@ mod tests {
             text.contains("edit [src/demo.py +1/-1]"),
             "title missing:\n{text}"
         );
-        assert!(
-            text.contains("-  2 │     old_call()"),
-            "removed line missing:\n{text}"
+        assert!(text.contains("~  2 │"), "modified line missing:\n{text}");
+    }
+
+    #[test]
+    fn edit_diff_renders_unified_layout() {
+        let make = |name: &str, old: &str, new: &str| ToolResultBlock {
+            name: name.to_string(),
+            title: name.to_string(),
+            content: "ok".to_string(),
+            metadata: serde_json::json!({
+                "kind": "edit_diff",
+                "path": "src/demo.py",
+                "old": old,
+                "new": new,
+                "output": "ok",
+            })
+            .to_string(),
+            content_offset: 0,
+            visible: true,
+            running: false,
+            failed: false,
+            call_id: String::new(),
+            pruned: false,
+            streaming_input: String::new(),
+            cached_line_count_visible: None,
+            cached_line_count_collapsed: None,
+            started_at: None,
+        };
+
+        // Modified line: renders a single `~` row.
+        let tool = make(
+            "edit",
+            "alpha\n    old_call()\nomega\n",
+            "alpha\n    new_call()\nomega\n",
         );
+        let rows = build_tool_block_rows(&tool, true, 10, 80);
+        let text = lines_to_text(&rows);
         assert!(
-            text.contains("+  2 │     new_call()"),
-            "added line missing:\n{text}"
+            text.contains("~  2 │") && !text.contains("-  2 │") && !text.contains("+  2 │"),
+            "Modified row should render one ~ line:\n{text}"
         );
+
+        // Pure removal: single whole-line red-highlighted row.
+        let tool = make("edit", "alpha\n    doomed()\nomega\n", "alpha\nomega\n");
+        let rows = build_tool_block_rows(&tool, true, 10, 80);
+        let text = lines_to_text(&rows);
+        assert!(
+            text.contains("-  2 │") && !text.contains("+  2 │"),
+            "pure removal should render one - line:\n{text}"
+        );
+
+        // Pure addition: single whole-line green-highlighted row.
+        let tool = make("edit", "alpha\nomega\n", "alpha\n    fresh()\nomega\n");
+        let rows = build_tool_block_rows(&tool, true, 10, 80);
+        let text = lines_to_text(&rows);
+        assert!(
+            text.contains("+  2 │") && !text.contains("-  2 │"),
+            "pure addition should render one + line:\n{text}"
+        );
+    }
+
+    #[test]
+    fn diff_box_row_line_width_matches_unified() {
+        let row = DiffRow {
+            kind: DiffLineKind::Modified,
+            old_no: Some(2),
+            old_content: "    old_call()".to_string(),
+            new_no: Some(2),
+            new_content: "    new_call()".to_string(),
+        };
+        for width in [30usize, 50, 80, 120] {
+            let lines = diff_box_row_line(&row, 3, width, Color::Reset, "python");
+            assert_eq!(lines.len(), 1, "Modified row should render one line");
+            for line in lines {
+                let line_w = line.width();
+                assert_eq!(
+                    line_w,
+                    width,
+                    "unified row width {line_w} != {width}\n  spans: {:?}",
+                    line.spans
+                        .iter()
+                        .map(|s| (
+                            s.content.as_ref(),
+                            UnicodeWidthStr::width(s.content.as_ref())
+                        ))
+                        .collect::<Vec<_>>()
+                );
+            }
+        }
     }
 
     #[test]
@@ -2434,32 +2515,37 @@ mod border_fix_tests {
     /// `width`, not `width + 2`.
     #[test]
     fn diff_box_row_line_width_matches() {
-        let diff = DiffLine {
-            kind: DiffLineKind::Added,
-            line_no: 42,
-            content: "let x = some_long_variable_name_that_might_overflow;".to_string(),
+        let row = DiffRow {
+            kind: DiffLineKind::Modified,
+            old_no: Some(42),
+            old_content: "let x = some_long_variable_name_that_might_overflow;".to_string(),
+            new_no: Some(42),
+            new_content: "let y = some_long_variable_name_that_might_overflow;".to_string(),
         };
         for width in [30usize, 50, 80, 120] {
-            let line = diff_box_row_line(
-                &diff,
-                3.max(diff.line_no.to_string().len()),
+            let lines = diff_box_row_line(
+                &row,
+                3.max(42usize.to_string().len()),
                 width,
                 Color::Reset,
                 "rust",
             );
-            let line_w = line.width();
-            assert_eq!(
-                line_w,
-                width,
-                "diff row width {line_w} != {width}\n  spans: {:?}",
-                line.spans
-                    .iter()
-                    .map(|s| (
-                        s.content.as_ref(),
-                        UnicodeWidthStr::width(s.content.as_ref())
-                    ))
-                    .collect::<Vec<_>>()
-            );
+            assert_eq!(lines.len(), 1, "Modified row should render one line");
+            for line in lines {
+                let line_w = line.width();
+                assert_eq!(
+                    line_w,
+                    width,
+                    "diff row width {line_w} != {width}\n  spans: {:?}",
+                    line.spans
+                        .iter()
+                        .map(|s| (
+                            s.content.as_ref(),
+                            UnicodeWidthStr::width(s.content.as_ref())
+                        ))
+                        .collect::<Vec<_>>()
+                );
+            }
         }
     }
 
