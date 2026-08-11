@@ -618,10 +618,19 @@ pub(crate) fn count_block_gaps(
             continue;
         }
         if off > cursor {
-            // A gap is needed only when the content segment between
-            // cursor and off actually renders to >0 lines, matching
-            // `ensure_gap_before_block`.
-            if count_md_segment(&content[cursor..off], width) > 0 {
+            // A gap is inserted only when the content segment between
+            // cursor and off ends on a non-blank line, matching
+            // `ensure_gap_before_block` (which checks whether the last
+            // rendered line of the preceding content is non-empty before
+            // pushing a blank separator). Mirror `build_message_lines`
+            // exactly: each segment is passed through
+            // `strip_legacy_markers` before rendering, so trailing blank
+            // source lines are stripped the same way and the rendered
+            // last-line blank-ness matches the real render.
+            let seg_text = strip_legacy_markers(&content[cursor..off]);
+            let mut tmp: Vec<Line<'static>> = Vec::new();
+            render_content_segment(&seg_text, width, &mut tmp);
+            if tmp.last().map(|l| l.width() != 0).unwrap_or(false) {
                 gaps += 1;
             }
             cursor = off;

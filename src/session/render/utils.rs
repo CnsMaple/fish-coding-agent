@@ -287,9 +287,14 @@ pub fn content_line_count_segmented(
 /// Uses `render_content_segment` directly so the count is guaranteed
 /// to match the actual rendered output — no divergence between the
 /// counting path and the rendering path.
+///
+/// `build_message_lines` passes each content segment through
+/// `strip_legacy_markers` before rendering, which collapses trailing
+/// blank lines. `count_md_segment` must apply the same strip so the
+/// count matches the real render.
 pub fn count_md_segment(text: &str, width: usize) -> u32 {
     let mut tmp: Vec<Line<'static>> = Vec::new();
-    render_content_segment(text, width, &mut tmp);
+    render_content_segment(&strip_legacy_markers(text), width, &mut tmp);
     tmp.len() as u32
 }
 

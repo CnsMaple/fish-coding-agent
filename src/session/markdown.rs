@@ -69,12 +69,74 @@ pub fn render(text: &str) -> Vec<Line<'static>> {
     render_with_width(text, usize::MAX / 2)
 }
 
+/// Private-use sentinel used to preserve blank lines through
+/// pulldown-cmark, which collapses consecutive blank lines into a single
+/// paragraph separator. During pre-processing each blank line outside a
+/// fenced code block is turned into a paragraph containing only this
+/// sentinel; the renderer then converts such lines back into empty output
+/// lines so the echo matches the original text.
+const BLANK_SENTINEL: &str = "\u{E000}";
+
+/// Replace blank lines (outside fenced code blocks) with a sentinel
+/// paragraph so pulldown-cmark emits a distinct output line for each.
+/// Blank lines inside code blocks are left untouched — the code block
+/// renderer already preserves them.
+fn preprocess_blank_lines(text: &str) -> String {
+    // Fast exit: nothing to do when there are no blank lines.
+    if !text.lines().any(|l| l.trim().is_empty()) {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len() + 16);
+    let mut in_code = false;
+    let mut fence_char = '`';
+    let mut open_len = 0usize;
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        let head = trimmed.chars().next();
+        let is_fence = matches!(head, Some('`') | Some('~'));
+        let len = if is_fence {
+            Some(trimmed.chars().take_while(|&c| c == head.unwrap()).count())
+        } else {
+            None
+        };
+
+        if in_code {
+            // Close the fence when we see a matching fence line.
+            if let (Some(n), Some(c)) = (len, head) {
+                if c == fence_char && n >= open_len {
+                    in_code = false;
+                }
+            }
+            out.push_str(line);
+            out.push('\n');
+        } else if let Some(n) = len {
+            if n >= 3 {
+                // Open a fenced code block.
+                in_code = true;
+                fence_char = head.unwrap();
+                open_len = n;
+            }
+            out.push_str(line);
+            out.push('\n');
+        } else if trimmed.is_empty() {
+            // Blank line outside a code block -> sentinel paragraph.
+            out.push_str("\n\n");
+            out.push_str(BLANK_SENTINEL);
+            out.push_str("\n\n");
+        } else {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
+}
+
 pub fn render_with_width(text: &str, width: usize) -> Vec<Line<'static>> {
     // Fast path: if the text has no \r, no tabs, no zero-width/invisible
-    // chars, and no table-like lines, skip the cleaning + preprocess pass
-    // entirely and parse the original string directly. This avoids
-    // a full String allocation + char-by-char filter on every call,
-    // which matters during streaming (60 fps re-renders).
+    // chars, no table-like lines, and no blank lines, skip the cleaning +
+    // preprocess passes entirely and parse the original string directly.
+    // This avoids a full String allocation + char-by-char filter on every
+    // call, which matters during streaming (60 fps re-renders).
     let has_cr = text.contains('\r');
     let has_tab = text.contains('\t');
     let has_invisible = text.contains(|c: char| {
@@ -92,14 +154,24 @@ pub fn render_with_width(text: &str, width: usize) -> Vec<Line<'static>> {
                 | '\u{2064}'
         )
     });
-    if !has_cr
-        && !has_tab
-        && !has_invisible
-        && !text.lines().any(|l| {
-            let t = l.trim();
-            t.starts_with('|') && t.ends_with('|')
-        })
-    {
+    let mut has_table = false;
+    let mut has_blank = false;
+    for line in text.lines() {
+        let t = line.trim();
+        if t.starts_with('|') && t.ends_with('|') {
+            has_table = true;
+        }
+        if t.is_empty() {
+            has_blank = true;
+        }
+    }
+    if !has_cr && !has_tab && !has_invisible && !has_table {
+        if has_blank {
+            // Blank lines need sentinel pre-processing; everything else is
+            // already clean, so skip the heavier cleaning pass.
+            let processed = preprocess_blank_lines(text);
+            return MdRenderer::new(width).render(&processed);
+        }
         return MdRenderer::new(width).render(text);
     }
 
@@ -126,7 +198,13 @@ pub fn render_with_width(text: &str, width: usize) -> Vec<Line<'static>> {
     // 4. Pre-process table-like blocks so even concatenated single-line
     //    tables or oddly-formatted LLM output gets proper line breaks.
     cleaned = preprocess_tables(&cleaned);
-    MdRenderer::new(width).render(&cleaned)
+    // 5. Preserve blank lines (outside code blocks) through the parser.
+    let processed = if has_blank {
+        preprocess_blank_lines(&cleaned)
+    } else {
+        cleaned
+    };
+    MdRenderer::new(width).render(&processed)
 }
 
 /// Minimum-viable Markdown → ratatui renderer.  Covers the most common
@@ -147,6 +225,10 @@ struct MdRenderer {
     in_table_cell: bool,
     /// True while we are inside a table header row.
     in_table_head: bool,
+    /// Set when the current paragraph is a blank-line sentinel (see
+    /// `BLANK_SENTINEL`). The paragraph carries no real text; on its
+    /// `End(Paragraph)` we emit an empty output line instead.
+    pending_blank: bool,
     max_width: usize,
 }
 
@@ -182,6 +264,7 @@ impl MdRenderer {
             list_stack: Vec::new(),
             in_table_cell: false,
             in_table_head: false,
+            pending_blank: false,
             max_width,
         }
     }
@@ -215,7 +298,13 @@ impl MdRenderer {
             }
             return;
         }
-        // If there are active inline styles, apply them; otherwise plain.
+        // A paragraph consisting solely of the blank-line sentinel emits
+        // an empty output line on its Close instead of real text.
+        if t == BLANK_SENTINEL {
+            self.pending_blank = true;
+            return;
+        }
+        // If active inline styles, apply them; otherwise plain.
         self.spans.push(self.text_span(t));
     }
 
@@ -440,7 +529,15 @@ impl MdRenderer {
                     _ => {}
                 },
                 Event::End(tag) => match tag {
-                    TagEnd::Paragraph => self.flush_line(),
+                    TagEnd::Paragraph => {
+                        if self.pending_blank {
+                            // Blank-line sentinel paragraph -> emit an empty line.
+                            self.pending_blank = false;
+                            self.out.push(Line::from(""));
+                        } else {
+                            self.flush_line();
+                        }
+                    }
                     TagEnd::Heading(_) => {
                         self.flush_line();
                         self.style_stack.pop();
@@ -864,6 +961,27 @@ mod tests {
         assert!(!lines.is_empty(), "got empty output");
         let text = join_lines(&lines);
         assert!(text.contains("hello world"), "got: {text:?}");
+    }
+
+    #[test]
+    fn blank_lines_are_preserved() {
+        // Consecutive blank lines between paragraphs must each render as
+        // an empty output line so the echo matches the original text.
+        let lines = render("foo\n\n\nbar");
+        let empty = lines.iter().filter(|l| l.width() == 0).count();
+        // Two blank lines between "foo" and "bar" -> exactly two empty
+        // output lines (plus the two text lines).
+        assert_eq!(empty, 2, "expected 2 blank lines, got {empty}: {lines:#?}");
+        assert_eq!(lines.len(), 4, "expected 4 lines, got {:?}", lines.len());
+    }
+
+    #[test]
+    fn blank_lines_inside_code_block_are_preserved() {
+        // Blank lines inside a fenced code block must not be swallowed.
+        let lines = render("```\na\n\nb\n```");
+        let text = join_lines(&lines);
+        assert!(text.contains("a"), "code content 'a' missing:\n{text}");
+        assert!(text.contains("b"), "code content 'b' missing:\n{text}");
     }
 
     #[test]
