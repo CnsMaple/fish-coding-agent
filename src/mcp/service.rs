@@ -204,6 +204,12 @@ impl McpService {
 
     /// Invoke a tool by its combined key. Returns the rendered
     /// text result. Errors include the tool's `is_error` flag.
+    ///
+    /// If the underlying transport has dropped (e.g. the server
+    /// process crashed or was killed), the server is transparently
+    /// reconnected and the call retried once. This prevents a
+    /// single transient transport drop from permanently wedging a
+    /// tool (common with local servers like chrome-devtools-mcp).
     pub async fn call_tool(
         &self,
         key: &str,
@@ -213,16 +219,46 @@ impl McpService {
             .lookup_tool(key)
             .await
             .ok_or_else(|| ServiceError::NotFound(key.to_string()))?;
+        let rendered = match self
+            .call_tool_inner(&spec.server, &spec.name, arguments.clone())
+            .await
+        {
+            Ok(r) => r,
+            Err(e) if is_transport_closed(&e) => {
+                // Transport dropped; reconnect and retry once.
+                if let Some(cfg) = self.config_of(&spec.server).await {
+                    self.connect(&spec.server, &cfg).await;
+                }
+                self.call_tool_inner(&spec.server, &spec.name, arguments)
+                    .await?
+            }
+            Err(e) => return Err(e),
+        };
+        Ok(rendered)
+    }
+
+    /// Dispatch a single tool call to a live client slot.
+    async fn call_tool_inner(
+        &self,
+        server: &str,
+        tool: &str,
+        arguments: serde_json::Value,
+    ) -> Result<String, ServiceError> {
         let clients = self.clients.read().await;
         let slot = clients
-            .get(&spec.server)
-            .ok_or_else(|| ServiceError::NotFound(spec.server.clone()))?;
+            .get(server)
+            .ok_or_else(|| ServiceError::NotFound(server.to_string()))?;
         let result = slot
             .handle
-            .call_tool(&spec.name, Some(arguments))
+            .call_tool(tool, Some(arguments))
             .await
             .map_err(ServiceError::from)?;
         Ok(McpClientHandle::render_text(&result))
+    }
+
+    /// Read the currently stored config for a server, if any.
+    async fn config_of(&self, name: &str) -> Option<McpServerConfig> {
+        self.inner.read().await.config.get(name).cloned()
     }
 
     /// Connect (or reconnect) a single server. Updates the status
@@ -459,4 +495,19 @@ impl From<ClientError> for ServiceError {
             ClientError::Io(e) => ServiceError::Transport(e.to_string()),
         }
     }
+}
+
+/// Heuristic: does this error mean the underlying transport was
+/// dropped/closed? The rmcp layer reports these as protocol errors
+/// with messages like `Transport closed` / `transport closed`. We
+/// treat any such error as a signal to reconnect & retry.
+fn is_transport_closed(e: &ServiceError) -> bool {
+    let msg = e.to_string().to_lowercase();
+    msg.contains("transport closed")
+        || msg.contains("transport is closed")
+        || msg.contains("connection closed")
+        || msg.contains("channel closed")
+        || msg.contains("stream closed")
+        || msg.contains("eof")
+        || msg.contains("broken pipe")
 }
