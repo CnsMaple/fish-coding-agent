@@ -28,6 +28,12 @@ const WITHIN_MAX_BYTES: usize = 512 * 1024;
 /// loop. Short repeated fragments (e.g. a bare "现在重建。") reachable from
 /// legitimately templated output never reach this length.
 const MIN_REPEAT_BYTES: usize = 24;
+/// A "small vocabulary" loop is declared only when the number of distinct
+/// lines is at most this many.
+const SMALL_VOCAB_MAX_DISTINCT: usize = 5;
+/// A "small vocabulary" loop is declared only when the total line count is
+/// at least this many times the distinct-line count.
+const SMALL_VOCAB_MIN_RATIO: usize = 3;
 
 /// Within-turn text repetition detector.
 ///
@@ -59,6 +65,27 @@ pub(super) fn detect_within_turn_repetition(text: &str) -> Option<String> {
 
     if let Some(found) = detect_periodic_repeat(&lines) {
         return Some(found);
+    }
+
+    // Fixed-column loop: a periodic pattern whose *varying* lines change
+    // each cycle but which keeps one column constant (e.g. the model re-
+    // states "Let me delete the test config." every time while the Chinese
+    // line wobbles). The constant column repeats >= WITHIN_MIN_COUNT times
+    // back-to-back, so the exact-match periodic detector above misses it.
+    if let Some(found) = detect_fixed_column_loop(&lines) {
+        return Some(found);
+    }
+
+    // Small-vocabulary loop: the model rephrases the same few lines over
+    // and over without ever repeating a line verbatim enough to hit the
+    // periodic or fixed-column rules (e.g. "改用无重定向 Start-Process 启
+    // 动独立进程。/Let me start the dev server detached. …" cycling through
+    // a handful of near-synonyms). A tiny distinct set stretched over a
+    // long output is a strong stuck-loop signal.
+    if is_small_vocabulary_loop(&lines) {
+        return Some(
+            "small-vocabulary loop: only a few distinct lines repeated many times".to_string(),
+        );
     }
 
     // The model may instead loop *within a single line*: repeating the same
@@ -141,6 +168,67 @@ fn detect_periodic_repeat(lines: &[&str]) -> Option<String> {
         return Some(pattern);
     }
     None
+}
+
+/// Detect a fixed-column loop: a periodic pattern of period `p` whose
+/// varying lines change each cycle but which keeps one column identical
+/// every cycle. For example:
+///
+///   A₁ / X / A₂ / X / A₃ / X …   (period 2, column 1 = X constant)
+///
+/// The exact-match periodic detector never fires here because the varying
+/// column (A₁, A₂, …) differs each period. Returns the constant line when
+/// found.
+fn detect_fixed_column_loop(lines: &[&str]) -> Option<String> {
+    let n = lines.len();
+    if n < WITHIN_MIN_COUNT {
+        return None;
+    }
+    let max_p = n / WITHIN_MIN_COUNT;
+    for p in 1..=max_p {
+        for col in 0..p {
+            // Longest consecutive run of equal lines within this column.
+            let mut run = 0usize;
+            let mut best_run = 0usize;
+            let mut prev: Option<&str> = None;
+            let mut k = col;
+            while k < n {
+                let cur = lines[k];
+                if let Some(pv) = prev {
+                    run = if cur == pv { run + 1 } else { 0 };
+                    if run > best_run {
+                        best_run = run;
+                    }
+                }
+                prev = Some(cur);
+                k += p;
+            }
+            // `best_run` equality matches span best_run + 1 full periods.
+            let periods = best_run + 1;
+            if periods >= WITHIN_MIN_COUNT {
+                let fixed = lines[col];
+                if fixed.len() >= MIN_REPEAT_BYTES {
+                    return Some(fixed.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Detect a small-vocabulary loop: the whole output is drawn from a tiny
+/// set of distinct lines (<= SMALL_VOCAB_MAX_DISTINCT) stretched over many
+/// lines (total >= SMALL_VOCAB_MIN_RATIO x distinct). The model rephrases
+/// the same few near-synonyms without ever repeating a line verbatim enough
+/// to hit the periodic or fixed-column rules.
+fn is_small_vocabulary_loop(lines: &[&str]) -> bool {
+    let n = lines.len();
+    if n < SMALL_VOCAB_MIN_RATIO * SMALL_VOCAB_MAX_DISTINCT {
+        return false;
+    }
+    let distinct: std::collections::HashSet<&&str> = lines.iter().collect();
+    let d = distinct.len();
+    d > 0 && d <= SMALL_VOCAB_MAX_DISTINCT && n >= SMALL_VOCAB_MIN_RATIO * d
 }
 
 /// Extract the human-readable display content from a tool result JSON string.

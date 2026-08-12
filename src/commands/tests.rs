@@ -125,6 +125,56 @@ mod tests {
     }
 
     #[test]
+    fn within_turn_triggers_on_fixed_column_loop() {
+        // The model re-states "Let me delete the test config." every cycle
+        // while the other (Chinese) line wobbles between near-synonyms.
+        // The exact-match periodic detector misses this because the varying
+        // line differs each period; the fixed-column rule must catch it.
+        let mut text = String::new();
+        for _ in 0..6 {
+            text.push_str("删除测试残留配置。\n");
+            text.push_str("Let me delete the test config.\n");
+            text.push_str("删除测试配置。\n");
+            text.push_str("Let me delete the test config.\n");
+        }
+        let found = detect_within_turn_repetition(&text);
+        assert!(found.is_some(), "fixed-column loop must trigger");
+        let found = found.unwrap();
+        assert!(
+            found.contains("Let me delete the test config."),
+            "found snippet: {found:?}"
+        );
+    }
+
+    #[test]
+    fn within_turn_triggers_on_small_vocabulary_loop() {
+        // The model cycles through a handful of near-synonym lines without
+        // any one line repeating verbatim enough to hit the periodic rule.
+        // A tiny distinct set stretched over a long output must fire.
+        let text = "改用无重定向 Start-Process 启动独立进程。\n".to_string()
+            + "Let me start the dev server detached.\n"
+            + "改用无重定向 Start-Process。\n"
+            + "Let me start detached.\n"
+            + "改用无重定向 Start-Process 启动独立 dev server。\n"
+            + "Let me start the dev server detached.\n"
+            + "改用无重定向 Start-Process。\n"
+            + "Let me start detached.\n"
+            + "改用无重定向 Start-Process 启动独立进程。\n"
+            + "Let me start the dev server detached.\n"
+            + "改用无重定向 Start-Process。\n"
+            + "Let me start detached.\n"
+            + "改用无重定向 Start-Process 启动独立 dev server。\n"
+            + "Let me start the dev server detached.\n"
+            + "改用无重定向 Start-Process。\n"
+            + "Let me start detached.\n"
+            + "改用无重定向 Start-Process 启动独立进程。";
+        assert!(
+            detect_within_turn_repetition(&text).is_some(),
+            "small-vocabulary loop must trigger"
+        );
+    }
+
+    #[test]
     fn dynamic_prompt_includes_todos_when_present() {
         let todos = vec![
             crate::session::TodoItem {
