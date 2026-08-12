@@ -15,6 +15,16 @@ use super::{
     build_agents_content, compact_now, open_settings, system_prompt, system_prompt_dynamic_full,
 };
 use super::{MSG_PROVIDER_INVALID, MSG_REQUEST_IN_FLIGHT};
+
+/// Maximum number of consecutive automatic loop recoveries before we give
+/// up and pause for the user to intervene.
+const MAX_LOOP_RECOVERY: u32 = 3;
+
+/// Injected user-turn correction sent to the model when a stuck loop is
+/// detected, telling it to notice and fix its behaviour.
+const LOOP_RECOVERY_PROMPT: &str =
+    "你刚刚回复了大量的重复循环文本，现在你需要注意你的行为，并继续规范回复";
+
 pub fn send_chat(app: &mut App, user_text: String, image_parts: Vec<crate::session::ContentPart>) {
     // A fresh prompt invalidates any pending redo state: turned-back
     // turns must not be re-applied on top of newer context.
@@ -418,6 +428,28 @@ pub async fn run_chat_stream(
             let _ = tx.send(msg);
         }
     };
+    // Running count of consecutive automatic loop recoveries injected
+    // this turn. Exceeding `MAX_LOOP_RECOVERY` makes us stop auto-recovering
+    // and fall back to pausing for the user.
+    let mut recoveries = 0u32;
+    // Inject the loop-recovery correction as a user message and increment
+    // the recovery counter. Returns false when the recovery budget is
+    // exhausted, meaning the caller should keep its original pause-and-review
+    // behaviour instead of continuing the stream.
+    let mut push_recovery = |messages: &mut Vec<ChatMessage>| -> bool {
+        if recoveries >= MAX_LOOP_RECOVERY {
+            return false;
+        }
+        recoveries += 1;
+        messages.push(ChatMessage {
+            role: "user".to_string(),
+            content: LOOP_RECOVERY_PROMPT.to_string(),
+            content_parts: Vec::new(),
+            tool_call_id: None,
+            tool_calls: Vec::new(),
+        });
+        true
+    };
     let mut stream_retries = 0u32;
     let retry_delays = [10u64, 30, 60];
     // Rolling record of recent tool calls (name, arguments) used by
@@ -572,8 +604,15 @@ pub async fn run_chat_stream(
 
         if repeat_flagged {
             // A stuck text loop was detected mid-stream and the stream was
-            // aborted. Send a final Done (the warning already went out) so
-            // the UI releases the streaming slot, then stop without retrying.
+            // aborted. Try to auto-recover by injecting a correction; if the
+            // recovery budget is exhausted, send a final Done (the warning
+            // already went out) so the UI releases the streaming slot.
+            if push_recovery(&mut req.messages) {
+                send_msg(crate::event::AppMsg::ChatWarn(
+                    "repeated text loop detected; auto-recovering.".to_string(),
+                ));
+                continue;
+            }
             send_msg(crate::event::AppMsg::ChatDone { seq });
             return;
         }
@@ -660,6 +699,12 @@ pub async fn run_chat_stream(
                     snippet.len(),
                     display
                 )));
+                if push_recovery(&mut req.messages) {
+                    send_msg(crate::event::AppMsg::ChatWarn(
+                        "repeated text loop detected; auto-recovering.".to_string(),
+                    ));
+                    continue;
+                }
                 send_msg(crate::event::AppMsg::ChatDone { seq });
                 return;
             }
@@ -683,6 +728,12 @@ pub async fn run_chat_stream(
                     snippet.len(),
                     display
                 )));
+                if push_recovery(&mut req.messages) {
+                    send_msg(crate::event::AppMsg::ChatWarn(
+                        "repeated thinking loop detected; auto-recovering.".to_string(),
+                    ));
+                    continue;
+                }
                 send_msg(crate::event::AppMsg::ChatDone { seq });
                 return;
             }
@@ -712,6 +763,15 @@ pub async fn run_chat_stream(
                     "doom loop detected: `{}` called 3x with identical args. Pausing for user review.",
                     call.name
                 )));
+                if push_recovery(&mut req.messages) {
+                    // Drop the assistant message that carried the flagged
+                    // tool calls so the correction starts from a clean turn.
+                    req.messages.pop(); // assistant
+                    send_msg(crate::event::AppMsg::ChatWarn(
+                        "doom loop detected; auto-recovering.".to_string(),
+                    ));
+                    continue;
+                }
                 send_msg(crate::event::AppMsg::ChatDone { seq });
                 return;
             }
