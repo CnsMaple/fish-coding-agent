@@ -477,10 +477,6 @@ pub struct Session {
     /// `Config::tool_preview_lines`; `ui::render` keeps this in sync.
     #[serde(skip)]
     pub tool_preview_lines: usize,
-    /// Cache of rendered `Line`s per message index.
-    /// `None` = uncached; `Some(lines)` = cached until content changes.
-    #[serde(skip)]
-    pub line_cache: std::sync::Mutex<Vec<Option<Vec<ratatui::text::Line<'static>>>>>,
     /// Bounded LRU of fully-rendered `Vec<Line>` per message, keyed by
     /// `msg_idx` and validated against `Message.content_version`. Used
     /// by the viewport-aware render path so we only re-parse Markdown
@@ -548,7 +544,6 @@ impl Default for Session {
             display: crate::config::ThinkingDisplay::default(),
             tool_display: crate::config::ToolResultDisplay::default(),
             tool_preview_lines: 10,
-            line_cache: std::sync::Mutex::new(Vec::new()),
             message_lines_cache: std::sync::Mutex::new(crate::session::lru::BoundedCache::default()),
             cached_total_lines: None,
             display_version: 0,
@@ -571,25 +566,11 @@ impl Session {
         self.line_offsets.clear();
     }
 
-    /// Invalidate the line-cache entry for message `id` and the
-    /// layout cache. Called from every tool-block mutation path.
-    fn invalidate_line_cache(&mut self, id: usize) {
-        if let Ok(mut c) = self.line_cache.lock() {
-            if id < c.len() {
-                c[id] = None;
-            }
-        }
-        self.invalidate_layout_cache();
-    }
-
     /// Invalidate ALL render caches so the next frame re-renders every
     /// message from scratch. Call this when a global visual setting
     /// changes (e.g. theme color swap) that affects already-rendered
     /// output stored in the line cache and message-lines LRU.
     pub fn invalidate_all_render_caches(&mut self) {
-        if let Ok(mut c) = self.line_cache.lock() {
-            c.clear();
-        }
         if let Ok(mut lru) = self.message_lines_cache.lock() {
             lru.clear();
         }
@@ -664,11 +645,6 @@ impl Session {
                 m.close_open_thinking();
                 m.line_count = m.content.split('\n').count().max(1) as u32;
                 m.invalidate_render_caches();
-                if let Ok(mut c) = self.line_cache.lock() {
-                    if id < c.len() {
-                        c[id] = None;
-                    }
-                }
                 // Keep cursor up-to-date so all content is immediately visible.
                 m.display_cursor = m.content.len();
             }
@@ -712,7 +688,6 @@ impl Session {
                     tool.cached_line_count_visible = None;
                     tool.cached_line_count_collapsed = None;
                     m.invalidate_render_caches();
-                    self.invalidate_line_cache(id);
                     return;
                 }
             }
@@ -821,7 +796,6 @@ impl Session {
                     tool.cached_line_count_visible = None;
                     tool.cached_line_count_collapsed = None;
                     m.invalidate_render_caches();
-                    self.invalidate_line_cache(id);
                 }
             }
         }
@@ -878,7 +852,6 @@ impl Session {
                     ));
                 }
                 m.invalidate_render_caches();
-                self.invalidate_line_cache(id);
             }
         }
     }
@@ -1065,11 +1038,6 @@ impl Session {
                 m.content = strip_text_tool_calls(&m.content);
                 m.line_count = m.content.split('\n').count().max(1) as u32;
                 m.invalidate_caches();
-                if let Ok(mut c) = self.line_cache.lock() {
-                    if id < c.len() {
-                        c[id] = None;
-                    }
-                }
                 // Invalidate any per-segment / per-tool counts.
                 for seg in m.thinking_segments.iter_mut() {
                     seg.cached_line_count_expanded = None;
@@ -1112,9 +1080,6 @@ impl Session {
         self.streaming_id = None;
         self.scroll = 0;
         self.todo_items.clear();
-        if let Ok(mut c) = self.line_cache.lock() {
-            c.clear();
-        }
         if let Ok(mut c) = self.message_lines_cache.lock() {
             c.clear();
         }

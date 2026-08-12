@@ -300,19 +300,33 @@ where
     let mut needs_draw = true;
     let mut prev_scroll: Option<u32> = None;
     let mut last_draw = Instant::now();
-    // Minimum interval between draws (~20 fps).
+    // Economy throttle (~20 fps) when idle/streaming: SSE delta chunks
+    // arrive far faster than 60 fps and each draw re-parses the growing
+    // streaming message through Markdown — that was the dominant CPU +
+    // stdout-write hotspot. Discrete events (parallel tool results) are
+    // coalesced into the next frame, which is imperceptible. The 100 ms
+    // tick keeps the spinner animating even when no deltas arrive.
     const DRAW_INTERVAL: Duration = Duration::from_millis(50);
+    // Scrolling needs ~60 fps to avoid the stutter/tearing that comes
+    // from the wheel handler updating `session.scroll` instantly while
+    // the screen only redraws every 50 ms.
+    const SCROLL_DRAW_INTERVAL: Duration = Duration::from_millis(16);
+    // Latest wheel event. While a scroll gesture is in flight (or for a
+    // short window after), we lift the draw throttle to 60 fps so fast
+    // scrolling stays smooth; otherwise we fall back to economy mode.
+    let mut last_wheel = Instant::now() - Duration::from_secs(1);
 
     loop {
-        // Throttled draw: cap at ~60 fps via DRAW_INTERVAL. During
-        // inflight we previously skipped the throttle, but SSE delta
-        // chunks arrive far faster than 60 fps and each draw re-parses
-        // the growing streaming message through Markdown twice — that
-        // was the dominant CPU + stdout-write hotspot. Discrete
-        // events (parallel tool results) are now coalesced into the
-        // next 16 ms frame, which is imperceptible. The 100 ms tick
-        // keeps the spinner animating even when no deltas arrive.
-        if needs_draw && last_draw.elapsed() >= DRAW_INTERVAL {
+        // Throttled draw: cap at ~60 fps during active scrolling, ~20 fps
+        // otherwise.
+        let scrolling = app.session_scroll.animating
+            || last_wheel.elapsed() < SCROLL_DRAW_INTERVAL.mul_f64(5.0);
+        let draw_interval = if scrolling {
+            SCROLL_DRAW_INTERVAL
+        } else {
+            DRAW_INTERVAL
+        };
+        if needs_draw && last_draw.elapsed() >= draw_interval {
             flush_pending_chat(app, false);
             if let Err(e) = terminal.draw(|f| crate::ui::render(f, app)) {
                 let _ = e;
@@ -369,6 +383,13 @@ where
                                 }
                             }
                             Event::Mouse(m) => {
+                                if matches!(
+                                    m.kind,
+                                    crossterm::event::MouseEventKind::ScrollUp
+                                        | crossterm::event::MouseEventKind::ScrollDown
+                                ) {
+                                    last_wheel = std::time::Instant::now();
+                                }
                                 handle_mouse(m, app);
                             }
                             Event::Paste(text) => {

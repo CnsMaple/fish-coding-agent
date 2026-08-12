@@ -246,13 +246,38 @@ fn collect_toggle_blocks(
     session: &Session,
     config: &Config,
     width: u16,
+    viewport_start: usize,
+    viewport_end: usize,
 ) -> (Vec<ToggleBlock>, Vec<ToggleBlock>, usize) {
     let mut thinking: Vec<ToggleBlock> = Vec::new();
     let mut tool: Vec<ToggleBlock> = Vec::new();
     let width_u16: u16 = width;
     let mut line_idx: usize = 0;
 
+    // When `line_offsets` is populated (by `count_all_lines_with_width`
+    // during the same render pass), each message's full line span is
+    // `[line_offsets[i], line_offsets[i+1])`. A message whose span lies
+    // entirely outside the visible `[viewport_start, viewport_end)` range
+    // can be fast-forwarded without re-parsing its Markdown — the
+    // dominant per-frame cost in long sessions. The skip preserves the
+    // running `line_idx` so the returned total still matches
+    // `compute_total_lines`.
+    let line_offsets_valid = session.line_offsets.len() == session.messages.len() + 1;
+
     for (msg_idx, m) in session.messages.iter().enumerate() {
+        if line_offsets_valid {
+            let msg_start = session.line_offsets[msg_idx] as usize;
+            let msg_end = session
+                .line_offsets
+                .get(msg_idx + 1)
+                .copied()
+                .unwrap_or(msg_start as u32) as usize;
+            if msg_end <= viewport_start || msg_start >= viewport_end {
+                line_idx += msg_end - msg_start;
+                continue;
+            }
+        }
+
         // ── Skill block (rendered before everything else, like
         // build_message_lines) ──────────────────────────────────
         if m.role == crate::session::Role::User {
@@ -466,7 +491,8 @@ fn collect_toggle_rows(
     inner_h: usize,
     width_u16: u16,
 ) {
-    let (thinking, tool, _total) = collect_toggle_blocks(&app.session, &app.config, width_u16);
+    let (thinking, tool, _total) =
+        collect_toggle_blocks(&app.session, &app.config, width_u16, start, end);
     app.thinking_toggle_rows.clear();
     app.tool_toggle_rows.clear();
     for b in thinking {
@@ -1233,7 +1259,8 @@ mod tests {
             config.tool_preview_lines,
         );
         let expected = session.count_all_lines_with_width(width as usize);
-        let (thinking, tool, walked) = collect_toggle_blocks(session, config, width);
+        let (thinking, tool, walked) =
+            collect_toggle_blocks(session, config, width, 0, expected as usize);
         assert_eq!(
             walked as u32, expected,
             "toggle walk total ({walked}) != compute_total_lines ({expected})"
@@ -1266,7 +1293,7 @@ mod tests {
         assert_walk_matches_total(&mut s, &cfg, width);
 
         // Thinking and tool blocks must both be collected exactly once.
-        let (thinking, tool, _) = collect_toggle_blocks(&s, &cfg, width);
+        let (thinking, tool, _) = collect_toggle_blocks(&s, &cfg, width, 0, usize::MAX);
         assert_eq!(thinking.len(), 1, "expected one thinking block");
         assert_eq!(tool.len(), 1, "expected one tool block");
     }
@@ -1288,7 +1315,7 @@ mod tests {
 
         let width = 80u16;
         assert_walk_matches_total(&mut s, &cfg, width);
-        let (thinking, tool, _) = collect_toggle_blocks(&s, &cfg, width);
+        let (thinking, tool, _) = collect_toggle_blocks(&s, &cfg, width, 0, usize::MAX);
         assert!(thinking.is_empty(), "hidden thinking must not be collected");
         assert!(tool.is_empty(), "hidden tool must not be collected");
     }
@@ -1319,7 +1346,7 @@ mod tests {
 
         let width = 80u16;
         assert_walk_matches_total(&mut s, &cfg, width);
-        let (_, tool, _) = collect_toggle_blocks(&s, &cfg, width);
+        let (_, tool, _) = collect_toggle_blocks(&s, &cfg, width, 0, usize::MAX);
         assert!(tool.is_empty(), "plan tool is not toggleable");
     }
 
@@ -1339,7 +1366,7 @@ mod tests {
 
         let width = 80u16;
         assert_walk_matches_total(&mut s, &cfg, width);
-        let (thinking, tool, _) = collect_toggle_blocks(&s, &cfg, width);
+        let (thinking, tool, _) = collect_toggle_blocks(&s, &cfg, width, 0, usize::MAX);
         assert_eq!(thinking.len(), 1);
         assert_eq!(tool.len(), 1);
         // The thinking block must start after the "first part" content.
