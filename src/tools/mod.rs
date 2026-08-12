@@ -617,6 +617,43 @@ pub(super) fn save_tool_output(text: &str) -> String {
     }
 }
 
+/// Build the head-preview portion of a truncated tool output: the
+/// leading lines within the given line/byte limits, plus the amount
+/// and unit that were removed. Returns `(preview, amount, unit)`.
+/// Does not persist anything.
+fn truncate_preview(
+    text: &str,
+    max_lines: usize,
+    max_bytes: usize,
+) -> (String, usize, &'static str) {
+    let lines: Vec<&str> = text.split('\n').collect();
+    let total_bytes = text.len();
+    let mut out: Vec<&str> = Vec::new();
+    let mut bytes = 0usize;
+    for line in &lines {
+        let size = line.len() + if out.is_empty() { 0 } else { 1 };
+        if out.len() >= max_lines || bytes + size > max_bytes {
+            break;
+        }
+        out.push(line);
+        bytes += size;
+    }
+
+    let removed_lines = lines.len() - out.len();
+    let removed_bytes = total_bytes - bytes;
+    let unit = if removed_bytes > 0 && out.len() == max_lines {
+        "lines"
+    } else {
+        "bytes"
+    };
+    let amount = if unit == "lines" {
+        removed_lines
+    } else {
+        removed_bytes
+    };
+    (out.join("\n"), amount, unit)
+}
+
 /// Truncate a raw tool output string to the line/byte limits. When
 /// it fits, returns it unchanged. When it exceeds, saves the full
 /// text to a temp file and returns a head preview plus a hint that
@@ -628,34 +665,27 @@ pub(super) fn truncate_output_str(text: &str) -> String {
     if lines.len() <= TOOL_OUTPUT_MAX_LINES && total_bytes <= TOOL_OUTPUT_MAX_BYTES {
         return text.to_string();
     }
-
-    let mut out: Vec<&str> = Vec::new();
-    let mut bytes = 0usize;
-    for line in &lines {
-        let size = line.len() + if out.is_empty() { 0 } else { 1 };
-        if out.len() >= TOOL_OUTPUT_MAX_LINES || bytes + size > TOOL_OUTPUT_MAX_BYTES {
-            break;
-        }
-        out.push(line);
-        bytes += size;
-    }
-
-    let removed_lines = lines.len() - out.len();
-    let removed_bytes = total_bytes - bytes;
-    let preview = out.join("\n");
+    let (preview, amount, unit) =
+        truncate_preview(text, TOOL_OUTPUT_MAX_LINES, TOOL_OUTPUT_MAX_BYTES);
     let path = save_tool_output(text);
-    let unit = if removed_bytes > 0 && out.len() == TOOL_OUTPUT_MAX_LINES {
-        "lines"
-    } else {
-        "bytes"
-    };
-    let amount = if unit == "lines" {
-        removed_lines
-    } else {
-        removed_bytes
-    };
     format!(
         "{preview}\n\n...{amount} {unit} truncated...\n\nThe tool call succeeded but the output was truncated. Full output saved to: {path}\nUse grep to search the full content or read with offset/limit to view specific sections."
+    )
+}
+
+/// Truncate a `read` tool result. Unlike other tools, an oversized
+/// file is NOT persisted to a temp file: the file already exists on
+/// disk, so we only return a small head preview and tell the model
+/// to use `grep` or `read` (with offset/limit) instead.
+pub(super) fn truncate_read_output(text: &str) -> String {
+    let lines: Vec<&str> = text.split('\n').collect();
+    let total_bytes = text.len();
+    if lines.len() <= TOOL_OUTPUT_MAX_LINES && total_bytes <= READ_OUTPUT_LIMIT {
+        return text.to_string();
+    }
+    let (preview, amount, unit) = truncate_preview(text, TOOL_OUTPUT_MAX_LINES, READ_OUTPUT_LIMIT);
+    format!(
+        "{preview}\n\n...{amount} {unit} truncated...\n\nThe file is too large to return in full. Use grep to search the full content, or read with offset/limit (start_line/end_line) to view specific sections."
     )
 }
 

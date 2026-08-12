@@ -252,8 +252,10 @@ prefix. Status-bar summary like `2✓ 1✗`. Use `/mcp`, `/mcp:<name>`,
 
 Tool output is uniformly truncated to 2000 lines / 50 KiB; overflow is
 saved to a temp file under `fish_coding_agent_tool_output/` and the
-model is told to use `grep`/`read`. MCP tools appear as
-`mcp_<server>_<tool>`.
+model is told to use `grep`/`read`. The `read` tool truncates at its
+own 32 KiB limit and does **not** write a temp file — the model is
+instead told to use `grep` or `read` with offset/limit, since the file
+already exists on disk. MCP tools appear as `mcp_<server>_<tool>`.
 
 ## Permission system
 

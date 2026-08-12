@@ -7,7 +7,7 @@ pub(super) async fn read_file(args: &str, cwd: &Path) -> Result<String> {
     let selected = select_lines(&text, args.start_line, args.end_line)?;
     let trimmed = selected.trim_end().to_string();
     if trimmed.len() > READ_OUTPUT_LIMIT {
-        Ok(truncate_output_str(&trimmed))
+        Ok(truncate_read_output(&trimmed))
     } else {
         Ok(trimmed)
     }
