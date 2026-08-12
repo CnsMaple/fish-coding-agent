@@ -719,7 +719,7 @@ fn system_prompt_core(_agent: crate::permission::Agent, agents_content: &str) ->
 
 ### ask(question, options?)
 
-向用户提出澄清问题。当任务含糊、需要权衡取舍，或受阻于信息缺失时使用。将独立的多个问题合并为一次调用。用户的回答会作为下一条消息出现。
+向用户提出澄清问题。当任务含糊、需要权衡取舍，或受阻于信息缺失时使用。将独立的多个问题合并为一次调用。用户的回答会作为下一条消息出现。每个问题的 `options` 必须按推荐优先级从上到下排列：最推荐的选项放最前面，依次递减。
 
 ### todowrite(todos)
 
