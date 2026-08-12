@@ -1586,10 +1586,58 @@ fn build_edit_diff_rows(
         .max()
         .unwrap_or(0)
         .max(3);
-    let body: Vec<Line<'static>> = rows
-        .iter()
-        .flat_map(|r| diff_box_row_line(r, nw, width, bg, lang))
-        .collect();
+    let colors = crate::theme::active_colors();
+    let mut body: Vec<Line<'static>> = Vec::new();
+    let mut i = 0usize;
+    while i < rows.len() {
+        let big = matches!(rows[i].kind, DiffLineKind::Modified)
+            && is_big_change(&rows[i].old_content, &rows[i].new_content);
+        if big {
+            // Group consecutive big-modified rows: emit all `-` sides then
+            // all `+` sides so the output reads `---+++` instead of `-+-+-+`.
+            let mut j = i;
+            while j < rows.len()
+                && matches!(rows[j].kind, DiffLineKind::Modified)
+                && is_big_change(&rows[j].old_content, &rows[j].new_content)
+            {
+                j += 1;
+            }
+            for r in &rows[i..j] {
+                body.push(diff_box_line(
+                    &DiffSide {
+                        sign: "-",
+                        line_no: r.old_no.unwrap_or(r.new_no.unwrap_or(0)),
+                        content: &r.old_content,
+                        ranges: &[],
+                    },
+                    nw,
+                    width,
+                    bg,
+                    lang,
+                    &colors,
+                ));
+            }
+            for r in &rows[i..j] {
+                body.push(diff_box_line(
+                    &DiffSide {
+                        sign: "+",
+                        line_no: r.new_no.unwrap_or(r.old_no.unwrap_or(0)),
+                        content: &r.new_content,
+                        ranges: &[],
+                    },
+                    nw,
+                    width,
+                    bg,
+                    lang,
+                    &colors,
+                ));
+            }
+            i = j;
+        } else {
+            body.extend(diff_box_row_line(&rows[i], nw, width, bg, lang));
+            i += 1;
+        }
+    }
     let mut out = vec![border_with_label_line(width, &title, bg)];
     if body.is_empty() {
         out.extend(box_row_lines("[no changes]", width, bg));
@@ -1805,8 +1853,101 @@ fn diff_box_line_modified(
     Line::from(spans_out)
 }
 
-/// Merge unchanged / removed / added character runs into one inline span
-/// list (common chars plain, removed red, added green), truncated to
+/// A segment of a word-level diff: either matching text on both sides,
+/// text only present in the old line, or text only present in the new line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DiffSegKind {
+    Same,
+    Removed,
+    Added,
+}
+
+/// Split a line into alternating whitespace and non-whitespace word tokens.
+/// Diffing at word granularity means a common leading indent stays plain
+/// while a changed first word is highlighted on its own.
+fn tokenize_words(s: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut cur = String::new();
+    let mut cur_ws = false;
+    for ch in s.chars() {
+        let ws = ch.is_whitespace();
+        if cur.is_empty() {
+            cur.push(ch);
+            cur_ws = ws;
+        } else if ws == cur_ws {
+            cur.push(ch);
+        } else {
+            tokens.push(std::mem::take(&mut cur));
+            cur.push(ch);
+            cur_ws = ws;
+        }
+    }
+    if !cur.is_empty() {
+        tokens.push(cur);
+    }
+    tokens
+}
+
+/// LCS-align two lines word-by-word, collapsing adjacent segments of the
+/// same kind. Common words come back as `Same`, old-only as `Removed`,
+/// new-only as `Added`.
+fn word_diff_segments(old: &str, new: &str) -> Vec<(DiffSegKind, String)> {
+    let old_tokens = tokenize_words(old);
+    let new_tokens = tokenize_words(new);
+    let (n, m) = (old_tokens.len(), new_tokens.len());
+
+    let mut dp = vec![vec![0usize; m + 1]; n + 1];
+    for i in (0..n).rev() {
+        for j in (0..m).rev() {
+            dp[i][j] = if old_tokens[i] == new_tokens[j] {
+                dp[i + 1][j + 1] + 1
+            } else {
+                dp[i + 1][j].max(dp[i][j + 1])
+            };
+        }
+    }
+
+    let mut segs: Vec<(DiffSegKind, String)> = Vec::new();
+    let push = |kind: DiffSegKind, text: &str, segs: &mut Vec<(DiffSegKind, String)>| {
+        if text.is_empty() {
+            return;
+        }
+        if let Some((last_kind, last_text)) = segs.last_mut() {
+            if *last_kind == kind {
+                last_text.push_str(text);
+                return;
+            }
+        }
+        segs.push((kind, text.to_string()));
+    };
+
+    let (mut i, mut j) = (0, 0);
+    while i < n && j < m {
+        if old_tokens[i] == new_tokens[j] {
+            push(DiffSegKind::Same, &old_tokens[i], &mut segs);
+            i += 1;
+            j += 1;
+        } else if dp[i + 1][j] >= dp[i][j + 1] {
+            push(DiffSegKind::Removed, &old_tokens[i], &mut segs);
+            i += 1;
+        } else {
+            push(DiffSegKind::Added, &new_tokens[j], &mut segs);
+            j += 1;
+        }
+    }
+    while i < n {
+        push(DiffSegKind::Removed, &old_tokens[i], &mut segs);
+        i += 1;
+    }
+    while j < m {
+        push(DiffSegKind::Added, &new_tokens[j], &mut segs);
+        j += 1;
+    }
+    segs
+}
+
+/// Merge unchanged / removed / added word runs into one inline span list
+/// (common words plain, removed words red, added words green), truncated to
 /// `max_width` columns.
 #[allow(clippy::too_many_arguments)]
 fn merge_inline_diff_spans(
@@ -1819,111 +1960,27 @@ fn merge_inline_diff_spans(
     add_bg: Color,
     add_fg: Color,
 ) -> Vec<Span<'static>> {
-    let old_chars: Vec<char> = old_content.chars().collect();
-    let new_chars: Vec<char> = new_content.chars().collect();
+    let segs = word_diff_segments(old_content, new_content);
 
-    // LCS alignment table over char indices.
-    let (n, m) = (old_chars.len(), new_chars.len());
-    let mut dp = vec![vec![0usize; m + 1]; n + 1];
-    for i in (0..n).rev() {
-        for j in (0..m).rev() {
-            dp[i][j] = if old_chars[i] == new_chars[j] {
-                dp[i + 1][j + 1] + 1
-            } else {
-                dp[i + 1][j].max(dp[i][j + 1])
-            };
-        }
-    }
-
-    // Walk the table emitting styled segments, accumulating into `spans`.
     let mut spans: Vec<Span<'static>> = Vec::new();
     let mut width_used = 0usize;
-    let mut buf = String::new();
-    let mut buf_style = Style::default().bg(base_bg);
-
-    let push_char = |ch: char,
-                     style: Style,
-                     buf: &mut String,
-                     buf_style: &mut Style,
-                     spans: &mut Vec<Span<'static>>,
-                     width_used: &mut usize| {
-        if style != *buf_style {
-            flush_run(buf, *buf_style, spans, width_used, max_width);
-            *buf_style = style;
-        }
-        buf.push(ch);
-    };
-
-    let (mut i, mut j) = (0, 0);
-    while i < n && j < m {
-        if old_chars[i] == new_chars[j] {
-            push_char(
-                old_chars[i],
-                Style::default().bg(base_bg),
-                &mut buf,
-                &mut buf_style,
-                &mut spans,
-                &mut width_used,
-            );
-            i += 1;
-            j += 1;
-        } else if dp[i + 1][j] >= dp[i][j + 1] {
-            push_char(
-                old_chars[i],
-                Style::default()
-                    .bg(rm_bg)
-                    .fg(rm_fg)
-                    .add_modifier(Modifier::BOLD),
-                &mut buf,
-                &mut buf_style,
-                &mut spans,
-                &mut width_used,
-            );
-            i += 1;
-        } else {
-            push_char(
-                new_chars[j],
-                Style::default()
-                    .bg(add_bg)
-                    .fg(add_fg)
-                    .add_modifier(Modifier::BOLD),
-                &mut buf,
-                &mut buf_style,
-                &mut spans,
-                &mut width_used,
-            );
-            j += 1;
-        }
-    }
-    while i < n {
-        push_char(
-            old_chars[i],
-            Style::default()
+    for (kind, text) in segs {
+        let style = match kind {
+            DiffSegKind::Same => Style::default().bg(base_bg),
+            DiffSegKind::Removed => Style::default()
                 .bg(rm_bg)
                 .fg(rm_fg)
                 .add_modifier(Modifier::BOLD),
-            &mut buf,
-            &mut buf_style,
-            &mut spans,
-            &mut width_used,
-        );
-        i += 1;
-    }
-    while j < m {
-        push_char(
-            new_chars[j],
-            Style::default()
+            DiffSegKind::Added => Style::default()
                 .bg(add_bg)
                 .fg(add_fg)
                 .add_modifier(Modifier::BOLD),
-            &mut buf,
-            &mut buf_style,
-            &mut spans,
-            &mut width_used,
-        );
-        j += 1;
+        };
+        // `flush_run` takes a mutable buffer and clears it; pass an owned
+        // copy so the truncated remainder is emitted properly.
+        let mut owned = text;
+        flush_run(&mut owned, style, &mut spans, &mut width_used, max_width);
     }
-    flush_run(&mut buf, buf_style, &mut spans, &mut width_used, max_width);
     spans
 }
 
@@ -2016,6 +2073,39 @@ fn parse_edit_diff(content: &str) -> Option<(String, String, String)> {
         value.get("old")?.as_str()?.to_string(),
         value.get("new")?.as_str()?.to_string(),
     ))
+}
+
+/// Whether a modified line changed in more than 60% of its (longer-side)
+/// characters. Big changes render as a `-`/`+` pair rather than one `~` row.
+fn is_big_change(old: &str, new: &str) -> bool {
+    let old_n = old.chars().count();
+    let new_n = new.chars().count();
+    if old_n == 0 && new_n == 0 {
+        return false;
+    }
+
+    // LCS length over characters.
+    let old_chars: Vec<char> = old.chars().collect();
+    let new_chars: Vec<char> = new.chars().collect();
+    let (n, m) = (old_chars.len(), new_chars.len());
+    let mut dp = vec![vec![0usize; m + 1]; n + 1];
+    for i in (0..n).rev() {
+        for j in (0..m).rev() {
+            dp[i][j] = if old_chars[i] == new_chars[j] {
+                dp[i + 1][j + 1] + 1
+            } else {
+                dp[i + 1][j].max(dp[i][j + 1])
+            };
+        }
+    }
+    let lcs = dp[0][0];
+    let longer = old_n.max(new_n);
+    if longer == 0 {
+        return false;
+    }
+    // Removed chars (old minus LCS) plus added chars (new minus LCS).
+    let changed = old_n + new_n - 2 * lcs;
+    changed * 100 >= longer * 60
 }
 
 /// Align old/new lines into paired rows for the unified renderer.
