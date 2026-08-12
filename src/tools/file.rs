@@ -409,8 +409,8 @@ pub(super) async fn update_title(args: &str) -> Result<String> {
     if title.is_empty() {
         return Err(anyhow!("update_title: title is empty"));
     }
-    if title.chars().count() > 80 {
-        return Err(anyhow!("update_title: title too long (max 80 chars)"));
+    if title.chars().count() > 20 {
+        return Err(anyhow!("update_title: title too long (max 20 chars)"));
     }
     Ok(json!({
         "kind": "update_title",

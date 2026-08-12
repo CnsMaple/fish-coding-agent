@@ -75,7 +75,7 @@ pub fn default_title(cwd: &Path) -> String {
 }
 
 pub fn title_from_prompt(prompt: &str) -> String {
-    const MAX_CHARS: usize = 24;
+    const MAX_CHARS: usize = 20;
     let compact = prompt
         .lines()
         .map(str::trim)
@@ -101,7 +101,7 @@ pub fn title_from_prompt(prompt: &str) -> String {
 /// Tries a leading `# <title>` heading (some models emit one), then a
 /// `标题：`-style line, then falls back to the first non-empty line.
 pub fn title_from_reply(reply: &str) -> String {
-    const MAX_CHARS: usize = 24;
+    const MAX_CHARS: usize = 20;
     for line in reply.lines().map(str::trim) {
         if line.is_empty() {
             continue;
@@ -354,11 +354,8 @@ mod tests {
 
     #[test]
     fn title_from_reply_falls_back_to_first_line() {
-        let reply = "我分析了标题生成的链路，并给出了改进方案。";
-        assert_eq!(
-            title_from_reply(reply),
-            "我分析了标题生成的链路，并给出了改进方案。"
-        );
+        let reply = "我分析了标题生成的链路";
+        assert_eq!(title_from_reply(reply), "我分析了标题生成的链路");
     }
 
     #[test]
