@@ -687,6 +687,10 @@ impl Session {
                     tool.cached_line_count_visible = None;
                     tool.cached_line_count_collapsed = None;
                     m.invalidate_render_caches();
+                    // Final content replaces streaming preview; the
+                    // rendered block height changes, so the cached
+                    // total / line_offsets for this width are stale.
+                    self.invalidate_layout_cache();
                     return;
                 }
             }
@@ -795,6 +799,9 @@ impl Session {
                     tool.cached_line_count_visible = None;
                     tool.cached_line_count_collapsed = None;
                     m.invalidate_render_caches();
+                    // Grown output height → cached total / line_offsets
+                    // for this width are stale.
+                    self.invalidate_layout_cache();
                 }
             }
         }
@@ -851,6 +858,12 @@ impl Session {
                     ));
                 }
                 m.invalidate_render_caches();
+                // Streaming args themselves change the rendered block
+                // height (the tool preview grows as JSON arrives), so
+                // the cached total / line_offsets for this width are
+                // stale even though the message content version is
+                // untouched by a positional-only delta.
+                self.invalidate_layout_cache();
             }
         }
     }
