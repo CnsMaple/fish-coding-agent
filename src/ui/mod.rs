@@ -784,9 +784,11 @@ fn apply_selection_style(buf: &mut Buffer, sel: &Selection, area: &Rect, scroll:
             break;
         }
         if let Some(screen_y) = doc_line_to_screen_y(doc_line, area, scroll, total) {
-            // First and last rows use the column clamp; middle rows
-            // span the full width.
-            let (row_x_start, row_x_end) = if y_start == y_end {
+            // A box selection (right button) uses the same fixed column
+            // range on every row (as does a single-row drag). A line-wise
+            // multi-row selection (left button) widens the first and last
+            // rows toward the line edges.
+            let (row_x_start, row_x_end) = if sel.boxed || y_start == y_end {
                 (buf_x_start, buf_x_end)
             } else if doc_line == y_start {
                 (buf_x_start, width.saturating_sub(1))
@@ -869,7 +871,9 @@ pub fn extract_selection_text(sel: &Selection, session: &Session, width: usize) 
             // so counting chars undercuts the end column and truncates
             // the right edge of any row containing wide characters.
             let full_width = UnicodeWidthStr::width(full.as_str());
-            let (cs, ce) = if y_start == y_end {
+            // For a box selection the same fixed column range is used on
+            // every row; a line-wise selection widens the first/last rows.
+            let (cs, ce) = if sel.boxed || y_start == y_end {
                 (col_lo, col_hi)
             } else if i == local_start {
                 (col_lo, full_width)
@@ -925,10 +929,10 @@ fn apply_region_selection_style(
     let clip_x0 = clip.x;
     let clip_x1 = clip.x.saturating_add(clip.width.saturating_sub(1));
     for y in y0..=y1 {
-        // First row: from the anchor column to the end of the line. Last
-        // row: from the start of the line to the endpoint column. Middle
-        // rows span the full content width.
-        let (row_x0, row_x1) = if y0 == y1 {
+        // A box selection (right button) uses the same fixed column range
+        // on every row (as does a single-row drag). A line-wise selection
+        // (left button) widens the first and last rows toward the edges.
+        let (row_x0, row_x1) = if sel.boxed || y0 == y1 {
             (top_col.min(bot_col), top_col.max(bot_col))
         } else if y == y0 {
             (top_col, clip_x1)
@@ -989,8 +993,9 @@ fn extract_region_selection_text(
     let clip_x1 = clip.x.saturating_add(clip.width.saturating_sub(1));
     let mut lines: Vec<String> = Vec::new();
     for y in y0..=y1 {
-        // Same line-wise column logic as `apply_region_selection_style`.
-        let (row_x0, row_x1) = if y0 == y1 {
+        // Same column logic as `apply_region_selection_style`: a box
+        // selection uses a fixed column range on every row.
+        let (row_x0, row_x1) = if sel.boxed || y0 == y1 {
             (top_col.min(bot_col), top_col.max(bot_col))
         } else if y == y0 {
             (top_col, clip_x1)

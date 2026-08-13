@@ -89,6 +89,11 @@ fn make_app() -> App {
         tui_drag_start: None,
         region_selection: None,
         region_drag_start: None,
+        tui_selection_boxed: false,
+        region_selection_boxed: false,
+        input_box_selection: None,
+        input_drag_start: None,
+        input_selection_boxed: false,
         pending_tool_toggle: None,
         model_cache_path: cache_file,
         thinking_toggle_rows: Vec::new(),
@@ -1691,6 +1696,7 @@ fn extract_selection_text_does_not_truncate_cjk_rows() {
         col_start: None,
         col_end: None,
         active: false,
+        boxed: false,
     };
     let text = extract_selection_text(&sel, &s, width);
     assert!(
@@ -1743,6 +1749,7 @@ fn extract_selection_text_strips_tool_block_decoration() {
         col_start: None,
         col_end: None,
         active: false,
+        boxed: false,
     };
     let text = extract_selection_text(&sel, &s, width);
     // WYSIWYG: the copied text must match what is on screen, including
@@ -1789,6 +1796,7 @@ fn extract_selection_text_includes_cursor_cell_of_drag_end() {
         col_start: Some(0),
         col_end: Some(7),
         active: false,
+        boxed: false,
     };
     let text = extract_selection_text(&sel, &s, width);
     assert_eq!(text, "   hello", "expected '   hello', got {text:?}");
@@ -1999,6 +2007,7 @@ fn single_line_backward_drag_selects_between_columns() {
         col_start: Some(4),
         col_end: Some(11),
         active: false,
+        boxed: false,
     };
     let bwd = Selection {
         doc_start: 0,
@@ -2006,6 +2015,7 @@ fn single_line_backward_drag_selects_between_columns() {
         col_start: Some(11),
         col_end: Some(4),
         active: false,
+        boxed: false,
     };
     let text_fwd = extract_selection_text(&fwd, &s, 80);
     let text_bwd = extract_selection_text(&bwd, &s, 80);
@@ -2251,6 +2261,196 @@ fn input_click_on_multiline_selects_across_lines() {
     let sel = app.input.selection.expect("drag must create a selection");
     assert_eq!(sel.0, 1, "selection must start at byte 1");
     assert_eq!(sel.1, 7, "selection must end at byte 7");
+}
+
+#[test]
+fn right_button_drag_creates_input_box_selection() {
+    // A right-drag in the input area must build a box selection (fixed
+    // column anchor) instead of the byte-based selection the left button
+    // produces.
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    use ratatui::layout::Rect;
+
+    let mut app = make_app();
+    app.input.buffer = "ab\ncdefg".to_string();
+    app.input.cursor = 0;
+    app.input_prompt_area = Some(Rect::new(0, 2, 40, 5));
+    // Two visual rows (one per segment line).
+    app.input_visual_rows.push((2, 0, 2));
+    app.input_visual_rows.push((3, 3, 8));
+
+    let down = MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Right),
+        column: 1,
+        row: 2,
+        modifiers: crossterm::event::KeyModifiers::NONE,
+    };
+    let drag = MouseEvent {
+        kind: MouseEventKind::Drag(MouseButton::Right),
+        column: 4,
+        row: 3,
+        modifiers: crossterm::event::KeyModifiers::NONE,
+    };
+    let up = MouseEvent {
+        kind: MouseEventKind::Up(MouseButton::Right),
+        column: 4,
+        row: 3,
+        modifiers: crossterm::event::KeyModifiers::NONE,
+    };
+    handle_mouse(down, &mut app);
+    handle_mouse(drag, &mut app);
+    handle_mouse(up, &mut app);
+
+    let sel = app
+        .input_box_selection
+        .expect("a right-drag in the input area must create a box selection");
+    assert!(!sel.active, "Up must finalize the box selection");
+    assert_eq!(sel.start, (1, 2), "anchor must be the Down cell");
+    assert_eq!(sel.end, (4, 3), "end must be the drag cell");
+    // The byte-based selection and session/region selections stay clear.
+    assert!(app.input.selection.is_none());
+    assert!(app.tui_selection.is_none());
+}
+
+#[test]
+fn right_button_drag_creates_boxed_session_selection() {
+    // The right button must behave like the left button for the drag
+    // geometry, but produce a strict box (`boxed`) selection so every
+    // row uses the same column range.
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    use ratatui::layout::Rect;
+
+    let mut app = make_app();
+    for i in 0..10 {
+        app.session.push(crate::session::Message::new(
+            crate::session::Role::Assistant,
+            format!("line {i}"),
+        ));
+    }
+    app.session.count_all_lines_with_width(80);
+    app.session_area = Some(Rect::new(0, 0, 80, 24));
+    let down = MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Right),
+        column: 2,
+        row: 2,
+        modifiers: crossterm::event::KeyModifiers::NONE,
+    };
+    let drag = MouseEvent {
+        kind: MouseEventKind::Drag(MouseButton::Right),
+        column: 10,
+        row: 5,
+        modifiers: crossterm::event::KeyModifiers::NONE,
+    };
+    let up = MouseEvent {
+        kind: MouseEventKind::Up(MouseButton::Right),
+        column: 10,
+        row: 5,
+        modifiers: crossterm::event::KeyModifiers::NONE,
+    };
+    handle_mouse(down, &mut app);
+    handle_mouse(drag, &mut app);
+    handle_mouse(up, &mut app);
+
+    let sel = app
+        .tui_selection
+        .expect("a right-drag must create a session selection");
+    assert!(!sel.active, "Up must finalize the selection");
+    assert_eq!(sel.doc_start, 2);
+    assert_eq!(sel.doc_end, 5);
+    assert!(
+        sel.boxed,
+        "a right-drag must produce a box selection, not line-wise"
+    );
+}
+
+#[test]
+fn left_button_drag_is_not_boxed() {
+    // Regression guard: the left button keeps its original line-wise
+    // (non-box) behavior.
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    use ratatui::layout::Rect;
+
+    let mut app = make_app();
+    for i in 0..10 {
+        app.session.push(crate::session::Message::new(
+            crate::session::Role::Assistant,
+            format!("line {i}"),
+        ));
+    }
+    app.session.count_all_lines_with_width(80);
+    app.session_area = Some(Rect::new(0, 0, 80, 24));
+    let down = MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 2,
+        row: 2,
+        modifiers: crossterm::event::KeyModifiers::NONE,
+    };
+    let drag = MouseEvent {
+        kind: MouseEventKind::Drag(MouseButton::Left),
+        column: 10,
+        row: 5,
+        modifiers: crossterm::event::KeyModifiers::NONE,
+    };
+    let up = MouseEvent {
+        kind: MouseEventKind::Up(MouseButton::Left),
+        column: 10,
+        row: 5,
+        modifiers: crossterm::event::KeyModifiers::NONE,
+    };
+    handle_mouse(down, &mut app);
+    handle_mouse(drag, &mut app);
+    handle_mouse(up, &mut app);
+
+    let sel = app
+        .tui_selection
+        .expect("a left-drag must create a session selection");
+    assert!(!sel.boxed, "a left-drag must keep the line-wise selection");
+}
+
+#[test]
+fn right_button_drag_creates_region_selection_like_left() {
+    // A right-drag in the agents area must create the same rectangular
+    // region selection as the left button.
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    use ratatui::layout::Rect;
+
+    let mut app = make_app();
+    app.agents_area = Some(Rect::new(0, 0, 80, 5));
+    let down = MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Right),
+        column: 5,
+        row: 1,
+        modifiers: crossterm::event::KeyModifiers::NONE,
+    };
+    let drag = MouseEvent {
+        kind: MouseEventKind::Drag(MouseButton::Right),
+        column: 20,
+        row: 3,
+        modifiers: crossterm::event::KeyModifiers::NONE,
+    };
+    let up = MouseEvent {
+        kind: MouseEventKind::Up(MouseButton::Right),
+        column: 20,
+        row: 3,
+        modifiers: crossterm::event::KeyModifiers::NONE,
+    };
+    handle_mouse(down, &mut app);
+    handle_mouse(drag, &mut app);
+    handle_mouse(up, &mut app);
+
+    let sel = app
+        .region_selection
+        .expect("a right-drag must create a region selection");
+    assert!(!sel.active, "Up must finalize the region selection");
+    assert_eq!(sel.region, crate::function::SelectionRegion::Agents);
+    assert_eq!(sel.start, (5, 1));
+    assert_eq!(sel.end, (20, 3));
+    assert!(
+        sel.boxed,
+        "a right-drag must produce a boxed region selection"
+    );
+    // The session selection must not be created.
+    assert!(app.tui_selection.is_none());
 }
 
 fn esc_key() -> KeyEvent {

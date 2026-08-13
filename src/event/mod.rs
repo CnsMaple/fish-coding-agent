@@ -1443,6 +1443,22 @@ async fn handle_key(k: crossterm::event::KeyEvent, app: &mut App) {
             }
             app.tui_selection = None;
             app.region_selection = None;
+            app.input_box_selection = None;
+            app.input.clear_selection();
+            return;
+        }
+        if let Some(sel) = app.input_box_selection {
+            // Right-button box selection over the input area.
+            let text = input_box_selected_text(app, &sel).unwrap_or_default();
+            if !text.is_empty() {
+                if let Ok(mut cb) = arboard::Clipboard::new() {
+                    let _ = cb.set_text(text);
+                    use crate::function::notifications::ToastLevel;
+                    app.notify(ToastLevel::Ok, "copied to clipboard");
+                }
+            }
+            app.input_box_selection = None;
+            app.input_drag_start = None;
             app.input.clear_selection();
             return;
         }
@@ -1922,6 +1938,80 @@ fn input_click_to_byte(
     Some(byte_start + row_byte)
 }
 
+/// Extract the text covered by a right-button box selection over the input
+/// area. For every visual row in the selection's row range, the same fixed
+/// column slice is taken, mirroring the strict rectangle used by the box
+/// selection in the other areas. Rows are joined with newlines and trailing
+/// whitespace on each row is trimmed.
+fn input_box_selected_text(app: &App, sel: &crate::function::InputBoxSelection) -> Option<String> {
+    let inner_x = app.input_prompt_area.map(|r| r.x).unwrap_or(0);
+    // The input prompt prefix occupies one column on every visual line.
+    const PREFIX_WIDTH: u16 = 1;
+    let col_lo = sel.start.0.min(sel.end.0);
+    let col_hi = sel.start.0.max(sel.end.0);
+    let row_lo = sel.start.1.min(sel.end.1);
+    let row_hi = sel.start.1.max(sel.end.1);
+
+    let mut lines: Vec<String> = Vec::new();
+    for &(_row, byte_start, byte_end) in app
+        .input_visual_rows
+        .iter()
+        .filter(|&&(r, _, _)| r >= row_lo && r <= row_hi)
+    {
+        let text = &app.input.buffer[byte_start..byte_end];
+        // Absolute screen column -> column within the row's text.
+        let lo = col_lo.saturating_sub(inner_x).saturating_sub(PREFIX_WIDTH);
+        let hi = col_hi.saturating_sub(inner_x).saturating_sub(PREFIX_WIDTH);
+        let (lo, hi) = (lo.min(hi), lo.max(hi));
+        // hi is exclusive end; bump by 1 to include the last cell.
+        let start_col = lo as usize;
+        let end_col = hi as usize + 1;
+        let visual_w: usize = text.chars().map(char_width_of).map(|w| w as usize).sum();
+        let end_col = end_col.min(visual_w);
+        if start_col >= end_col {
+            lines.push(String::new());
+            continue;
+        }
+        let sliced = slice_by_display_col(text, start_col, end_col);
+        lines.push(sliced.trim_end().to_string());
+    }
+    while lines.len() > 1 && lines.last().unwrap().is_empty() {
+        lines.pop();
+    }
+    Some(lines.join("\n"))
+}
+
+/// Display width of a character, matching the input renderer (tab = 4).
+fn char_width_of(c: char) -> u32 {
+    if c == '\t' {
+        4
+    } else {
+        unicode_width::UnicodeWidthChar::width(c).unwrap_or(0) as u32
+    }
+}
+
+/// Slice a string by display-column range [start_col, end_col), respecting
+/// wide (CJK) characters that occupy 2 cells.
+fn slice_by_display_col(s: &str, start_col: usize, end_col: usize) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut col = 0usize;
+    let mut started = false;
+    for ch in s.chars() {
+        let w = char_width_of(ch) as usize;
+        if !started && col + w > start_col {
+            started = true;
+        }
+        if started {
+            if col >= end_col {
+                break;
+            }
+            out.push(ch);
+        }
+        col += w;
+    }
+    out
+}
+
 /// Track the start of an in-progress drag selection.
 #[derive(Default)]
 struct DragState {
@@ -2105,7 +2195,29 @@ fn session_max_scroll(app: &mut App) -> u32 {
     }
 }
 
+/// Normalize a mouse event so a right-button press/drag/release is treated
+/// exactly like the left button. This lets every region's existing
+/// left-button selection logic (session line selection, agents/panel box
+/// selection, input text selection) work identically when the user drags
+/// with the right button.
+fn normalize_mouse(m: MouseEvent) -> MouseEvent {
+    use crossterm::event::{MouseButton, MouseEventKind};
+    let kind = match m.kind {
+        MouseEventKind::Down(MouseButton::Right) => MouseEventKind::Down(MouseButton::Left),
+        MouseEventKind::Drag(MouseButton::Right) => MouseEventKind::Drag(MouseButton::Left),
+        MouseEventKind::Up(MouseButton::Right) => MouseEventKind::Up(MouseButton::Left),
+        other => other,
+    };
+    MouseEvent { kind, ..m }
+}
+
 fn handle_mouse(m: MouseEvent, app: &mut App) {
+    // Record whether this drag started with the right button, which means
+    // the selection should be a strict box (fixed column range on every
+    // row) rather than the left button's line-wise selection.
+    use crossterm::event::MouseButton as MB;
+    let right_button_down = matches!(m.kind, crossterm::event::MouseEventKind::Down(MB::Right));
+    let m = normalize_mouse(m);
     let prompt = app.input_prompt_area;
     // The input area's prompt prefix is a single space (see input::render),
     // so text starts 1 column in from the inner area's left edge.
@@ -2419,8 +2531,12 @@ fn handle_mouse(m: MouseEvent, app: &mut App) {
             app.tui_selection = None;
             app.selected_text = None;
             app.region_selection = None;
+            app.input_box_selection = None;
             app.tui_drag_start = None;
             app.region_drag_start = None;
+            app.tui_selection_boxed = right_button_down;
+            app.region_selection_boxed = right_button_down;
+            app.input_selection_boxed = right_button_down;
             app.input.clear_selection();
             if region.is_some() {
                 app.region_drag_start = Some((m.column, m.row));
@@ -2431,7 +2547,18 @@ fn handle_mouse(m: MouseEvent, app: &mut App) {
                 d.active = false;
             }
             if in_prompt_row {
-                if let Some(byte) = input_click_to_byte(
+                // Record the screen cell where the input-area drag started.
+                app.input_drag_start = Some((m.column, m.row));
+                if app.input_selection_boxed {
+                    // Right button: box selection materializes on the first
+                    // real Drag, like the other areas (a plain click must
+                    // not highlight a single cell).
+                    app.input_box_selection = None;
+                    app.input.clear_selection();
+                    if let Ok(mut d) = DRAG.lock() {
+                        d.active = false;
+                    }
+                } else if let Some(byte) = input_click_to_byte(
                     app,
                     m.row,
                     m.column,
@@ -2481,8 +2608,9 @@ fn handle_mouse(m: MouseEvent, app: &mut App) {
                     })
                 };
                 if app.region_selection.is_none() {
-                    app.region_selection =
-                        Some(crate::function::RegionSelection::new(region, start));
+                    let mut rs = crate::function::RegionSelection::new(region, start);
+                    rs.boxed = app.region_selection_boxed;
+                    app.region_selection = Some(rs);
                 }
                 if let Some(sel) = app.region_selection.as_mut() {
                     sel.region = region;
@@ -2507,6 +2635,7 @@ fn handle_mouse(m: MouseEvent, app: &mut App) {
                                 col_start: Some(col_start),
                                 col_end: Some(col_start),
                                 active: true,
+                                boxed: app.tui_selection_boxed,
                             });
                         }
                     }
@@ -2522,32 +2651,52 @@ fn handle_mouse(m: MouseEvent, app: &mut App) {
                 }
             }
             if in_prompt_row {
-                let drag = DRAG.lock().ok().and_then(|d| {
-                    if d.active {
-                        Some((d.prefix_width, d.start_byte))
-                    } else {
-                        None
+                if app.input_selection_boxed {
+                    // Right-button box drag. Materialize the selection from
+                    // the fixed anchor on the first Drag, then extend the
+                    // bottom-right cell to the current position.
+                    if let Some(start) = app.input_drag_start {
+                        if app.input_box_selection.is_none() {
+                            app.input_box_selection = Some(crate::function::InputBoxSelection {
+                                start,
+                                end: (m.column, m.row),
+                                active: true,
+                            });
+                        } else if let Some(sel) = app.input_box_selection.as_mut() {
+                            sel.end = (m.column, m.row);
+                        }
                     }
-                });
-                if let Some((_pw, start_byte)) = drag {
-                    let end_byte = input_click_to_byte(
-                        app,
-                        m.row,
-                        m.column,
-                        prefix_width,
-                        prompt.map(|r| r.x).unwrap_or(0),
-                    )
-                    .unwrap_or(start_byte);
-                    app.input.cursor = end_byte;
-                    if start_byte == end_byte {
-                        app.input.clear_selection();
-                    } else {
-                        let (s, e) = if start_byte <= end_byte {
-                            (start_byte, end_byte)
+                    if let Ok(mut d) = DRAG.lock() {
+                        d.active = false;
+                    }
+                } else {
+                    let drag = DRAG.lock().ok().and_then(|d| {
+                        if d.active {
+                            Some((d.prefix_width, d.start_byte))
                         } else {
-                            (end_byte, start_byte)
-                        };
-                        app.input.set_selection(s, e);
+                            None
+                        }
+                    });
+                    if let Some((_pw, start_byte)) = drag {
+                        let end_byte = input_click_to_byte(
+                            app,
+                            m.row,
+                            m.column,
+                            prefix_width,
+                            prompt.map(|r| r.x).unwrap_or(0),
+                        )
+                        .unwrap_or(start_byte);
+                        app.input.cursor = end_byte;
+                        if start_byte == end_byte {
+                            app.input.clear_selection();
+                        } else {
+                            let (s, e) = if start_byte <= end_byte {
+                                (start_byte, end_byte)
+                            } else {
+                                (end_byte, start_byte)
+                            };
+                            app.input.set_selection(s, e);
+                        }
                     }
                 }
             }
@@ -2557,11 +2706,15 @@ fn handle_mouse(m: MouseEvent, app: &mut App) {
             // was ever created, so nothing to finalize.
             app.tui_drag_start = None;
             app.region_drag_start = None;
+            app.input_drag_start = None;
             app.pending_tool_toggle = None;
             if let Some(sel) = app.tui_selection.as_mut() {
                 sel.active = false;
             }
             if let Some(sel) = app.region_selection.as_mut() {
+                sel.active = false;
+            }
+            if let Some(sel) = app.input_box_selection.as_mut() {
                 sel.active = false;
             }
             if let Ok(mut d) = DRAG.lock() {

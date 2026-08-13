@@ -169,6 +169,27 @@ pub struct App {
     /// landed inside the agents area or the function panel. Consumed
     /// on the first Drag to create `region_selection`, cleared on Up.
     pub region_drag_start: Option<(u16, u16)>,
+    /// Captured on Mouse Down: whether the starting button was the right
+    /// button, meaning the resulting session selection should be a strict
+    /// box (`boxed`) instead of the usual line-wise selection.
+    pub tui_selection_boxed: bool,
+    /// Captured on Mouse Down: whether the starting button was the right
+    /// button, meaning the resulting region selection should be a strict
+    /// box (`boxed`) instead of the usual line-wise selection.
+    pub region_selection_boxed: bool,
+    /// Rectangle (box) selection over the input area, produced by a
+    /// right-button drag. `Some` while dragging or after a finished
+    /// selection; `None` when no box selection is active. Independent of
+    /// the byte-based `input.selection` (which the left button uses).
+    pub input_box_selection: Option<InputBoxSelection>,
+    /// Screen cell where an input-area drag started (set on Down inside
+    /// the prompt row). Used as the fixed anchor for a right-button box
+    /// selection; cleared on Up.
+    pub input_drag_start: Option<(u16, u16)>,
+    /// Captured on Mouse Down: whether the input-area drag started with
+    /// the right button, meaning it should build a box selection instead
+    /// of the byte-based selection.
+    pub input_selection_boxed: bool,
     /// `(msg_idx, tool_idx)` captured on Mouse Down when the click
     /// lands inside a tool block. The toggle is deferred to Mouse Up
     /// so a drag (text selection) inside the block cancels the toggle.
@@ -322,6 +343,10 @@ pub struct Selection {
     /// Screen column where the selection ends on the `doc_end` line.
     pub col_end: Option<u16>,
     pub active: bool,
+    /// `true` when this is a strict rectangle (box) selection made with
+    /// the right button: every row uses the same global column range.
+    /// `false` (left button) keeps the current line-wise behavior.
+    pub boxed: bool,
 }
 
 impl Selection {
@@ -332,6 +357,7 @@ impl Selection {
             col_start: None,
             col_end: None,
             active: true,
+            boxed: false,
         }
     }
 
@@ -364,6 +390,10 @@ pub struct RegionSelection {
     /// Inclusive end cell (right/bottom) of the selection rectangle.
     pub end: (u16, u16),
     pub active: bool,
+    /// `true` when this is a strict rectangle (box) selection made with
+    /// the right button: every row uses the same global column range.
+    /// `false` (left button) keeps the current line-wise behavior.
+    pub boxed: bool,
 }
 
 impl RegionSelection {
@@ -373,6 +403,7 @@ impl RegionSelection {
             start: cell,
             end: cell,
             active: true,
+            boxed: false,
         }
     }
 
@@ -381,6 +412,20 @@ impl RegionSelection {
         self.end = (0, 0);
         self.active = false;
     }
+}
+
+/// A strict rectangle (box) text selection inside the input area, made
+/// with the right button. Unlike the byte-based `InputState::selection`
+/// (left button), every visual row highlights the same fixed column range.
+/// Coordinates are absolute screen cells (column, row), matching the
+/// `input_visual_rows` map used for the input area.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InputBoxSelection {
+    /// Inclusive top-left cell.
+    pub start: (u16, u16),
+    /// Inclusive bottom-right cell.
+    pub end: (u16, u16),
+    pub active: bool,
 }
 
 #[derive(Debug)]
@@ -477,6 +522,11 @@ impl App {
             tui_drag_start: None,
             region_selection: None,
             region_drag_start: None,
+            tui_selection_boxed: false,
+            region_selection_boxed: false,
+            input_box_selection: None,
+            input_drag_start: None,
+            input_selection_boxed: false,
             pending_tool_toggle: None,
             last_mouse_event: None,
             input_cursor_screen: None,

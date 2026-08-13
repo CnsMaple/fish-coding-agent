@@ -5,6 +5,7 @@ use crate::function::SidebarTab;
 use crate::theme::Theme;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
+use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 use ratatui::widgets::{Block, Borders, Paragraph};
@@ -828,6 +829,42 @@ pub fn render(area: Rect, buf: &mut Buffer, app: &mut crate::app::App) {
     let p = Paragraph::new(visual_lines);
     p.render(inner, buf);
     app.input_prompt_area = Some(inner);
+    // Right-button box selection: reverse every text cell in the fixed
+    // column range across the selection's row range, mirroring the strict
+    // rectangle used in the other areas.
+    if let Some(sel) = app.input_box_selection {
+        let row_lo = sel.start.1.min(sel.end.1);
+        let row_hi = sel.start.1.max(sel.end.1);
+        let col_lo = sel.start.0.min(sel.end.0);
+        let col_hi = sel.start.0.max(sel.end.0);
+        for (row, byte_start, _byte_end) in app.input_visual_rows.iter().copied() {
+            if row < row_lo || row > row_hi {
+                continue;
+            }
+            let line_text = &app.input.buffer[byte_start..];
+            let seg_until_newline = &line_text[..line_text.find('\n').unwrap_or(line_text.len())];
+            let row_visual_w: usize = seg_until_newline.chars().map(char_width).sum();
+            // Absolute screen columns for this row's text (prompt prefix =
+            // 1 col on every line, starting at inner.x).
+            let text_col_lo = col_lo
+                .saturating_sub(inner.x)
+                .saturating_sub(prompt_width as u16);
+            let text_col_hi = col_hi
+                .saturating_sub(inner.x)
+                .saturating_sub(prompt_width as u16);
+            let (cl, ch) = (text_col_lo.min(text_col_hi), text_col_lo.max(text_col_hi));
+            let cl = (cl as usize).min(row_visual_w);
+            let ch = (ch as usize).min(row_visual_w).max(cl);
+            let x_start = inner.x + (prompt_width as u16) + cl as u16;
+            let x_end = inner.x + (prompt_width as u16) + ch as u16;
+            for x in x_start..=x_end {
+                if let Some(cell) = buf.cell_mut((x, row)) {
+                    let new_style = cell.style().add_modifier(Modifier::REVERSED);
+                    cell.set_style(new_style);
+                }
+            }
+        }
+    }
     // Record the visual-row → byte-range map so mouse clicks anywhere in
     // the input area (including wrapped continuation rows) can be mapped
     // back to a buffer byte offset. Each rendered visual line occupies one
