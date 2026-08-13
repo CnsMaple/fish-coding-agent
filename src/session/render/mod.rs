@@ -37,11 +37,19 @@ use ratatui::widgets::Widget;
 use std::sync::Arc;
 use unicode_width::UnicodeWidthStr;
 
-/// LRU cache entry for a fully rendered message. Validity is checked
-/// against `Message.content_version` so changing one message does not
-/// invalidate cached render output for any other message.
-#[derive(Debug)]
-pub struct CachedMessageLines {
+/// Single source of truth for a message's vertical geometry. Computed
+/// exactly once per render pass by `build_message_lines` and cached in
+/// the LRU. Both the total-line count (`compute_total_lines`) and the
+/// thinking/tool toggle click regions (`collect_toggle_blocks`) read
+/// from this layout, so the three can never drift apart the way the
+/// three hand-maintained offset walks used to.
+///
+/// Validity is checked against `Message.content_version` /
+/// `thinking_version` / `width` / `display_cursor` / `content_len` so
+/// changing one message does not invalidate cached render output for
+/// any other.
+#[derive(Debug, Clone)]
+pub struct MessageLayout {
     pub content_version: u64,
     pub thinking_version: u64,
     pub width: u16,
@@ -51,16 +59,26 @@ pub struct CachedMessageLines {
     /// that survived a missed invalidation: a length mismatch proves
     /// the slot now belongs to a different message.
     pub content_len: usize,
+    /// Total rendered lines for this message (== `lines.len()`),
+    /// **excluding** the session-level inter-message gap. This is the
+    /// exact doc-line span of the message, so `compute_total_lines`
+    /// and `build_lines_viewport` can slice `lines` without ever
+    /// truncating the bottom.
+    pub total_lines: u32,
+    /// Doc-line spans of each rendered thinking block:
+    /// `(top, bottom_exclusive, segment_idx)`. `top`/`bottom` are
+    /// 0-based line offsets within this message (matching `lines`).
+    /// Only blocks actually rendered (respecting display mode) are
+    /// recorded.
+    pub thinking_spans: Vec<(u32, u32, usize)>,
+    /// Doc-line spans of each rendered tool block:
+    /// `(top, bottom_exclusive, tool_idx)`. Includes `plan` blocks;
+    /// the click walk filters them out since they are not toggleable.
+    pub tool_spans: Vec<(u32, u32, usize)>,
     /// Fully rendered lines, shared via Arc to avoid cloning on
     /// cache hit. The viewport renderer slices the Arc instead of
     /// copying the underlying Vec.
     pub lines: Arc<Vec<Line<'static>>>,
-    /// Number of content-only display lines (excluding thinking/tool
-    /// block rows, spacers, user-bg padding, leading gap). Written by
-    /// `build_message_lines` so `render_cached_content_lines` can
-    /// skip the full markdown re-parse that `content_line_count_segmented`
-    /// would otherwise do.
-    pub content_line_count: u32,
 }
 
 pub fn render(area: Rect, buf: &mut Buffer, session: &Session) {
@@ -201,6 +219,32 @@ pub(crate) fn read_cached_content_count_at(m: &super::Message, width: u16) -> u3
     }
 }
 
+/// Read the cached authoritative `MessageLayout` for a message, if it
+/// is still valid for the given `width` and message state. Returns
+/// `None` when the message has not been rendered this frame (no layout
+/// cached) or the cache is stale. Used by the toggle-row walk so it
+/// consumes the exact geometry produced by `build_message_lines`
+/// instead of re-deriving it with a parallel walk.
+pub fn cached_layout_for(session: &Session, msg_idx: usize, width: u16) -> Option<MessageLayout> {
+    if msg_idx >= session.messages.len() {
+        return None;
+    }
+    let m = &session.messages[msg_idx];
+    let lru = session.message_lines_cache.lock().unwrap();
+    let l = lru.get(&msg_idx)?;
+    if l.width == width
+        && l.content_version == m.content_version
+        && l.thinking_version == m.thinking_version
+        && l.display_cursor == m.display_cursor
+        && l.content_len == m.content.len()
+        && !m.tool_results.iter().any(|t| t.running)
+    {
+        Some(l.clone())
+    } else {
+        None
+    }
+}
+
 /// Toggle label text used by older tests / callers.
 pub const THINKING_TOGGLE_COLLAPSED: &str = "[thinking ▸]";
 pub const THINKING_TOGGLE_EXPANDED: &str = "[thinking ▾]";
@@ -249,26 +293,27 @@ pub fn build_message_lines(
     if m.content.trim_start().starts_with("---ask---") {
         let rendered =
             render_ask_snapshot_message(&m.content, width, m.streaming, m.display_cursor);
-        let content_line_count = ask_snapshot_line_count(&m.content, width);
         let lines = Arc::new(rendered);
+        let total_lines = lines.len() as u32;
         let mut lru = session.message_lines_cache.lock().unwrap();
         lru.put(
             msg_idx,
-            CachedMessageLines {
+            MessageLayout {
                 content_version: m.content_version,
                 thinking_version: m.thinking_version,
                 width: width as u16,
                 display_cursor: m.display_cursor,
                 content_len: m.content.len(),
+                total_lines,
+                thinking_spans: Vec::new(),
+                tool_spans: Vec::new(),
                 lines: Arc::clone(&lines),
-                content_line_count,
             },
         );
         return lines;
     }
 
     let mut msg_lines: Vec<Line<'static>> = Vec::new();
-    let mut content_line_count: u32 = 0;
     if let Some(skill_ref) = &m.skill_ref {
         let rows = build_skill_block_rows(skill_ref, width);
         push_block_rows(&mut msg_lines, rows);
@@ -293,6 +338,11 @@ pub fn build_message_lines(
     enum RenderItemKind {
         Thinking {
             content: String,
+            /// Index into `m.thinking_segments` (or the synthesized
+            /// segment for legacy `m.thinking`). Carried so the layout
+            /// can report which segment each rendered box belongs to,
+            /// which the click walk needs to toggle the right block.
+            seg_idx: usize,
             /// `true` once a non-thinking content block has begun
             /// after this segment. Closed segments render with the
             /// "done" background color; open segments use the
@@ -327,7 +377,7 @@ pub fn build_message_lines(
         let segments = get_thinking_segments(m);
         let has_thinking_content = segments.iter().any(|s| !s.content.trim().is_empty());
         if has_thinking_content && !matches!(session.display, ThinkingDisplay::Hide) {
-            for seg in &segments {
+            for (seg_idx, seg) in segments.iter().enumerate() {
                 let offset = clamp_char_boundary(raw, seg.offset.min(raw.len()));
                 let offset = advance_to_word_boundary(raw, offset);
                 let duration = match (seg.started_at, seg.ended_at) {
@@ -359,6 +409,7 @@ pub fn build_message_lines(
                     offset,
                     kind: RenderItemKind::Thinking {
                         content: seg.content.clone(),
+                        seg_idx,
                         closed: seg.closed,
                         tool_results_len_at_open: seg.tool_results_len_at_open,
                         duration,
@@ -449,6 +500,8 @@ pub fn build_message_lines(
     });
 
     let mut cursor = 0usize;
+    let mut thinking_spans: Vec<(u32, u32, usize)> = Vec::new();
+    let mut tool_spans: Vec<(u32, u32, usize)> = Vec::new();
     for item in items {
         let offset = item.offset;
         if offset < cursor {
@@ -457,19 +510,18 @@ pub fn build_message_lines(
 
         // Render content before this item
         if offset > cursor {
-            let before = msg_lines.len();
             render_content_segment(
                 &strip_legacy_markers(&raw[cursor..offset]),
                 width,
                 &mut msg_lines,
             );
-            content_line_count += (msg_lines.len() - before) as u32;
             cursor = offset;
         }
 
         match item.kind {
             RenderItemKind::Thinking {
                 content,
+                seg_idx,
                 closed,
                 duration,
                 visible,
@@ -487,6 +539,7 @@ pub fn build_message_lines(
                     colors.thinking_streaming_bg
                 };
                 ensure_gap_before_block(&mut msg_lines);
+                let top = msg_lines.len() as u32;
                 let rows = build_thinking_block_rows(
                     &content,
                     visible,
@@ -495,8 +548,12 @@ pub fn build_message_lines(
                     bg,
                     duration,
                 );
+                let bottom = (top as usize + rows.len()) as u32;
                 push_block_rows(&mut msg_lines, rows);
                 msg_lines.push(Line::from(""));
+                if bottom > top {
+                    thinking_spans.push((top, bottom, seg_idx));
+                }
             }
             RenderItemKind::Tool(ti) => {
                 if let Some(tool) = m.tool_results.get(ti) {
@@ -513,19 +570,22 @@ pub fn build_message_lines(
                             _ => false,
                         };
                         ensure_gap_before_block(&mut msg_lines);
+                        let top = msg_lines.len() as u32;
                         let rows =
                             build_tool_block_rows(tool, t_vis, session.tool_preview_lines, width);
+                        let bottom = (top as usize + rows.len()) as u32;
                         push_block_rows(&mut msg_lines, rows);
                         msg_lines.push(Line::from(""));
+                        if bottom > top {
+                            tool_spans.push((top, bottom, ti));
+                        }
                     }
                 }
             }
         }
     }
     // Render remaining content
-    let before = msg_lines.len();
     render_content_segment(&strip_legacy_markers(&raw[cursor..]), width, &mut msg_lines);
-    content_line_count += (msg_lines.len() - before) as u32;
 
     if m.role == Role::User {
         let user_bg = active_colors().user_bg;
@@ -562,17 +622,20 @@ pub fn build_message_lines(
 
     {
         let mut lru = session.message_lines_cache.lock().unwrap();
+        let total = msg_lines.len() as u32;
         let lines = Arc::new(msg_lines);
         lru.put(
             msg_idx,
-            CachedMessageLines {
+            MessageLayout {
                 content_version: m.content_version,
                 thinking_version: m.thinking_version,
                 width: width as u16,
                 display_cursor: m.display_cursor,
                 content_len: m.content.len(),
+                total_lines: total,
+                thinking_spans,
+                tool_spans,
                 lines: Arc::clone(&lines),
-                content_line_count,
             },
         );
         lines
@@ -703,10 +766,18 @@ pub(super) fn build_lines_viewport(
         if msg_end - 1 > start_line && msg_start < msg_end_line {
             let rendered = build_message_lines(session, msg_idx, width);
             let local_start = start_line.saturating_sub(msg_start) as usize;
+            // Slice bound: the real rendered line count. This is the
+            // single source of truth for the message's bottom edge.
+            // `msg_end - 1 - msg_start` is an *estimate* that can
+            // undercount when the fallback estimation in
+            // `compute_total_lines` disagrees with the true render
+            // (e.g. a block whose real height differs from the cached
+            // count). Clamping to `rendered.len()` guarantees the last
+            // rendered line is never dropped — the previous code clamped
+            // to the estimate and truncated the bottom of the message.
             let local_end = msg_end_line
                 .saturating_sub(msg_start)
-                .min(msg_end - 1 - msg_start) as usize;
-            let local_end = local_end.min(rendered.len());
+                .min(rendered.len() as u32) as usize;
             if local_start < local_end {
                 out.extend(rendered[local_start..local_end].iter().cloned());
             }

@@ -278,8 +278,53 @@ fn collect_toggle_blocks(
             }
         }
 
-        // ── Skill block (rendered before everything else, like
-        // build_message_lines) ──────────────────────────────────
+        // Authoritative fast path: the message was rendered this frame
+        // (viewport-visible), so its cached `MessageLayout` holds the
+        // exact doc-line spans produced by `build_message_lines`. Use
+        // them directly — this is the single source of truth, so the
+        // click regions can never drift from the rendered boxes.
+        if let Some(layout) = crate::session::render::cached_layout_for(session, msg_idx, width) {
+            // Translate the layout's message-relative spans into
+            // session-doc coordinates.
+            for &(top, bottom, seg_idx) in &layout.thinking_spans {
+                if bottom > top {
+                    thinking.push(ToggleBlock {
+                        top: line_idx as u32 + top,
+                        bottom: line_idx as u32 + bottom,
+                        msg_idx,
+                        idx: seg_idx,
+                    });
+                }
+            }
+            for &(top, bottom, tool_idx) in &layout.tool_spans {
+                // plan blocks are not toggleable — skip them but keep
+                // their rows in the running line count.
+                if bottom > top {
+                    let name = m
+                        .tool_results
+                        .get(tool_idx)
+                        .map(|t| t.name.as_str())
+                        .unwrap_or("");
+                    if name != "plan" {
+                        tool.push(ToggleBlock {
+                            top: line_idx as u32 + top,
+                            bottom: line_idx as u32 + bottom,
+                            msg_idx,
+                            idx: tool_idx,
+                        });
+                    }
+                }
+            }
+            line_idx += layout.total_lines as usize;
+            line_idx += 1; // inter-message gap
+            continue;
+        }
+
+        // ── Fallback: message not rendered this frame (off-viewport).
+        // Reproduce the layout's total from the same per-block counts
+        // `compute_total_lines` uses, so the running `line_idx` stays
+        // consistent even for messages whose layout is not cached.
+        // ── Skill block ─────────────────────────────────────────
         if m.role == crate::session::Role::User {
             if let Some(skill_ref) = &m.skill_ref {
                 line_idx +=
@@ -294,177 +339,101 @@ fn collect_toggle_blocks(
                 crate::session::render::attachment_block_line_count(&m.attachments) as usize;
         }
 
-        // ── Interleave content + thinking/tool blocks by offset ─
-        // Mirrors build_message_lines: items sorted by offset (with
-        // the same tiebreaker), content rendered between items,
-        // ensure_gap_before_block before each block, trailing blank
-        // after each block.
+        // ── Content lines ────────────────────────────────────────
         let raw = if m.streaming {
             m.visible_content()
         } else {
             &m.content
         };
+        let content_lines = if raw.trim_start().starts_with("---ask---") {
+            crate::session::render::ask_snapshot_line_count(raw, width_u16 as usize)
+        } else {
+            let segments = crate::session::render::get_thinking_segments(m);
+            crate::session::render::content_line_count_segmented(
+                raw,
+                width_u16 as usize,
+                &segments,
+                &m.tool_results,
+            )
+        };
+        line_idx += content_lines as usize;
 
+        // ── Leading/interleaved gaps before blocks ──────────────
+        // `compute_total_lines` adds one blank line per content segment
+        // that ends on a non-blank line before a block (via
+        // `count_block_gaps`). Mirror it so the running total matches.
+        let segments = crate::session::render::get_thinking_segments(m);
+        let gap_count = crate::session::render::count_block_gaps(
+            raw,
+            width_u16 as usize,
+            &segments,
+            &m.tool_results,
+        );
+        line_idx += gap_count as usize;
+
+        // ── Thinking blocks ──────────────────────────────────────
         let think_show = m.role == crate::session::Role::Assistant
             && crate::session::render::message_has_thinking(m)
             && config.thinking_display != crate::config::ThinkingDisplay::Hide;
-        let tool_show = config.tool_display != crate::config::ToolResultDisplay::Hide;
-
-        // Build sorted items matching build_message_lines.
-        enum WalkItem {
-            Thinking(usize),
-            Tool(usize),
-        }
-        let mut items: Vec<(usize, WalkItem)> = Vec::new();
         if think_show {
             let segments = crate::session::render::get_thinking_segments(m);
             for (si, seg) in segments.iter().enumerate() {
-                let offset =
-                    crate::session::render::clamp_char_boundary(raw, seg.offset.min(raw.len()));
-                let offset = crate::session::render::advance_to_word_boundary(raw, offset);
-                items.push((offset, WalkItem::Thinking(si)));
+                let expanded = (config.thinking_display == crate::config::ThinkingDisplay::Show
+                    && seg.visible)
+                    || (config.thinking_display
+                        == crate::config::ThinkingDisplay::ShowWhileStreaming
+                        && (m.streaming || seg.visible));
+                let lines = if expanded {
+                    seg.cached_line_count_expanded.unwrap_or(0) as usize
+                } else {
+                    seg.cached_line_count_collapsed.unwrap_or(0) as usize
+                };
+                if lines > 0 {
+                    // Approximate click region (top of block). Off-viewport
+                    // messages are fast-forwarded and never clicked, so the
+                    // exact span matters only for the running count.
+                    thinking.push(ToggleBlock {
+                        top: line_idx as u32,
+                        bottom: line_idx as u32 + lines as u32,
+                        msg_idx,
+                        idx: si,
+                    });
+                }
+                line_idx += lines;
+                line_idx += 1; // trailing blank
             }
         }
-        if tool_show {
+
+        // ── Tool blocks ──────────────────────────────────────────
+        if config.tool_display != crate::config::ToolResultDisplay::Hide {
             for (ti, t) in m.tool_results.iter().enumerate() {
-                if t.content.is_empty() && t.streaming_input.is_empty() {
+                if t.content.is_empty() && t.streaming_input.is_empty() && t.title.is_empty() {
                     continue;
                 }
-                let offset = crate::session::render::clamp_char_boundary(
-                    raw,
-                    t.content_offset.min(raw.len()),
-                );
-                let offset = offset.min(raw.len());
-                let offset = crate::session::render::advance_to_word_boundary(raw, offset);
-                items.push((offset, WalkItem::Tool(ti)));
-            }
-        }
-        // Sort by offset with the same tiebreaker as build_message_lines.
-        items.sort_by(|(off_a, a), (off_b, b)| {
-            off_a.cmp(off_b).then_with(|| match (a, b) {
-                (WalkItem::Tool(ti), WalkItem::Thinking(si)) => {
-                    let seg = &m.thinking_segments[*si];
-                    if *ti >= seg.tool_results_len_at_open {
-                        std::cmp::Ordering::Greater
-                    } else {
-                        std::cmp::Ordering::Less
-                    }
-                }
-                (WalkItem::Thinking(si), WalkItem::Tool(ti)) => {
-                    let seg = &m.thinking_segments[*si];
-                    if *ti >= seg.tool_results_len_at_open {
-                        std::cmp::Ordering::Less
-                    } else {
-                        std::cmp::Ordering::Greater
-                    }
-                }
-                _ => std::cmp::Ordering::Equal,
-            })
-        });
-
-        let mut cursor = 0usize;
-        let mut prev_line_was_blank = false;
-        let mut has_any_line = false;
-
-        for (offset, item) in &items {
-            let offset = *offset;
-            if offset < cursor {
-                continue;
-            }
-
-            // Render content before this item, exactly like
-            // build_message_lines, so the line count and the
-            // blank-ness of the last line match the real render.
-            if offset > cursor {
-                let seg_text = crate::session::render::strip_legacy_markers(&raw[cursor..offset]);
-                let mut seg_buf: Vec<ratatui::text::Line<'static>> = Vec::new();
-                crate::session::render::render_content_segment(
-                    &seg_text,
-                    width_u16 as usize,
-                    &mut seg_buf,
-                );
-                let seg_lines = seg_buf.len();
-                line_idx += seg_lines;
-                cursor = offset;
-                if seg_lines > 0 {
-                    has_any_line = true;
-                    prev_line_was_blank = seg_buf.last().map(|l| l.width() == 0).unwrap_or(false);
-                }
-            }
-
-            // ensure_gap_before_block: add a blank line if there are
-            // existing lines and the last line is non-blank.
-            if has_any_line && !prev_line_was_blank {
-                line_idx += 1;
-            }
-
-            match item {
-                WalkItem::Thinking(si) => {
-                    let seg = &m.thinking_segments[*si];
-                    let expanded = (config.thinking_display
-                        == crate::config::ThinkingDisplay::Show
-                        && seg.visible)
-                        || (config.thinking_display
-                            == crate::config::ThinkingDisplay::ShowWhileStreaming
-                            && (m.streaming || seg.visible));
-                    let lines = if expanded {
-                        seg.cached_line_count_expanded.unwrap_or(0) as usize
-                    } else {
-                        seg.cached_line_count_collapsed.unwrap_or(0) as usize
+                let t_vis = t.name == "plan"
+                    || match config.tool_display {
+                        crate::config::ToolResultDisplay::Show => t.visible,
+                        crate::config::ToolResultDisplay::ShowWhileStreaming => {
+                            m.streaming || t.visible
+                        }
+                        _ => false,
                     };
-                    let block_top = line_idx;
-                    let block_bot = line_idx + lines; // exclusive
-                    if lines > 0 {
-                        thinking.push(ToggleBlock {
-                            top: block_top as u32,
-                            bottom: block_bot as u32,
-                            msg_idx,
-                            idx: *si,
-                        });
-                    }
-                    line_idx += lines;
-                    line_idx += 1; // trailing blank
-                    has_any_line = true;
-                    prev_line_was_blank = true;
+                let lines = if t_vis {
+                    t.cached_line_count_visible.unwrap_or(0) as usize
+                } else {
+                    t.cached_line_count_collapsed.unwrap_or(0) as usize
+                };
+                if lines > 0 && t.name != "plan" {
+                    tool.push(ToggleBlock {
+                        top: line_idx as u32,
+                        bottom: line_idx as u32 + lines as u32,
+                        msg_idx,
+                        idx: ti,
+                    });
                 }
-                WalkItem::Tool(ti) => {
-                    let t = &m.tool_results[*ti];
-                    let t_vis = t.name == "plan"
-                        || match config.tool_display {
-                            crate::config::ToolResultDisplay::Show => t.visible,
-                            crate::config::ToolResultDisplay::ShowWhileStreaming => {
-                                m.streaming || t.visible
-                            }
-                            _ => false,
-                        };
-                    let lines = if t_vis {
-                        t.cached_line_count_visible.unwrap_or(0) as usize
-                    } else {
-                        t.cached_line_count_collapsed.unwrap_or(0) as usize
-                    };
-                    let block_top = line_idx;
-                    let block_bot = line_idx + lines; // exclusive
-                    if lines > 0 && t.name != "plan" {
-                        tool.push(ToggleBlock {
-                            top: block_top as u32,
-                            bottom: block_bot as u32,
-                            msg_idx,
-                            idx: *ti,
-                        });
-                    }
-                    line_idx += lines;
-                    line_idx += 1; // trailing blank
-                    has_any_line = true;
-                    prev_line_was_blank = true;
-                }
+                line_idx += lines;
+                line_idx += 1; // trailing blank
             }
-        }
-
-        // Render remaining content after last item.
-        if cursor < raw.len() {
-            let seg_text = crate::session::render::strip_legacy_markers(&raw[cursor..]);
-            let seg_lines = crate::session::render::count_md_segment(&seg_text, width_u16 as usize);
-            line_idx += seg_lines as usize;
         }
 
         // User messages: 2 background-fill lines (one above content,
@@ -1374,6 +1343,42 @@ mod tests {
             thinking[0].top > 0,
             "thinking block should be offset past leading content"
         );
+    }
+
+    /// The toggle walk's spans must come from the authoritative
+    /// `MessageLayout` (produced by `build_message_lines`) once a
+    /// message has been rendered, so click regions always match the
+    /// rendered boxes — never a parallel hand-rolled walk.
+    #[test]
+    fn toggle_spans_read_from_layout_after_render() {
+        let cfg = Config::default();
+        let mut s = Session::default();
+        s.push(Message::new(Role::User, "run build"));
+        let mut asst = Message::new(Role::Assistant, "first part\n\nsecond part");
+        asst.display_cursor = usize::MAX;
+        asst.thinking_visible = true;
+        asst.thinking_segments
+            .push(thinking_seg("first part\n\n".len(), "reasoning"));
+        asst.tool_results.push(shell_tool());
+        s.push(asst);
+
+        let width = 80u16;
+        // Render the assistant message so its layout enters the LRU.
+        let _ = crate::session::render::build_message_lines(&s, 1, width as usize);
+
+        let (thinking, tool, _) = collect_toggle_blocks(&s, &cfg, width, 0, usize::MAX);
+        assert_eq!(thinking.len(), 1);
+        assert_eq!(tool.len(), 1);
+
+        // The spans must match the layout's message-relative spans,
+        // offset by the user message's rendered height + 1 gap.
+        let layout = crate::session::render::cached_layout_for(&s, 1, width)
+            .expect("assistant layout cached after render");
+        let user_lines = crate::session::render::build_message_lines(&s, 0, width as usize).len();
+        let gap = 1;
+        let (l_top, l_bottom, _) = layout.thinking_spans[0];
+        assert_eq!(thinking[0].top, (user_lines + gap) as u32 + l_top);
+        assert_eq!(thinking[0].bottom, (user_lines + gap) as u32 + l_bottom);
     }
 
     #[test]

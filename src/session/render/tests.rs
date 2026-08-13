@@ -3104,3 +3104,135 @@ mod multi_message_viewport_diagnostic {
         }
     }
 }
+
+mod message_layout_invariants {
+    //! The single-source-of-truth guarantees for `MessageLayout`:
+    //! because `compute_total_lines` (fallback), `build_lines_viewport`
+    //! and the toggle-row walk all read the same layout that
+    //! `build_message_lines` produces, the bottom of a message can
+    //! never be truncated and the toggle click regions always match
+    //! the rendered boxes.
+
+    use super::*;
+    use crate::session::{Message, Role, Session, ToolResultBlock};
+
+    fn shell_tool() -> ToolResultBlock {
+        ToolResultBlock {
+            name: "shell_command".to_string(),
+            title: "$ node build.js".to_string(),
+            content: serde_json::json!({
+                "ok": true,
+                "result": "exit_code: 0\nstdout:\nBuild succeeded!\n\nstderr:\n"
+            })
+            .to_string(),
+            metadata: String::new(),
+            content_offset: 0,
+            visible: true,
+            running: false,
+            failed: false,
+            call_id: String::new(),
+            pruned: false,
+            streaming_input: String::new(),
+            cached_line_count_visible: None,
+            cached_line_count_collapsed: None,
+            started_at: None,
+        }
+    }
+
+    /// The cached layout's `total_lines` must equal the rendered line
+    /// count, and the layout's spans must point at real row ranges
+    /// (top<bottom<=total_lines) inside the rendered output.
+    #[test]
+    fn layout_total_and_spans_match_rendered_boxes() {
+        let mut s = Session::default();
+        s.push(Message::new(Role::User, "run the build"));
+        let mut asst = Message::new(Role::Assistant, "first part\n\nsecond part");
+        asst.display_cursor = usize::MAX;
+        asst.thinking_segments = vec![crate::session::ThinkingSegment {
+            offset: "first part\n\n".len(),
+            content: "let me reason".to_string(),
+            closed: false,
+            tool_results_len_at_open: 0,
+            cached_line_count_expanded: None,
+            cached_line_count_collapsed: None,
+            started_at: None,
+            ended_at: None,
+            visible: true,
+        }];
+        asst.tool_results.push(shell_tool());
+        s.push(asst);
+
+        let width: usize = 80;
+        // Render the assistant message to populate its layout in the LRU.
+        let rendered = build_message_lines(&s, 1, width);
+        let layout = crate::session::render::cached_layout_for(&s, 1, width as u16)
+            .expect("assistant message should have a cached layout after render");
+
+        assert_eq!(
+            layout.total_lines as usize,
+            rendered.len(),
+            "layout.total_lines must equal the rendered line count"
+        );
+        assert!(
+            layout.total_lines as usize <= rendered.len(),
+            "layout spans must not extend past the rendered output"
+        );
+        // Exactly one thinking box and one tool box.
+        assert_eq!(layout.thinking_spans.len(), 1);
+        assert_eq!(layout.tool_spans.len(), 1);
+        for &(top, bottom, _) in layout.thinking_spans.iter().chain(layout.tool_spans.iter()) {
+            assert!(top < bottom, "span must be non-empty: ({top},{bottom})");
+            assert!(
+                bottom <= layout.total_lines,
+                "span ({top},{bottom}) exceeds total_lines"
+            );
+        }
+        // The thinking box must render after the leading "first part".
+        let (t_top, _t_bottom, _) = layout.thinking_spans[0];
+        assert!(t_top > 0, "thinking box should follow leading content");
+    }
+
+    /// The viewport render must never drop the last line of a message
+    /// even when the estimated total (pre-layout fallback) disagrees
+    /// with the real render. We force the divergence by rendering the
+    /// message once (popping a layout whose total differs from the
+    /// estimate `compute_total_lines` would produce for a collapsed
+    /// vs expanded block), then slicing the very bottom.
+    #[test]
+    fn viewport_never_truncates_bottom_of_message() {
+        let mut s = Session::default();
+        s.push(Message::new(Role::User, "go"));
+        let mut asst = Message::new(Role::Assistant, "head");
+        asst.display_cursor = usize::MAX;
+        asst.tool_results.push(shell_tool());
+        s.push(asst);
+
+        let width: usize = 80;
+        let total = s.count_all_lines_with_width(width) as usize;
+        let rendered = build_message_lines(&s, 1, width);
+        let asst_lines = rendered.len();
+        let user_lines = build_message_lines(&s, 0, width).len();
+        // Viewport covering exactly the last message's content plus gap.
+        let start = total.saturating_sub(asst_lines + user_lines + 1);
+        let end = total;
+        let visible = build_lines_viewport(&s, width, start as u32, end as u32);
+
+        // The last non-blank line of the whole session must survive the
+        // viewport slice (it is the tool block's bottom border).
+        let full = build_lines_viewport(&s, width, 0, total as u32);
+        let last_full = full
+            .iter()
+            .rev()
+            .find(|l| !l.spans.iter().all(|s| s.content.is_empty()))
+            .expect("session has content");
+        let last_visible = visible
+            .iter()
+            .rev()
+            .find(|l| !l.spans.iter().all(|s| s.content.is_empty()))
+            .expect("viewport has content");
+        assert_eq!(
+            last_visible, last_full,
+            "bottom line of the session must not be truncated by the viewport slice"
+        );
+    }
+}

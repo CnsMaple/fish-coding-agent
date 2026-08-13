@@ -482,9 +482,8 @@ pub struct Session {
     /// by the viewport-aware render path so we only re-parse Markdown
     /// for messages that actually intersect the visible window.
     #[serde(skip)]
-    pub message_lines_cache: std::sync::Mutex<
-        crate::session::lru::BoundedCache<crate::session::render::CachedMessageLines>,
-    >,
+    pub message_lines_cache:
+        std::sync::Mutex<crate::session::lru::BoundedCache<crate::session::render::MessageLayout>>,
     /// Cached total rendered line count across all messages. Width
     /// dependent — the cache is keyed by the viewport width and the
     /// per-block visibility state in `display` / `tool_display`. We
@@ -1242,12 +1241,48 @@ impl Session {
         let mut offsets = Vec::with_capacity(self.messages.len() + 1);
         offsets.push(0); // line_offsets[0] = 0
 
-        for m in self.messages.iter_mut() {
-            // Fast path: use `cached_content_line_count` (populated by
-            // `render_cached_content_lines` or from session load) when
-            // valid, otherwise compute and cache lazily. No LRU warmup
-            // is needed here — `build_lines_viewport` will warm the LRU
-            // on demand only for viewport-visible messages.
+        // First pass: gather authoritative per-message totals from the
+        // render LRU. Any message already rendered this frame (i.e. in
+        // the viewport) has a cached `MessageLayout` whose `total_lines`
+        // is exactly what `build_message_lines` produced — the single
+        // source of truth. Messages not yet rendered fall back to the
+        // estimation below (which matches the real render for the vast
+        // majority of shapes); the next frame self-corrects once render
+        // warms their layout.
+        let mut layout_totals: Vec<Option<u32>> = Vec::with_capacity(self.messages.len());
+        {
+            let lru = self.message_lines_cache.lock().unwrap();
+            for (msg_idx, m) in self.messages.iter().enumerate() {
+                if let Some(l) = lru.get(&msg_idx) {
+                    if l.width == width
+                        && l.content_version == m.content_version
+                        && l.thinking_version == m.thinking_version
+                        && l.display_cursor == m.display_cursor
+                        && l.content_len == m.content.len()
+                        && !m.tool_results.iter().any(|t| t.running)
+                    {
+                        layout_totals.push(Some(l.total_lines));
+                        continue;
+                    }
+                }
+                layout_totals.push(None);
+            }
+        }
+
+        for (msg_idx, m) in self.messages.iter_mut().enumerate() {
+            // Authoritative fast path: the message was rendered this
+            // frame and its layout is cached. Use its exact line count.
+            if let Some(total) = layout_totals[msg_idx] {
+                n += total;
+                n += 1; // inter-message gap
+                offsets.push(n);
+                continue;
+            }
+
+            // Fallback estimation (matches build_message_lines for the
+            // common shapes). Uses `cached_content_line_count` (populated
+            // by `render_cached_content_lines` or from session load) when
+            // valid, otherwise computes and caches lazily.
             let content_lines = render_cached_content_lines(m, width);
             n += content_lines;
 
