@@ -6,11 +6,27 @@ pub(super) async fn read_file(args: &str, cwd: &Path) -> Result<String> {
     let text = tokio::fs::read_to_string(&path).await?;
     let selected = select_lines(&text, args.start_line, args.end_line)?;
     let trimmed = selected.trim_end().to_string();
+    // Prefix each output line with its 1-based line number so the
+    // model can pin edits precisely. The numbering starts from
+    // `start_line` (default 1), keeping numbers aligned with the real
+    // file lines even when only a slice is requested.
+    let base = args.start_line.unwrap_or(1);
     if trimmed.len() > READ_OUTPUT_LIMIT {
-        Ok(truncate_read_output(&trimmed))
+        Ok(truncate_read_output(&number_lines(&trimmed, base)))
     } else {
-        Ok(trimmed)
+        Ok(number_lines(&trimmed, base))
     }
+}
+
+/// Prefix each line with its right-aligned line number, starting the
+/// counter at `base`. The trailing empty line from a final newline is
+/// dropped by `.lines()`.
+pub(super) fn number_lines(text: &str, base: usize) -> String {
+    text.lines()
+        .enumerate()
+        .map(|(i, line)| format!("{base:>6}\t{line}", base = base + i))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 pub(super) async fn write_file(args: &str, cwd: &Path) -> Result<String> {
