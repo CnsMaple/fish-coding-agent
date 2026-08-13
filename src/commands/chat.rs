@@ -60,7 +60,7 @@ pub fn send_message(app: &mut App, user_msg: Message) {
         app.notify(ToastLevel::Fail, e.clone());
         app.session.push(Message::new(
             Role::System,
-            format!("[config error] {e} - open /settings to fix"),
+            format!("[config error] {e} - open settings (Ctrl+P → settings) to fix"),
         ));
         if !app
             .function
@@ -94,7 +94,7 @@ pub fn send_message(app: &mut App, user_msg: Message) {
                 .unwrap_or_default();
             app.session.push(Message::new(
                 Role::System,
-                format!("[no api key for {active_id}: set it via /settings or env {env_name}]"),
+                format!("[no api key for {active_id}: set it in settings (Ctrl+P → settings) or env {env_name}]"),
             ));
             app.notify(ToastLevel::Fail, format!("missing api key for {active_id}"));
             return;

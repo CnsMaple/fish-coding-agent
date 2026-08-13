@@ -125,11 +125,19 @@ pub(super) fn handle_paste_preview_key(
                 insert_paste_block(text.clone(), app, false);
             }
             close_active_function_tab(app);
+            // Pasting is an explicit finish action: focus must return to
+            // the input box even when other tabs (e.g. Todo) keep the
+            // panel visible. `maybe_hide_panel` only restores focus when
+            // the panel fully disappears, so re-focus here explicitly.
+            app.focus_target = crate::function::FocusTarget::Input;
             true
         }
         KeyCode::Esc => {
             // Cancel: close the tab without pasting.
             close_active_function_tab(app);
+            // Cancel is also a return-to-input action; don't leave focus
+            // stranded on whatever tab remains visible.
+            app.focus_target = crate::function::FocusTarget::Input;
             true
         }
         _ => false,

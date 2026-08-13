@@ -1471,7 +1471,7 @@ pub struct ProviderPickerEntry {
     pub display: String,
 }
 
-/// First step of the `/model` flow: pick a configured provider entry.
+/// First step of the model picker flow: pick a configured provider entry.
 /// On confirmation, the active tab is replaced with a `ModelPickerState`
 /// for the selected entry's kind. Lists one row per configured entry
 /// (not per kind) so the user can disambiguate, e.g., "prod-openai" vs

@@ -6,8 +6,8 @@ impl App {
     ///
     /// We deliberately do NOT auto-open the settings tab here. The user's
     /// "default hidden" preference means we only push a toast (which auto-
-    /// shows the panel because Fail is important). The user opens /settings
-    /// when they are ready to fix things.
+    /// shows the panel because Fail is important). The user opens the
+    /// settings panel (Ctrl+P → settings) when they are ready to fix things.
     ///
     /// Three cases:
     /// 1. All entries validate. -> No toast.

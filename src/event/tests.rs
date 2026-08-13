@@ -445,7 +445,7 @@ async fn dispatch_provider_picker_enter_replaces_with_model_picker() {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     let mut app = make_app();
-    // Default Config ships with two providers; /model opens the
+    // Default Config ships with two providers; the model picker opens the
     // picker step.
     crate::commands::open_model_picker(&mut app);
     assert!(matches!(
@@ -531,7 +531,7 @@ async fn dispatch_model_picker_esc_returns_to_provider_picker() {
 
 #[test]
 fn commit_model_closes_provider_picker_behind_it() {
-    // Committing a model in the /model flow must close the
+    // Committing a model in the model flow must close the
     // ProviderPicker too, otherwise the user lands on the
     // provider list and has to Esc a second time.
     use crate::config::{make_id, ProviderKind, ProviderMode};
@@ -754,7 +754,7 @@ fn commit_model_with_empty_function_panel_does_not_panic() {
 
 #[test]
 fn open_settings_pushes_fresh_tab_each_invocation() {
-    // Each /settings invocation must open a brand-new tab with a fresh
+    // Each settings invocation must open a brand-new tab with a fresh
     // state (TopLevel / cursor 0 / no form_error). Old tabs are kept
     // (the user closes them with Esc), so the tab list grows.
     use crate::function::SettingsLevel;
@@ -1066,7 +1066,7 @@ fn notifications_push_coalesces_consecutive_duplicates() {
 fn enter_action_matrix_matches_labels() {
     // Pins down the contract documented in the EnterBehavior settings
     // labels. If any of these four cases flip, the on-screen behavior
-    // no longer matches what the user reads in /settings.
+    // no longer matches what the user reads in the settings panel.
     use super::{enter_action, EnterAction};
     use crate::config::EnterBehavior;
 
@@ -1289,25 +1289,20 @@ fn settings_form_save_uses_edited_key() {
 }
 
 #[test]
-fn esc_after_open_model_picker_with_no_provider_does_not_panic() {
-    // Scenario reported by the user:
-    //   1. App has no active provider AND no configured entries.
-    //   2. User types /model and presses Enter.
-    //   3. open_model_picker pushes a toast and falls through to
-    //      open_settings (which pushes a fresh Settings tab).
-    //   4. User presses Esc to dismiss the settings.
-    // None of these steps may panic, even when the active provider is
-    // missing or the entries map is sparse.
+fn submit_with_no_provider_does_not_panic_and_opens_settings() {
+    // Scenario: App has no active provider AND no configured entries.
+    // Submitting any prompt must not panic: `send_chat` detects the
+    // missing provider, surfaces a toast, and opens the settings panel
+    // so the user can configure one.
     let mut app = make_app();
     app.config.active = None;
-    // The default Config ships with two pre-configured providers, so
-    // the new two-step /model flow would show a ProviderPicker here.
-    // To exercise the "no provider at all" fallback we also have to
-    // clear the entries map.
+    // Default Config ships with two pre-configured providers, so we
+    // also have to clear the entries map to exercise the "no provider
+    // at all" fallback.
     app.config.entries.clear();
 
-    app.input.buffer = "/model".to_string();
-    app.input.cursor = 6;
+    app.input.buffer = "hello".to_string();
+    app.input.cursor = 5;
     app.sync_completion();
     submit_input(&mut app);
 
@@ -1331,7 +1326,7 @@ fn esc_after_open_model_picker_with_no_provider_does_not_panic() {
 
 #[test]
 fn open_model_picker_jumps_settings_to_provider_list() {
-    // When /model is invoked with no configured provider at all, the
+    // When the model picker is invoked with no configured provider at all, the
     // user is routed into settings. We must skip the redundant
     // TopLevel ("set provider") and land directly on ProviderList so
     // the user can pick a kind/mode or edit an existing entry right
@@ -1396,7 +1391,7 @@ fn open_model_picker_with_single_provider_skips_provider_picker() {
 
 #[test]
 fn open_model_picker_with_multiple_providers_shows_provider_picker() {
-    // The new /model flow is two steps: pick a provider, then a
+    // The new model flow is two steps: pick a provider, then a
     // model. With more than one provider kind configured, the
     // ProviderPicker should appear.
     let mut app = make_app();

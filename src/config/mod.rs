@@ -476,7 +476,7 @@ pub fn default_compact_force_ratio() -> f64 {
 
 /// Default number of output lines visible inside a collapsed tool
 /// block before the Ctrl+O hint is offered. Adjustable via
-/// `/settings → tool preview lines`.
+/// `settings → tool preview lines`.
 pub fn default_tool_preview_lines() -> usize {
     10
 }
@@ -523,7 +523,7 @@ pub struct Config {
     pub theme: crate::theme::ThemeVariant,
     /// When true, the session is auto-compacted (older turns are
     /// summarized) once the cumulative token usage reaches
-    /// `ctx_window - reserved`. Toggleable from `/settings`.
+    /// `ctx_window - reserved`. Toggleable from the settings panel.
     /// Default: `true`. Mirrors opencode's
     /// `Config::compaction.auto` knob.
     #[serde(default = "default_auto_compact")]

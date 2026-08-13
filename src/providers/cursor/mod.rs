@@ -89,7 +89,7 @@ impl Provider for CursorProvider {
     ) -> Result<()> {
         if req.model.trim().is_empty() || req.model.trim().eq_ignore_ascii_case("auto") {
             return Err(ProviderError::Other(
-                "Cursor model is not selected. Open /model and choose a Cursor model after OAuth."
+                "Cursor model is not selected. Open the model picker (Ctrl+P → model) and choose a Cursor model after OAuth."
                     .to_string(),
             )
             .into());

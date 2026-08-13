@@ -50,7 +50,7 @@ pub struct InputState {
     /// (Down) instead of being cleared, so an unsent draft survives a
     /// history round-trip.
     pub history_draft: String,
-    /// Whether we are actively editing a model id in /model picker.
+    /// Whether we are actively editing a model id in the model picker.
     pub busy_hint: Option<String>,
     /// Active text selection within the buffer (byte indices, end exclusive).
     /// None means no selection; the tuple is always stored as (start, end) with start <= end.
@@ -981,8 +981,8 @@ pub fn sidebar_tab_name(t: &SidebarTab) -> &'static str {
 mod tests {
     /// A prefix match must outrank a non-prefix subsequence match even
     /// when both have the same gap score. The motivating bug: typing
-    /// `/tool` ranked `/skill:ecommerce-rpa-toolkit` (contiguous
-    /// substring "tool" -> gap 0) ahead of the literal `/tool` command
+    /// `tool` ranked `ecommerce-rpa-toolkit` (contiguous
+    /// substring "tool" -> gap 0) ahead of the literal `tool` command
     /// because the alphabetical tiebreak put "skill" before "tool".
     #[test]
     fn prefix_match_outranks_same_score_subsequence() {
@@ -1000,12 +1000,12 @@ mod tests {
         assert!(!ecomm_prefix);
 
         // Simulate the sort key tuple (prefix_match desc, score asc,
-        // alpha asc): true (1) > false (0), so /tool ranks first.
-        let a = (tool_prefix, tool_score, "/tool".to_string());
+        // alpha asc): true (1) > false (0), so `tool` ranks first.
+        let a = (tool_prefix, tool_score, "tool".to_string());
         let b = (
             ecomm_prefix,
             ecomm_score,
-            "/skill:ecommerce-rpa-toolkit".to_string(),
+            "ecommerce-rpa-toolkit".to_string(),
         );
         assert!(
             b.0.cmp(&a.0) == std::cmp::Ordering::Less,

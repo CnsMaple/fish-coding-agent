@@ -304,10 +304,10 @@ pub fn open_settings_at(app: &mut App, initial_level: crate::function::SettingsL
 }
 
 pub fn open_model_picker(app: &mut App) {
-    // /model is now a two-step flow: first pick a configured provider
+    // The model picker is a two-step flow: first pick a configured provider
     // entry (by name, not just by kind), then pick a model for that
     // entry's kind. If the user has only one entry we skip straight to
-    // the model list. If they have none, route to /settings like
+    // the model list. If they have none, route to the settings panel like
     // before.
 
     // Count configured entries (one per row in the picker). The picker
@@ -317,8 +317,8 @@ pub fn open_model_picker(app: &mut App) {
     let entry_count = app.config.entries.len();
 
     // If a ModelPicker is already open, just focus it — the user is
-    // continuing from where they left off. They can Esc out and re-run
-    // /model if they want to switch providers.
+    // continuing from where they left off. They can Esc out and reopen
+    // it (Ctrl+P → model) if they want to switch providers.
     if let Some(idx) = app
         .function
         .tabs
@@ -335,7 +335,7 @@ pub fn open_model_picker(app: &mut App) {
         0 => {
             app.notify(
                 ToastLevel::Warn,
-                "no active provider; configure one via /settings",
+                "no active provider; configure one in settings",
             );
             // Land on ProviderList directly (skip TopLevel's "set provider"
             // step) so the user can pick a kind/mode right away.
@@ -358,7 +358,7 @@ pub fn open_model_picker(app: &mut App) {
 }
 
 /// Open (or focus) a ModelPicker tab for a specific provider kind.
-/// Used by the two-step /model flow after the user has chosen a
+/// Used by the two-step model flow after the user has chosen a
 /// provider, and also directly when there's only one provider
 /// configured (so the chooser step is skipped).
 pub fn open_model_picker_for_kind(app: &mut App, provider: crate::config::ProviderKind) {

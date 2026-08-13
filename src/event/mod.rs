@@ -248,7 +248,7 @@ where
     app.refresh_mcp_summary();
 
     // Eagerly fetch models.dev data in the background so the
-    // provider list in /settings is populated when the user opens it.
+    // provider list in the settings panel is populated when the user opens it.
     {
         let model_data_path = app
             .model_cache_path

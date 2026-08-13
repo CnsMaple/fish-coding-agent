@@ -107,7 +107,7 @@ pub fn loop_tool_specs(kind: crate::config::ProviderKind) -> Vec<serde_json::Val
 }
 
 /// Return the names of all built-in tools (not MCP). Used by the
-/// `/tool` picker to populate its checkbox list.
+/// tool picker (Ctrl+P → tool) to populate its checkbox list.
 pub fn all_tool_names() -> Vec<String> {
     tool_defs()
         .into_iter()

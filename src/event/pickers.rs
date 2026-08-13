@@ -287,6 +287,7 @@ pub(super) fn handle_notifications_key(k: crossterm::event::KeyEvent, app: &mut 
                 true
             } else {
                 close_active_function_tab(app);
+                app.focus_target = crate::function::FocusTarget::Input;
                 true
             }
         }
@@ -386,6 +387,7 @@ pub(super) async fn handle_plan_key(
         }
         KeyCode::Esc => {
             close_active_function_tab(app);
+            app.focus_target = crate::function::FocusTarget::Input;
             true
         }
 
@@ -618,12 +620,14 @@ pub(super) fn handle_session_rename_key(
     match k.code {
         KeyCode::Esc => {
             close_active_function_tab(app);
+            app.focus_target = crate::function::FocusTarget::Input;
             app.set_mode(crate::function::AppMode::Yolo);
             true
         }
         KeyCode::Enter => {
             app.rename_session(state.target_id.clone(), state.title.clone());
             close_active_function_tab(app);
+            app.focus_target = crate::function::FocusTarget::Input;
             true
         }
         KeyCode::Left => {
@@ -673,7 +677,7 @@ pub(super) fn handle_session_rename_key(
         _ => false,
     }
 }
-/// First step of the `/model` flow: pick a provider. On Enter, a
+/// First step of the model picker flow: pick a provider. On Enter, a
 /// `ModelPicker` tab for the selected entry's kind is PUSHED on top of
 /// the ProviderPicker — the ProviderPicker stays behind so the user
 /// can press Esc on the ModelPicker to return to provider selection
@@ -939,6 +943,9 @@ pub(super) fn commit_timeline_jump(app: &mut App, state: &crate::function::Timel
     app.session
         .jump_to_message(msg_idx, tool_idx, viewport_h, viewport_w);
     close_active_function_tab(app);
+    // Timeline jump returns the user to chat navigation, so hand
+    // focus back to the input even when other tabs remain open.
+    app.focus_target = crate::function::FocusTarget::Input;
     let label = if tool_idx.is_some() {
         "jumped to tool call"
     } else {
@@ -1224,6 +1231,7 @@ pub(super) fn handle_settings_back(app: &mut App, state: &mut crate::function::S
             } else {
                 // close the settings tab entirely
                 close_active_function_tab(app);
+                app.focus_target = crate::function::FocusTarget::Input;
             }
         }
     }
@@ -2110,7 +2118,7 @@ pub fn commit_model_with_entry(
 
     // 4. Close the picker tab.
     close_active_function_tab(app);
-    // 4b. If the now-active tab is a ProviderPicker (the /model flow's
+    // 4b. If the now-active tab is a ProviderPicker (the model flow's
     // first step) the user has finished the flow — close it too,
     // otherwise the panel would still be open and the user would
     // have to Esc a second time to exit.
@@ -2187,6 +2195,7 @@ pub(super) fn handle_tool_picker_key(
             app.sync_disabled_tools();
             let n = app.disabled_tools.len();
             close_active_function_tab(app);
+            app.focus_target = crate::function::FocusTarget::Input;
             if n == 0 {
                 app.notify(ToastLevel::Ok, "all tools enabled");
             } else {
@@ -2196,6 +2205,7 @@ pub(super) fn handle_tool_picker_key(
         }
         KeyCode::Esc => {
             close_active_function_tab(app);
+            app.focus_target = crate::function::FocusTarget::Input;
             true
         }
         KeyCode::Char(c) => {

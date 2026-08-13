@@ -16,7 +16,7 @@ mod tests;
 pub use states::*;
 
 /// Global session-scoped set of disabled tools. Populated by the
-/// `/tool` picker; consulted by `tools::tool_specs` so disabled
+/// tool picker (Ctrl+P → tool); consulted by `tools::tool_specs` so disabled
 /// tools don't appear in the LLM's tool list. Cleared on `/new`.
 static DISABLED_TOOLS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
@@ -30,7 +30,7 @@ pub fn disabled_tools_snapshot() -> HashSet<String> {
     disabled_tools_lock().lock().unwrap().clone()
 }
 
-/// Replace the global disabled-tools set. Called when the `/tool`
+/// Replace the global disabled-tools set. Called when the tool picker
 /// picker toggles a tool, and when the session is reset.
 pub fn set_disabled_tools(set: HashSet<String>) {
     *disabled_tools_lock().lock().unwrap() = set;
@@ -95,8 +95,8 @@ pub struct App {
     /// recompute.
     pub mcp_tools_dirty: bool,
 
-    /// Tools disabled for the current session+mode via `/tool`.
-    /// Reset on `/new` or process restart. Tool names not in this
+    /// Tools disabled for the current session+mode via the tool picker.
+    /// Reset on a new session or process restart. Tool names not in this
     /// set are enabled. The set is consulted by `tools::tool_specs`
     /// so disabled tools don't appear in the LLM's tool list.
     pub disabled_tools: std::collections::HashSet<String>,
@@ -1075,8 +1075,11 @@ impl App {
         // Only show the panel when there is a Plan tab to display,
         // otherwise the user would see an empty bordered box even
         // when other tabs (e.g. Notifications) exist.
+        // Alt+P is a read-only toggle: the panel becomes visible but
+        // focus NEVER moves off the input, so the user can keep typing
+        // while glancing at the plan (mirrors `open_plan`).
         if has_plan_tab {
-            self.show_panel();
+            self.function_visible = true;
             self.acknowledge_panel();
         }
     }
