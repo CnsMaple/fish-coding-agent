@@ -2072,13 +2072,6 @@ pub struct PlanState {
     pub title: String,
     pub content: String,
     pub approved: Option<bool>,
-    /// Absolute path of the file the plan was written to. `None`
-    /// until the user explicitly saves the plan with the `S` key.
-    pub path: Option<std::path::PathBuf>,
-    /// `true` when the plan has unsaved changes — i.e. it has not
-    /// been persisted to disk yet. The tab is rendered with a "press
-    /// S to save" hint while this is set.
-    pub dirty: bool,
 }
 
 impl PlanState {
@@ -2087,15 +2080,7 @@ impl PlanState {
             title,
             content,
             approved: None,
-            path: None,
-            dirty: true,
         }
-    }
-
-    pub fn with_path(mut self, path: std::path::PathBuf) -> Self {
-        self.path = Some(path);
-        self.dirty = false;
-        self
     }
 }
 

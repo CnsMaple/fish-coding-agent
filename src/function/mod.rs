@@ -1116,36 +1116,6 @@ impl App {
         self.acknowledge_panel();
     }
 
-    /// Persist the active plan tab to `<config_dir>/plans/<ts>-<slug>.md`.
-    /// Sets `dirty = false` and stores the resulting path on the state.
-    /// Returns true on success.
-    pub fn save_active_plan(&mut self) -> bool {
-        let Some(idx) = self
-            .function
-            .tabs
-            .iter()
-            .position(|t| matches!(t, SidebarTab::Plan(_)))
-        else {
-            return false;
-        };
-        let title = match &self.function.tabs[idx] {
-            SidebarTab::Plan(s) => s.title.clone(),
-            _ => unreachable!(),
-        };
-        let content = match &self.function.tabs[idx] {
-            SidebarTab::Plan(s) => s.content.clone(),
-            _ => unreachable!(),
-        };
-        let Some(path) = self.persist_plan(&title, &content) else {
-            return false;
-        };
-        if let Some(SidebarTab::Plan(state)) = self.function.tabs.get_mut(idx) {
-            state.path = Some(path);
-            state.dirty = false;
-        }
-        true
-    }
-
     /// Append an ask question to the accumulated snapshot.
     /// Called when the LLM emits an `ask` tool call.
     pub fn push_ask(&mut self, question: String, options: Vec<String>) {
@@ -1222,69 +1192,6 @@ impl App {
         let mut msg = Message::new(crate::session::Role::Assistant, body);
         msg.line_count = 1;
         self.session.push(msg);
-    }
-
-    /// Write the plan to `<config_dir>/plans/<ts>-<slug>.md`.
-    /// Returns the absolute path on success, or `None` if the file
-    /// could not be written (we still show the plan in the UI — the
-    /// user just won't have a file to refer to).
-    fn persist_plan(&mut self, title: &str, content: &str) -> Option<std::path::PathBuf> {
-        use crate::function::notifications::ToastLevel;
-        let dir = match crate::config::paths::plans_dir() {
-            Ok(d) => d,
-            Err(e) => {
-                self.notify(
-                    ToastLevel::Warn,
-                    format!("plan: could not resolve plans dir: {e}"),
-                );
-                return None;
-            }
-        };
-        if let Err(e) = std::fs::create_dir_all(&dir) {
-            self.notify(
-                ToastLevel::Warn,
-                format!("plan: could not create plans dir: {e}"),
-            );
-            return None;
-        }
-        let ts = chrono::Utc::now().format("%Y%m%d-%H%M%S").to_string();
-        let slug: String = title
-            .chars()
-            .map(|c| {
-                if c.is_ascii_alphanumeric() {
-                    c.to_ascii_lowercase()
-                } else {
-                    '-'
-                }
-            })
-            .collect();
-        let slug = slug.trim_matches('-');
-        let slug = if slug.is_empty() {
-            "plan".to_string()
-        } else {
-            slug.to_string()
-        };
-        let filename = format!("{ts}-{slug}.md");
-        let path = dir.join(filename);
-        let body = format!(
-            "# {}\n\n_Generated at {}_\n\n{}\n",
-            title,
-            chrono::Utc::now().to_rfc3339(),
-            content
-        );
-        match std::fs::write(&path, body) {
-            Ok(()) => {
-                self.notify(
-                    ToastLevel::Info,
-                    format!("plan saved to {}", path.display()),
-                );
-                Some(path)
-            }
-            Err(e) => {
-                self.notify(ToastLevel::Warn, format!("plan: could not write file: {e}"));
-                None
-            }
-        }
     }
 
     /// Mark that the panel was shown by user (Ctrl+N) so we clear pending marker.

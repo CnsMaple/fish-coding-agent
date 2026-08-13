@@ -109,29 +109,16 @@ fn make_test_app() -> App {
 }
 
 #[test]
-fn plan_state_is_dirty_on_open_and_clears_after_save() {
+fn plan_state_is_open_but_not_saved() {
     let mut app = make_test_app();
     app.open_plan("t".to_string(), "body".to_string());
     let state = match app.function.tabs.first().unwrap() {
         SidebarTab::Plan(s) => s.clone(),
         _ => panic!("expected plan tab"),
     };
-    assert!(state.dirty, "open_plan must start dirty");
-    assert!(state.path.is_none(), "open_plan must NOT auto-save");
-
-    // save_active_plan writes to the user's real config dir. We
-    // accept either true (write succeeded) or false (sandbox
-    // blocks disk), but if it returned true the path must be
-    // populated and dirty must be false.
-    let ok = app.save_active_plan();
-    if ok {
-        let state = match app.function.tabs.first().unwrap() {
-            SidebarTab::Plan(s) => s.clone(),
-            _ => panic!(),
-        };
-        assert!(!state.dirty);
-        assert!(state.path.is_some());
-    }
+    assert_eq!(state.title, "t", "open_plan must NOT auto-save");
+    assert_eq!(state.content, "body");
+    assert!(state.approved.is_none());
 }
 
 /// After the AI opens a plan, the panel must be visible (so the user

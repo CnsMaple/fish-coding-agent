@@ -374,17 +374,6 @@ pub(super) async fn handle_plan_key(
             crate::commands::send_chat(app, prompt, Vec::new());
             true
         }
-        KeyCode::Char('s') | KeyCode::Char('S') if k.modifiers.contains(KeyModifiers::ALT) => {
-            if state.dirty {
-                app.save_active_plan();
-            } else {
-                app.notify(
-                    crate::function::notifications::ToastLevel::Info,
-                    "plan already saved",
-                );
-            }
-            true
-        }
         KeyCode::Esc => {
             close_active_function_tab(app);
             app.focus_target = crate::function::FocusTarget::Input;

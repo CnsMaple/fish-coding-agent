@@ -538,11 +538,11 @@ impl TabWidget for crate::function::PlanState {
     }
 
     fn hint(&self) -> &str {
-        " Enter: approve | Alt+R: reject | Alt+S: save | Esc: close "
+        " Enter: approve | Alt+R: reject | Esc: close "
     }
 
     fn content_height(&self, _ctx: &TabCtx) -> usize {
-        3
+        2
     }
     fn render_body(&mut self, area: Rect, buf: &mut Buffer, _ctx: &TabCtx) -> Option<(u16, u16)> {
         if area.height < 1 {
@@ -564,22 +564,6 @@ impl TabWidget for crate::function::PlanState {
             area.width,
         );
         if area.height >= 2 {
-            let saved_line = if self.dirty {
-                Line::from(vec![Span::styled(
-                    "not saved \u{2014} press S to save",
-                    Theme::dim(),
-                )])
-            } else if let Some(p) = &self.path {
-                Line::from(vec![
-                    Span::styled("saved: ", Theme::dim()),
-                    Span::raw(p.display().to_string()),
-                ])
-            } else {
-                Line::from(Span::styled("not saved", Theme::dim()))
-            };
-            buf.set_line(area.x, area.y + 1, &saved_line, area.width);
-        }
-        if area.height >= 3 {
             Paragraph::new(Line::from(Span::styled(
                 "Read the plan in the session. Use the keys below to act on it.",
                 Theme::dim(),
@@ -587,7 +571,7 @@ impl TabWidget for crate::function::PlanState {
             .wrap(Wrap { trim: false })
             .render(
                 Rect {
-                    y: area.y + 2,
+                    y: area.y + 1,
                     ..area
                 },
                 buf,
