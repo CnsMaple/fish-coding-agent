@@ -777,12 +777,9 @@ fn extract_read_lang(title: &str) -> Option<&'static str> {
 /// Returns a static str so the caller can use it as a cache key.
 fn static_ext_lang(ext: &str) -> &'static str {
     // A small lookup for the most common extensions; everything else
-    // falls through to the ext itself which `find_syntax_cached` will
-    // try to match by extension (e.g. "rs", "py", "go", "ts").
-    // The `Box::leak` here is intentional: these are short-lived per
-    // call and the alternative (returning owned String) would force
-    // `highlight_lines` to take `&str` vs `&'static str`.
-    // But we avoid leaks by using a static table instead.
+    // falls back to the ext itself, which the caller then tries to
+    // match against the syntax definitions by name as well. Returns
+    // a `&'static str` so the caller can use it as a cache key.
     match ext.to_ascii_lowercase().as_str() {
         "rs" => "rust",
         "py" => "python",
@@ -1287,10 +1284,11 @@ fn border_with_label_str(width: usize, label: &str) -> String {
 }
 
 /// Format a `Duration` as an incrementing timer string, omitting
-/// zero leading components:
+/// zero leading components and dropping seconds once minutes (or
+/// hours) are present:
 /// - < 60s → `12s`
-/// - < 1h  → `2m12s` (or `2m` for exactly 2 minutes)
-/// - ≥ 1h  → `1h2m3s`
+/// - < 1h  → `2m` (minutes only; seconds are dropped)
+/// - ≥ 1h  → `1h2m` (hours and minutes; seconds are dropped)
 pub(super) fn format_duration(d: std::time::Duration) -> String {
     let total_secs = d.as_secs();
     let h = total_secs / 3600;

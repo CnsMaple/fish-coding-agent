@@ -302,9 +302,9 @@ pub fn list(scope_cwd: Option<&Path>) -> Result<Vec<SessionSummary>> {
         let meta = match read_meta(&session_dir) {
             Some(m) => m,
             None => {
-                // No meta.json yet (legacy session). Build it once from a
-                // header-only scan of session.json, then persist it so
-                // subsequent list() calls stay O(1).
+                // No meta.json yet (legacy session). Derive it from
+                // session.json once, then persist it so subsequent
+                // list() calls stay O(1).
                 match migrate_dir_meta(&session_dir) {
                     Some(m) => m,
                     None => continue,
@@ -336,9 +336,10 @@ fn meta_to_summary(meta: SessionMeta) -> SessionSummary {
 }
 
 /// Build fresh `meta.json` for any session directory that lacks one.
-/// Scans only the header of `session.json` to avoid deserializing the
-/// full message bodies. Returns `None` on any read/parse failure so a
-/// single corrupt session never aborts the whole list.
+/// Deserializes `session.json` fully to derive the metadata, then
+/// persists the small `meta.json` so subsequent `list()` calls never
+/// re-read the heavy session file. Returns `None` on any read/parse
+/// failure so a single corrupt session never aborts the whole list.
 fn migrate_dir_meta(session_dir: &Path) -> Option<SessionMeta> {
     let path = session_dir.join("session.json");
     if !path.exists() {
@@ -351,8 +352,9 @@ fn migrate_dir_meta(session_dir: &Path) -> Option<SessionMeta> {
     Some(meta)
 }
 
-/// Build `meta.json` for a legacy flat session file (`<id>.json` directly
-/// under the sessions dir). Returns `None` on failure.
+/// Build `SessionMeta` for a legacy flat session file (`<id>.json`
+/// directly under the sessions dir) without writing it back (legacy
+/// flat files have no companion meta.json). Returns `None` on failure.
 fn migrate_flat_file(path: &Path) -> Option<SessionMeta> {
     let raw = std::fs::read_to_string(path).ok()?;
     let stored = serde_json::from_str::<StoredSession>(&raw).ok()?;

@@ -343,7 +343,7 @@ pub fn open_model_picker(app: &mut App) {
         }
         1 => {
             // Only one configured entry — skip the chooser and jump
-            // straight to the model list for its kind.
+            // straight to that entry's model list.
             if let Some(id) = app.config.entries.first().map(|e| e.id.clone()) {
                 open_model_picker_for_entry(app, &id);
             }
@@ -359,8 +359,8 @@ pub fn open_model_picker(app: &mut App) {
 
 /// Open (or focus) a ModelPicker tab for a specific provider kind.
 /// Used by the two-step model flow after the user has chosen a
-/// provider, and also directly when there's only one provider
-/// configured (so the chooser step is skipped).
+/// provider. For callers that know the exact configured entry,
+/// prefer `open_model_picker_for_entry` (see its doc).
 pub fn open_model_picker_for_kind(app: &mut App, provider: crate::config::ProviderKind) {
     // If a picker for this exact provider is already open, focus it.
     if let Some(idx) = app
@@ -522,10 +522,9 @@ pub fn open_session_rename(app: &mut App, target_id: Option<String>, title: Stri
     app.acknowledge_panel();
 }
 
-/// System prompt instructing the model about available tools.
-/// Stresses using the structured tool_calls API, and provides a
-/// text-based fallback format for providers that don't support it.
-/// Build a string containing the content of all enabled agents.md files.
+/// Build a string containing the content of all enabled agents.md
+/// files, each prefixed by its own "## User instructions from <path>"
+/// header so the model can tell them apart.
 pub(super) fn build_agents_content(app: &App) -> String {
     let mut out = String::new();
     for (path, &enabled) in &app.config.agents.entries {

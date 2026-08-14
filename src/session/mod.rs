@@ -272,8 +272,10 @@ pub struct Message {
     /// true while a streaming response is still in flight
     pub streaming: bool,
     /// Byte offset into `content` up to which the text has been visually
-    /// revealed.  Advances by a few bytes per frame during streaming so
-    /// that bursts from the API don't all appear at once.
+    /// revealed.  Kept in sync with `content.len()` on every streaming
+    /// append (see `append_to_last`), so all content is immediately
+    /// visible during streaming; non-streaming messages are fully
+    /// visible from construction.
     pub display_cursor: usize,
     /// `Some` when this message was inserted by a `/skill:<name>`
     /// dispatch. Drives the `[skill]` block rendering and tells the
@@ -492,10 +494,10 @@ pub struct Session {
     /// compute on next read".
     #[serde(skip)]
     pub cached_total_lines: Option<(u16, u32)>,
-    /// Bumped every time `display`, `tool_display`, or
-    /// `tool_preview_lines` change. Included in the cached total key
-    /// so switching display modes invalidates the cache even when
-    /// the viewport width stays the same.
+    /// Reserved for future invalidation versioning. Display-mode
+    /// changes are currently handled directly by
+    /// `invalidate_layout_cache` (see `sync_display_mode`), so this
+    /// field is not consulted; kept here to avoid churn.
     #[serde(skip)]
     pub display_version: u64,
     /// Last `(width, total)` observed by the UI render. Used to
@@ -1169,10 +1171,10 @@ impl Session {
         Some(start)
     }
 
-    /// Rough count of rendered lines up to (but not including) `msg_idx`,
-    /// mirroring the same logic used by `build_lines` in `render.rs`.
-    /// Only thinking-mode `Show` counts expanded expanded blocks; `Hide` and
-    /// `ShowWhileStreaming` count collapsed toggles.
+    /// Offset of the document line at the top of the current viewport
+    /// (i.e. `total - (inner_h + scroll)`), where `inner_h` is the
+    /// viewport height minus its frame. `msg_idx` is unused and is
+    /// kept only for signature compatibility.
     pub fn count_lines_before(&mut self, _msg_idx: usize, viewport: u16) -> u32 {
         if self.messages.is_empty() {
             return 0;
@@ -1239,8 +1241,9 @@ impl Session {
     ///   5. For user messages: 2 extra background-fill lines (one
     ///      inserted above content, one pushed below content) so the
     ///      user-bg block visually wraps the message.
-    ///   6. Inter-message gaps and bottom gap are added at the
-    ///      session level (below the loop).
+    ///   6. One inter-message gap line after each message (added
+    ///      inside the loop). The last message's gap doubles as the
+    ///      bottom gap.
     ///
     /// Previously this function (and `build_lines_viewport` /
     /// `count_lines_estimate`) added 1 for a phantom "role prefix" line

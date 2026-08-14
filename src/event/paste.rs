@@ -177,8 +177,6 @@ pub(super) fn infer_image_type(bytes: &[u8]) -> &'static str {
     }
     "image/png"
 }
-/// `quota=true` 表示这是 legacy 逐字符终端（如 conhost），需要在
-/// handle_key 里抑制随后重发的字符，避免输入重复。
 /// Image file extensions that we support loading directly from path.
 const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "bmp"];
 
@@ -244,6 +242,9 @@ pub(super) fn try_insert_image_from_path(text: &str, app: &mut App) -> bool {
     true
 }
 
+/// Insert pasted text as a `[paste N lines]` marker block.
+/// `quota=true` 表示这是 legacy 逐字符终端（如 conhost）的粘贴，需要在
+/// `handle_key` 里抑制随后重发的字符，避免输入重复。
 pub(super) fn insert_paste_block(text: String, app: &mut App, quota: bool) {
     let mut text = normalize_paste_text(&text);
     // Replace tabs with 4 spaces so the paste block renders correctly

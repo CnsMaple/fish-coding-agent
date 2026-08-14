@@ -221,7 +221,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
 
 /// A thinking or tool block's document-line span produced by the
 /// toggle-row walk. `top`/`bottom` are exclusive/inclusive doc lines
-/// (like `Message::line_offsets`), `msg_idx`/`idx` are the message and
+/// (like `Session::line_offsets`), `msg_idx`/`idx` are the message and
 /// segment/tool indices.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ToggleBlock {

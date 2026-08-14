@@ -87,10 +87,13 @@ fn yolo_rules() -> &'static [(&'static str, Action)] {
     ]
 }
 
-/// `plan` agent: read-only exploration plus the `plan` and `ask`
-/// tools. The plan agent must NOT mutate the user's tree (no
-/// `write_file`, no `shell_command`, no `python_command`). This
-/// mirrors opencode's `plan` agent, which sets `edit: "*": "deny"`.
+/// `plan` agent: local read/exploration tools plus the `plan`,
+/// `ask`, `todowrite`, and `skill` tools, and `glob`. The plan agent
+/// must NOT mutate the user's tree (no `write_file`, no
+/// `shell_command`, no `python_command`, no `write`) and does not
+/// hit the network (no `webfetch`/`websearch`), so a plan run can
+/// only inspect the workspace. This mirrors opencode's `plan` agent,
+/// which sets `edit: "*": "deny"`.
 fn plan_rules() -> &'static [(&'static str, Action)] {
     &[
         (tool::READ_FILE, Action::Allow),

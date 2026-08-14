@@ -525,8 +525,6 @@ fn flush_pending_request(app: &mut App) {
 
 /// Flush accumulated pending chat/thinking content to the session
 /// before a render draw or before streaming finishes.
-/// Flush accumulated pending chat/thinking content to the session
-/// before a render draw or before streaming finishes.
 ///
 /// Chat content is always flushed. Thinking content is throttled to
 /// ~200ms to avoid per-frame re-render churn during fast thinking
@@ -566,13 +564,11 @@ fn drain_post_compaction_prompt(app: &mut App) {
     crate::commands::send_chat(app, text, Vec::new());
 }
 
-/// Heuristic: treat text as a paste if it spans multiple lines or is long enough.
-/// Path-like text needs more characters to avoid fragmenting long file paths
-/// that arrive as individual key events from legacy Windows terminals.
-/// Try to aggregate rapid-fire key events into a single batch so
-/// terminal-level buffering doesn't starve the main loop.
-/// IME commits characters in burst-like fashion but does NOT modify the
-/// clipboard, so a clipboard mismatch reliably rules out a paste.
+/// Aggregate rapid-fire key events into a single batch so terminal
+/// buffering doesn't starve the main loop. Collects plain printable
+/// chars (and Enter/Tab), growing the acceptance window as the burst
+/// lengthens so paste-like sequences stay together while a single
+/// keystroke returns almost instantly.
 async fn try_consume_burst(
     first_key: crossterm::event::KeyEvent,
     events: &mut EventStream,

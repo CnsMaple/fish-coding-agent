@@ -40,9 +40,9 @@ pub fn send_chat(app: &mut App, user_text: String, image_parts: Vec<crate::sessi
 }
 
 /// Dispatch a pre-built user message to the active provider. Used by
-/// `/skill:<name>` to send the skill's body (rather than a literal
-/// `[skill]` marker) as the user prompt, while the chat UI still
-/// renders the marker block via `Message::skill_ref`.
+/// `/skill:<name>` to send the skill's body as the user prompt while
+/// the chat UI renders the dedicated `[skill]` block (driven by
+/// `Message::skill_ref`).
 pub fn send_message(app: &mut App, user_msg: Message) {
     if app.inflight.is_some() {
         app.notify(ToastLevel::Warn, MSG_REQUEST_IN_FLIGHT);
