@@ -1283,28 +1283,32 @@ fn border_with_label_str(width: usize, label: &str) -> String {
     )
 }
 
-/// Format a `Duration` as an incrementing timer string, omitting
-/// zero leading components and dropping seconds once minutes (or
-/// hours) are present:
-/// - < 60s → `12s`
-/// - < 1h  → `2m` (minutes only; seconds are dropped)
-/// - ≥ 1h  → `1h2m` (hours and minutes; seconds are dropped)
-pub(super) fn format_duration(d: std::time::Duration) -> String {
+/// Format a `Duration` as a compact timer string. Only non-zero units
+/// are shown, from the most significant non-zero unit down to the
+/// least significant one (zero units are skipped in between), up to
+/// days:
+/// - `2m` / `2m1s` / `1h` / `1h4s` / `1d2h`
+/// - `0s` when the duration is sub-second
+pub(crate) fn format_duration(d: std::time::Duration) -> String {
     let total_secs = d.as_secs();
-    let h = total_secs / 3600;
+    let days = total_secs / 86400;
+    let h = (total_secs % 86400) / 3600;
     let m = (total_secs % 3600) / 60;
     let s = total_secs % 60;
-    let mut parts: Vec<String> = Vec::new();
-    if h > 0 {
-        parts.push(format!("{h}h"));
+    let units = [(days, "d"), (h, "h"), (m, "m"), (s, "s")];
+    let (Some(start), Some(end)) = (
+        units.iter().position(|(v, _)| *v > 0),
+        units.iter().rposition(|(v, _)| *v > 0),
+    ) else {
+        return "0s".to_string();
+    };
+    let mut out = String::new();
+    for (v, label) in &units[start..=end] {
+        if *v > 0 {
+            out.push_str(&format!("{v}{label}"));
+        }
     }
-    if h > 0 || m > 0 {
-        parts.push(format!("{m}m"));
-    }
-    if h == 0 && m == 0 {
-        parts.push(format!("{s}s"));
-    }
-    parts.join("")
+    out
 }
 
 /// Bottom border line with a right-aligned label, mirroring the

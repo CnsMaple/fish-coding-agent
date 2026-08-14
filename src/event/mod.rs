@@ -957,6 +957,7 @@ fn handle_msg(msg: AppMsg, app: &mut App) {
             app.session.finish_streaming();
             app.finalize_initial_title();
             app.save_current_session();
+            app.finalize_last_run_time();
             app.inflight = None;
             app.cancel_state = CancelState::Idle;
             use crate::function::notifications::ToastLevel;
@@ -974,6 +975,7 @@ fn handle_msg(msg: AppMsg, app: &mut App) {
             flush_pending_chat(app, true);
             app.session.finish_streaming();
             app.save_current_session();
+            app.finalize_last_run_time();
             app.inflight = None;
             app.cancel_state = CancelState::Idle;
             use crate::function::notifications::ToastLevel;

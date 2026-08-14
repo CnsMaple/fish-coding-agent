@@ -321,6 +321,7 @@ pub(super) fn submit_direct_tool_input(app: &mut App, raw: &str) -> bool {
             started_at: std::time::Instant::now(),
         });
         app.cancel_state = CancelState::Idle;
+        app.last_run_time = None;
         app.pending_request = Some(crate::function::PendingRequest::Tool(
             crate::function::ToolPending {
                 name: n,

@@ -72,6 +72,7 @@ fn make_app() -> App {
             .expect("stream client"),
         inflight: None,
         cancel_state: CancelState::Idle,
+        last_run_time: None,
         focus_target: crate::function::FocusTarget::Input,
         current_request_seq: 0,
         pending_request: None,

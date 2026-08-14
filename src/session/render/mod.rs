@@ -3,8 +3,8 @@ mod blocks;
 mod tests;
 mod utils;
 
-pub use blocks::{
-    ask_snapshot_line_count, attachment_block_line_count, get_thinking_segments,
+pub(crate) use blocks::{
+    ask_snapshot_line_count, attachment_block_line_count, format_duration, get_thinking_segments,
     skill_block_line_count,
 };
 use blocks::{

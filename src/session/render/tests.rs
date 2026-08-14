@@ -1448,6 +1448,34 @@ mod tests {
         assert_eq!(finished_secs, "7s", "expected 7s, got {finished_secs}");
     }
 
+    /// The compact duration format must omit zero units and keep only
+    /// non-zero ones, from the most significant down to the least
+    /// significant non-zero unit, up to days: `2m`, `2m1s`, `1h`, `1h4s`,
+    /// `1d2h`, and `0s` for sub-second durations.
+    #[test]
+    fn format_duration_omits_zero_units_up_to_days() {
+        use crate::session::render::blocks::format_duration;
+        use std::time::Duration;
+
+        fn dur(h: u64, m: u64, s: u64) -> Duration {
+            Duration::from_secs(h * 3600 + m * 60 + s)
+        }
+
+        assert_eq!(format_duration(Duration::ZERO), "0s");
+        assert_eq!(format_duration(Duration::from_millis(999)), "0s");
+        assert_eq!(format_duration(dur(0, 2, 0)), "2m");
+        assert_eq!(format_duration(dur(0, 2, 1)), "2m1s");
+        assert_eq!(format_duration(dur(0, 0, 59)), "59s");
+        assert_eq!(format_duration(dur(1, 0, 0)), "1h");
+        assert_eq!(format_duration(dur(1, 0, 4)), "1h4s");
+        assert_eq!(format_duration(dur(1, 2, 3)), "1h2m3s");
+        assert_eq!(format_duration(dur(1, 2, 0)), "1h2m");
+        assert_eq!(
+            format_duration(dur(0, 2, 0) + Duration::from_secs(86400)),
+            "1d2m"
+        );
+    }
+
     /// Regression: a tool block anchored mid-line (offset lands in the
     /// middle of a sentence, not at a word boundary or line break) must
     /// be pushed to the next line boundary so the block does not carve

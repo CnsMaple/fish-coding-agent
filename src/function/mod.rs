@@ -87,6 +87,10 @@ pub struct App {
     pub stream_client: reqwest::Client,
     pub inflight: Option<InflightHandle>,
     pub cancel_state: CancelState,
+    /// Wall-clock duration of the most recently completed request,
+    /// shown as a fixed timer in the cwd line once output has finished.
+    /// `None` before the first request completes.
+    pub last_run_time: Option<std::time::Duration>,
 
     /// Set when the MCP tool list has changed since the last
     /// `openai_tool_specs` / `anthropic_tool_specs` call. The
@@ -506,6 +510,7 @@ impl App {
                 .expect("stream client"),
             inflight: None,
             cancel_state: CancelState::default(),
+            last_run_time: None,
             current_request_seq: 0,
             pending_request: None,
             cwd,
@@ -864,6 +869,18 @@ impl App {
             self.title_ai_generated = true;
             self.status.title_ai_generated = true;
         }
+    }
+
+    /// Capture the wall-clock duration of the just-finished request so
+    /// the fixed timer shown in the cwd line (once inflight clears)
+    /// reflects the full run, including any tool-execution pauses.
+    pub fn finalize_last_run_time(&mut self) {
+        let elapsed = self
+            .inflight
+            .as_ref()
+            .map(|h| h.started_at.elapsed())
+            .unwrap_or(std::time::Duration::ZERO);
+        self.last_run_time = Some(elapsed);
     }
 
     fn ensure_prompt_title(&mut self) {

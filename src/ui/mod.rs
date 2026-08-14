@@ -609,14 +609,7 @@ fn render_cwd(area: Rect, buf: &mut Buffer, app: &App) {
             .as_ref()
             .map(|h| h.started_at.elapsed())
             .unwrap_or(std::time::Duration::ZERO);
-        let secs = elapsed.as_secs();
-        let timer = if secs >= 3600 {
-            format!("{}h{}m{}s", secs / 3600, (secs % 3600) / 60, secs % 60)
-        } else if secs >= 60 {
-            format!("{}m{}s", secs / 60, secs % 60)
-        } else {
-            format!("{}s", secs)
-        };
+        let timer = crate::session::render::format_duration(elapsed);
         let hint = match app.cancel_state {
             CancelState::Idle => {
                 format!(
@@ -638,6 +631,21 @@ fn render_cwd(area: Rect, buf: &mut Buffer, app: &App) {
         let truncated = truncate_path(path, path_max);
         let line = Line::from(vec![
             Span::styled(hint, Theme::dim()),
+            Span::styled(sep, Theme::dim()),
+            Span::styled(truncated, Theme::dim()),
+        ]);
+        let p = ratatui::widgets::Paragraph::new(line);
+        p.render(left_area, buf);
+    } else if let Some(dur) = app.last_run_time {
+        // Output finished — show the fixed elapsed timer for the last
+        // completed request on the left, followed by the path.
+        let timer = crate::session::render::format_duration(dur);
+        let prefix = format!("[{timer}]");
+        let sep = " | ";
+        let path_max = left_w.saturating_sub(UnicodeWidthStr::width(prefix.as_str()) + sep.len());
+        let truncated = truncate_path(path, path_max);
+        let line = Line::from(vec![
+            Span::styled(prefix, Theme::dim()),
             Span::styled(sep, Theme::dim()),
             Span::styled(truncated, Theme::dim()),
         ]);

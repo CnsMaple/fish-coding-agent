@@ -279,6 +279,7 @@ pub fn send_message(app: &mut App, user_msg: Message) {
         started_at: std::time::Instant::now(),
     });
     app.cancel_state = crate::function::CancelState::Idle;
+    app.last_run_time = None;
 
     let agents = build_agents_content(app);
     let core_sp = system_prompt(app.active_agent, &agents);
