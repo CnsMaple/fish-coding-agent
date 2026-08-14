@@ -588,10 +588,13 @@ pub(super) fn truncate(mut text: String, limit: usize) -> String {
     if text.len() <= limit {
         return text;
     }
-    text.truncate(limit);
-    while !text.is_char_boundary(text.len()) {
-        text.pop();
+    // `truncate` requires a char boundary, otherwise it panics on
+    // multi-byte UTF-8; step back to the nearest valid boundary.
+    let mut end = limit;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
     }
+    text.truncate(end);
     text.push_str("\n[truncated]");
     text
 }
