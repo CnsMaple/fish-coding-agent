@@ -326,15 +326,32 @@ pub(super) fn build_tool_block_rows(
         vec![]
     } else if tool.name == "plan" || tool.name == "sub_agent" {
         let (output, footer) = tool_display_content(tool);
-        build_markdown_block_rows(
-            &tool.title,
-            &output,
-            &footer,
-            visible,
-            preview_lines,
-            width,
-            bg,
-        )
+        if tool.name == "sub_agent" && tool.running {
+            // While the sub-agent is still running, `content` holds only
+            // plain streaming log lines (`[sub_agent:…] step …`). Render
+            // those as plain text so the intermediate progress isn't
+            // re-interpreted as Markdown. Only the final summary (arrives
+            // once `running` flips false) is Markdown.
+            build_output_block_rows(
+                &tool.title,
+                &output,
+                &footer,
+                visible,
+                preview_lines,
+                width,
+                bg,
+            )
+        } else {
+            build_markdown_block_rows(
+                &tool.title,
+                &output,
+                &footer,
+                visible,
+                preview_lines,
+                width,
+                bg,
+            )
+        }
     } else if tool.name == "todowrite" {
         build_todowrite_rows(&tool.content, visible, preview_lines, width, bg)
     } else {
