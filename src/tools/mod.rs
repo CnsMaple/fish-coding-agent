@@ -58,9 +58,19 @@ $env:PYTHONIOENCODING='utf-8'; ";
 }
 
 /// Return the list of (program, args) invocations to try for running Python
-/// code, in fallback order. On Windows: `python` → `py -3`. On Unix:
+/// code. When `path` is given, it is used directly (with `-c code`); otherwise
+/// a fallback chain applies. On Windows: `python` → `py -3`. On Unix:
 /// `python3` → `python`.
-pub(super) fn python_invocations(code: &str) -> Vec<(String, Vec<String>)> {
+pub(super) fn python_invocations(code: &str, path: Option<&str>) -> Vec<(String, Vec<String>)> {
+    if let Some(p) = path {
+        if !p.trim().is_empty() {
+            #[cfg(windows)]
+            let args = vec!["-X".into(), "utf8".into(), "-c".into(), code.into()];
+            #[cfg(not(windows))]
+            let args = vec!["-c".into(), code.into()];
+            return vec![(p.to_string(), args)];
+        }
+    }
     #[cfg(windows)]
     {
         vec![
@@ -164,6 +174,10 @@ pub(super) struct PythonArgs {
     pub(super) code: String,
     #[serde(default)]
     pub(super) timeout_secs: Option<u64>,
+    /// Optional path to a specific Python interpreter executable. When
+    /// omitted, the global `python` / `python3` fallback chain is used.
+    #[serde(default)]
+    pub(super) python_path: Option<String>,
 }
 
 #[derive(Deserialize)]

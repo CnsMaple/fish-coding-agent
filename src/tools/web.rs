@@ -321,7 +321,7 @@ pub(super) async fn run_python_command(args: &str, cwd: &Path) -> Result<String>
     let timeout_secs = args.timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS);
     let output = tokio::time::timeout(
         Duration::from_secs(timeout_secs),
-        run_python(&args.code, cwd, timeout_secs),
+        run_python(&args.code, args.python_path.as_deref(), cwd, timeout_secs),
     )
     .await
     .map_err(|_| anyhow!("python command timed out after {timeout_secs}s"))??;
@@ -333,8 +333,13 @@ pub(super) async fn run_python_command(args: &str, cwd: &Path) -> Result<String>
     .to_string())
 }
 
-async fn run_python(code: &str, cwd: &Path, timeout_secs: u64) -> Result<String> {
-    let invocations = python_invocations(code);
+async fn run_python(
+    code: &str,
+    python_path: Option<&str>,
+    cwd: &Path,
+    timeout_secs: u64,
+) -> Result<String> {
+    let invocations = python_invocations(code, python_path);
     let mut last_err = None;
     for (program, args) in &invocations {
         match run_shell(program, args, cwd, timeout_secs).await {

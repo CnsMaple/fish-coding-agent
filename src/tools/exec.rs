@@ -194,7 +194,15 @@ pub(super) async fn run_python_streaming(
         return Err(anyhow!("python code is empty"));
     }
     let timeout_secs = py_args.timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS);
-    let output = run_python_streaming_inner(&py_args.code, cwd, call_id, tx, timeout_secs).await?;
+    let output = run_python_streaming_inner(
+        &py_args.code,
+        py_args.python_path.as_deref(),
+        cwd,
+        call_id,
+        tx,
+        timeout_secs,
+    )
+    .await?;
 
     Ok(json!({
         "kind": "python_command_result",
@@ -217,12 +225,13 @@ pub(super) async fn run_shell_streaming(
 
 pub(super) async fn run_python_streaming_inner(
     code: &str,
+    python_path: Option<&str>,
     cwd: &Path,
     call_id: &str,
     tx: UnboundedSender<AppMsg>,
     timeout_secs: u64,
 ) -> Result<String> {
-    let invocations = python_invocations(code);
+    let invocations = python_invocations(code, python_path);
     let mut last_err = None;
     for (program, args) in &invocations {
         match run_shell_streaming_impl(program, args, cwd, call_id, tx.clone(), timeout_secs).await

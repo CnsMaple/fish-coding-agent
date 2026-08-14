@@ -696,9 +696,9 @@ fn system_prompt_core(_agent: crate::permission::Agent, agents_content: &str) ->
 - 避免别名（例如 Windows 上不要用 `ls`，用 `Get-ChildItem`）。
 - 命令超时为 300 秒。
 
-### python_command(code)
+### python_command(code, python_path?)
 
-直接运行 Python 源码。用于计算、文件检查、数据处理，或任何用 Python 比用 shell 更合适的工作。超时为 300 秒。
+直接运行 Python 源码。用于计算、文件检查、数据处理，或任何用 Python 比用 shell 更合适的工作。超时为 300 秒。`python_path` 可指定自定义 Python 解释器路径（如 venv 下的 python），不传时默认使用全局环境的 python/python3。
 
 ### grep(pattern, path?)
 

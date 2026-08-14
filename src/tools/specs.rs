@@ -259,12 +259,13 @@ pub(super) fn tool_defs() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "python_command",
-            description: "Run Python code in the current workspace and return stdout/stderr. Use this for exact file inspection, small scripts, and deterministic local analysis. Default timeout is 300 seconds; pass `timeout_secs` to override.".to_string(),
+            description: "Run Python code in the current workspace and return stdout/stderr. Use this for exact file inspection, small scripts, and deterministic local analysis. Default timeout is 300 seconds; pass `timeout_secs` to override. `python_path` optionally specifies a custom Python interpreter executable; when omitted, the global `python`/`python3` is used.".to_string(),
             schema: json!({
                 "type": "object",
                 "properties": {
                     "code": { "type": "string", "description": "Python source code to execute." },
-                    "timeout_secs": { "type": "integer", "minimum": 1, "default": 300, "description": "Timeout in seconds. Default 300." }
+                    "timeout_secs": { "type": "integer", "minimum": 1, "default": 300, "description": "Timeout in seconds. Default 300." },
+                    "python_path": { "type": "string", "description": "Optional path to a specific Python interpreter executable. Defaults to the global python/python3." }
                 },
                 "required": ["code"],
                 "additionalProperties": false
